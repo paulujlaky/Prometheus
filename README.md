@@ -8,7 +8,7 @@ TypeScript SDK for the Boodlebox semi-public API (`https://box.boodle.ai/api`). 
 bun install
 ```
 
-## Quick start
+## Quick Start
 
 ```ts
 import { BoodleClient, ChatSession } from "./src/index";
