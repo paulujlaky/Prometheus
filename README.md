@@ -1,6 +1,6 @@
 # Boombox
 
-TypeScript SDK for the Boodlebox semi-public API (`https://box.boodle.ai/api`). Bun-friendly; plain `fetch` + `WebSocket`.
+TypeScript SDK for the Boodlebox semi-public API (`https://box.boodle.ai/api`) which promises 'unlimited tokens' 
 
 ## Install
 
