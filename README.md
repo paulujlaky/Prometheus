@@ -101,4 +101,4 @@ interface ChatTurn {
 
 ## Motivation/License
 
-The license is the Unilicense. As far as motivation, this is a simple proof-of-concept and educational project, nothing more. The Boodlebox API is semi-public and not officially supported, so you should use this at your own risk. All of this should be treated as an *example* of what can be done, not what *should* be done.
+The license is the [Unlicense](https://unlicense.org/). As far as motivation, this is a simple proof-of-concept and educational project, nothing more. The Boodlebox API is semi-public and not officially supported, so you should use this at your own risk. All of this should be treated as an *example* of what can be done, not what *should* be done.
