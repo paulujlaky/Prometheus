@@ -3,17 +3,41 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./sdk/index.ts",
+  "types": "./sdk/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./sdk/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "swe:build": "vite build --config vite.config.ts && bun build swe/main.ts --target=node --format=cjs --external electron --outfile swe/dist/main.cjs && bun build swe/preload.ts --target=node --format=cjs --external electron --outfile swe/dist/preload.cjs",
+    "swe": "bun run swe:build && electron swe/dist/main.cjs"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "latest",
-    "typescript": "^5.9.2"
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "electron": "^43.3.0",
+    "shadcn": "^4.16.2",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^5.9.2",
+    "vite": "^8.2.1"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@shadcn/react": "^0.3.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.31.0",
+    "radix-ui": "^1.6.7",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "shiki": "^4.4.2",
+    "streamdown": "^2.5.0",
+    "tailwind-merge": "^3.6.0"
   }
 }
