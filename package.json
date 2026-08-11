@@ -9,7 +9,7 @@
     ".": "./sdk/index.ts"
   },
   "scripts": {
-    "swe:build": "vite build --config vite.config.ts && bun build swe/main.ts --target=node --format=cjs --external electron --outfile swe/dist/main.cjs && bun build swe/preload.ts --target=node --format=cjs --external electron --outfile swe/dist/preload.cjs && bun -e \"import { cpSync, mkdirSync } from 'node:fs'; mkdirSync('swe/dist/assets', { recursive: true }); cpSync('swe/assets/icon.png', 'swe/dist/assets/icon.png')\"",
+    "swe:build": "vite build --config vite.config.ts && bun build swe/main.ts --target=node --format=cjs --external electron --outfile swe/dist/main.cjs && bun build swe/preload.ts --target=node --format=cjs --external electron --outfile swe/dist/preload.cjs && bun build swe/tools/apply_patch.ts --compile --outfile swe/dist/bin/apply_patch && bun -e \"import { cpSync, mkdirSync } from 'node:fs'; mkdirSync('swe/dist/assets', { recursive: true }); cpSync('swe/assets/icon.png', 'swe/dist/assets/icon.png')\"",
     "swe": "bun run swe:build && electron swe/dist/main.cjs"
   },
   "devDependencies": {
@@ -26,6 +26,7 @@
     "vite": "^8.2.1"
   },
   "dependencies": {
+    "@ast-grep/cli": "^0.45.1",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
@@ -39,5 +40,8 @@
     "shiki": "^4.4.2",
     "streamdown": "^2.5.0",
     "tailwind-merge": "^3.6.0"
-  }
+  },
+  "trustedDependencies": [
+    "@ast-grep/cli"
+  ]
 }

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { ChatSession } from "../sdk/index";
 
@@ -46,111 +46,94 @@ export interface AgentOptions {
 
 }
 
-/** CRLF-safe unique-string replace; exits non-zero instead of corrupting the file. */
-const REPLACE_HELPER = `
-import sys
-from pathlib import Path
-
-def die(msg, code=1):
-    print(msg, file=sys.stderr)
-    raise SystemExit(code)
-
-if len(sys.argv) != 2:
-    die("usage: swe-replace <file>  (stdin: <<<<<<< SEARCH / ======= / >>>>>>> REPLACE)")
-
-path = Path(sys.argv[1])
-if not path.is_file():
-    die("not a file: %s" % path)
-
-raw = sys.stdin.read().replace("\\r\\n", "\\n")
-start, mid, end = "<<<<<<< SEARCH\\n", "\\n=======\\n", "\\n>>>>>>> REPLACE"
-if start not in raw or mid not in raw:
-    die("stdin must be:\\n<<<<<<< SEARCH\\n<old>\\n=======\\n<new>\\n>>>>>>> REPLACE")
-
-i = raw.index(start) + len(start)
-j = raw.index(mid, i)
-# end marker optional if stdin ends after new text
-if end in raw[j:]:
-    k = raw.index(end, j)
-    new = raw[j + len(mid):k]
-else:
-    new = raw[j + len(mid):]
-old = raw[i:j]
-
-data = path.read_bytes()
-nl = "\\r\\n" if (b"\\r\\n" in data and data.count(b"\\r\\n") >= data.count(b"\\n") - data.count(b"\\r\\n")) else "\\n"
-text = data.decode("utf-8")
-norm = text.replace("\\r\\n", "\\n")
-count = norm.count(old)
-if count != 1:
-    die("expected exactly 1 match, found %d" % count)
-out = norm.replace(old, new, 1)
-if nl == "\\r\\n":
-    out = out.replace("\\n", "\\r\\n")
-path.write_bytes(out.encode("utf-8"))
-print("replaced 1 span in %s" % path)
-`;
-
-const WRITE_HELPER = `
-import sys
-from pathlib import Path
-
-if len(sys.argv) != 2:
-    print("usage: swe-write <file>  (stdin: full file body)", file=sys.stderr)
-    raise SystemExit(1)
-
-path = Path(sys.argv[1])
-path.parent.mkdir(parents=True, exist_ok=True)
-body = sys.stdin.buffer.read()
-path.write_bytes(body)
-print("wrote %s (%d bytes)" % (path, len(body)))
-`;
-
 const SHELL = process.env.SWE_SHELL ?? "bash";
 
-function prompt(cwd: string, task: string, survey: string): string {
+/** MSYS/Git-Bash path so `export PATH=…` works under bash on Windows. */
+function toBashPath(p: string): string {
+
+  const n = p.replace(/\\/g, "/");
+
+  if (process.platform !== "win32") {
+
+    return n;
+
+  }
+
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(n);
+
+  return drive ? `/${drive[1].toLowerCase()}/${drive[2]}` : n;
+
+}
+
+function prompt(cwd: string, task: string): string {
 
   const win = process.platform === "win32"
-    ? "\nWindows: use forward slashes; swe-replace handles CRLF; prefer `cmd //c npm` if npm shims break.\n"
+    ? "- You are on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n"
     : "";
 
   return [
     "You are a coding agent. Bash you write is executed on the user's machine; stdout/stderr come back. Do not simulate or refuse shell access.",
     "",
-    `Cwd: ${cwd}`,
+    `Current Path: ${cwd}`,
     `Shell: ${SHELL} (${process.platform})`,
     "",
-    "Every reply is EXACTLY this shape (machine-parsed, streamed live):",
+    "Every reply must be EXACTLY this shape (machine-parsed, streamed live):",
     "",
-    "desc: <≤8 word label>",
+    "desc: <an ~8 word label>",
     "```bash",
     "<single focused command>",
     "```",
     "",
-    "Output order is mandatory (the UI shows the step as soon as desc arrives):",
-    "- Token 1 of the reply must start the line `desc: …` — never a preamble, plan, or monologue first.",
-    "- The very next line must open ```bash. Put the command in the fence as soon as you know it.",
-    "- No essays before the fence. Prefer zero notes; if needed, one short line after `desc:` only.",
-    "- Nothing after the closing fence. Only the key `desc:` is a valid label.",
+    "Important: output order is mandatory (the step is shown as soon as desc arrives):",
+    "- Token 1 of the reply must start the line `desc: ...` — nothing else first.",
+    "- Prefer the next line to open ```bash immediately so the command streams early.",
+    "- Thinking out-loud: only between `desc:` and the ```bash fence (the UI hides it under Thinking / Thought for Ns).",
+    "- Again, never put thinking before `desc:` or after the closing fence. Only the key `desc:` is a valid step label.",
     "",
-    "Behaviour:",
-    "- One action per turn: read OR edit OR write. Batch cheap recon (`ls && git status -sb`).",
-    "- Prefer swe-replace / swe-write (unique SEARCH assert; CRLF-safe). Quote paths. Do not rewrite large files from memory.",
-    "  swe-replace 'f.ts' <<'EOF'",
-    "  <<<<<<< SEARCH",
-    "  old",
-    "  =======",
-    "  new",
-    "  >>>>>>> REPLACE",
+    "Editing — use the bundled tools (already on PATH). Do NOT invent ad-hoc Python/sed editors.",
+    "",
+    "1) apply_patch (preferred for create/update/delete) — open Codex-style multi-file patches:",
+    "  apply_patch <<'PATCH'",
+    "  *** Begin Patch",
+    "  *** Update File: path/to/file.ts",
+    "  @@",
+    "   unchanged context line",
+    "  -old line",
+    "  +new line",
+    "  *** Add File: path/to/new.ts",
+    "  +export const x = 1",
+    "  *** Delete File: path/to/gone.ts",
+    "  *** End Patch",
+    "  PATCH",
+    "  Paths must be relative. Context lines start with a space; removals `-`; additions `+`.",
+    "  If apply_patch fails, re-read the file and fix the context — do not fall back to rewriting the whole file from memory.",
+    "",
+    "2) git apply — only for standard unified diffs (git format-patch / diff -u):",
+    "  git apply --whitespace=nowarn -p0 <<'DIFF'",
+    "  --- a/file.ts",
+    "  +++ b/file.ts",
+    "  @@ -1,3 +1,3 @@",
+    "  ...",
+    "  DIFF",
+    "",
+    "3) sg (ast-grep, available to you) — structural search/replace when an AST pattern is clearer than a line patch:",
+    "  sg -p 'console.log($A)' -r 'logger.info($A)' -l ts --update-all",
+    "  Preview first without --update-all when unsure.",
+    "",
+    "4) New file only if apply_patch is awkward — quoted heredoc (no inventing replace scripts):",
+    "  cat > 'path/to/file.ts' <<'EOF'",
+    "  ...entire file...",
     "  EOF",
+    "",
+    "Behaviour Notes:",
+    "- One action per turn: read OR edit OR write. Inspect the tree yourself when needed (`ls`, `git status -sb`, `rg`).",
+    "- Quote paths. Prefer apply_patch over whole-file rewrites.",
     "- No verify parades: at most one build/test after real edits; never re-check the same fact; when done, finish immediately.",
     `- Done: echo "${FINISHED}: <one-line summary>"`,
     `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with rg/grep/tail.`,
     "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y. `cd` persists; env does not.",
-    "- Never `cd` into dist/build output dirs.",
     win,
-    survey ? `Snapshot (already gathered):\n${survey}\n` : "",
-    `Task: ${task}`,
+    `\nTask: ${task}`,
   ].join("\n");
 
 }
@@ -210,22 +193,53 @@ function truncate(text: string): string {
 
 }
 
-/** Runs the command, then reports the shell's final directory so the next block starts where this one ended.*/
-export function wrapCommand(command: string, helpersDir?: string | null): string {
+/**
+ * PATH prefixes for bundled tools (apply_patch, sg/ast-grep), then cwd marker.
+ * `toolBins` should already be bash-friendly paths joined with `:`.
+ */
+export function wrapCommand(command: string, toolBins?: string): string {
 
   // $PWD under Git Bash is an MSYS path (/tmp, /c/...) that Windows cannot spawn into; pwd -W gives the native one
   const pwd = process.platform === "win32" ? '"$(pwd -W 2>/dev/null || pwd)"' : '"$PWD"';
-  const py = process.platform === "win32" ? "python" : "python3";
+  const pathPrefix = toolBins ? `export PATH="${toolBins}:$PATH"\n` : "";
 
-  // functions beat PATH wrappers: no execute bit required, works under Git Bash on Windows
-  const prefix = helpersDir ? [
-    `export SWE_HELPERS="${helpersDir.replaceAll("\\", "/")}"`,
-    `swe-replace() { ${py} "$SWE_HELPERS/swe_replace.py" "$@"; }`,
-    `swe-write() { ${py} "$SWE_HELPERS/swe_write.py" "$@"; }`,
-    "",
-  ].join("\n") : "";
+  return `${pathPrefix}${command}\n__swe_status=$?\nprintf '\\n${CWD_MARKER}%s\\n' ${pwd}\nexit $__swe_status\n`;
 
-  return `${prefix}${command}\n__swe_status=$?\nprintf '\\n${CWD_MARKER}%s\\n' ${pwd}\nexit $__swe_status\n`;
+}
+
+/** Resolve dirs that contain apply_patch + node_modules/.bin (sg). */
+export function resolveToolBinDirs(bundleDir: string): string[] {
+
+  const dirs: string[] = [];
+  const applyDir = join(bundleDir, "bin");
+
+  if (existsSync(applyDir)) {
+
+    dirs.push(applyDir);
+
+  }
+
+  // electron runs swe/dist/main.cjs → project root is ../..
+  const rootCandidates = [
+    resolve(bundleDir, "../.."),
+    resolve(bundleDir, "../../.."),
+    process.cwd(),
+  ];
+
+  for (const root of rootCandidates) {
+
+    const nm = join(root, "node_modules", ".bin");
+
+    if (existsSync(nm)) {
+
+      dirs.push(nm);
+      break;
+
+    }
+
+  }
+
+  return dirs;
 
 }
 
@@ -459,7 +473,7 @@ export class MiniAgent {
   private stopped = false;
 
   private cwd = "";
-  private helpersDir: string | null = null;
+  private toolPath = "";
 
   /** Cumulative estimated tokens of everything sent + received this run (server keeps full history). */
   private tokensUsed = 0;
@@ -467,6 +481,12 @@ export class MiniAgent {
   constructor(options: AgentOptions) {
 
     this.options = options;
+
+    // bun inlines __dirname; resolve tools relative to the running main bundle (swe/dist)
+    const bundleDir = resolve(dirname(process.argv[1] ?? "."));
+    const bins = resolveToolBinDirs(bundleDir).map(toBashPath);
+
+    this.toolPath = bins.join(":");
 
   }
 
@@ -494,63 +514,10 @@ export class MiniAgent {
 
   }
 
-  private installHelpers(): string {
-
-    const dir = mkdtempSync(join(tmpdir(), "swe-helpers-"));
-
-    writeFileSync(join(dir, "swe_replace.py"), REPLACE_HELPER.trim() + "\n", "utf8");
-    writeFileSync(join(dir, "swe_write.py"), WRITE_HELPER.trim() + "\n", "utf8");
-
-    this.helpersDir = dir;
-
-    return dir;
-
-  }
-
-  private shellEnv(): Record<string, string> {
-
-    // do not rewrite PATH here — on Windows that breaks spawn(bash). wrapCommand exports PATH inside the script.
-    return {
-
-      SWE_HELPERS: this.helpersDir?.replaceAll("\\", "/") ?? "",
-
-    };
-
-  }
-
   private noteTokens(text: string, step: number) {
 
     this.tokensUsed += estimateTokens(text);
     this.options.onEvent({ type: "usage", used: this.tokensUsed, step });
-
-  }
-
-  /** Turn one is almost always reconnaissance, so the first message already carries it. */
-  private async survey(): Promise<string> {
-
-    const { output } = await runCommand(
-
-      [
-
-        "ls -la 2>&1 | head -60",
-        "echo",
-        "if git rev-parse --git-dir >/dev/null 2>&1; then",
-        "  git --no-pager status --short --branch 2>&1 | head -30",
-        "  # key manifests if present — saves a later turn",
-        "  for f in package.json pyproject.toml go.mod Cargo.toml README.md; do",
-        '    [ -f "$f" ] && { echo; echo "== $f (head)"; head -40 "$f"; }',
-        "  done",
-        "else",
-
-        // without a repo there is no diff to review and no way back from a bad rewrite
-        '  echo "NOT A GIT REPOSITORY — there is no diff to review and no undo."',
-        "fi",
-
-      ].join("\n"), this.cwd, 15_000, undefined, this.shellEnv(),
-
-    );
-
-    return output.trim().slice(0, 6000);
 
   }
 
@@ -567,21 +534,15 @@ export class MiniAgent {
 
     try {
 
-      this.installHelpers();
-
       onEvent({ type: "status", text: "Thinking" });
 
-      // survey is local; chat open is network — overlap them
-      const surveyPromise = this.survey();
-      const sessionPromise = ChatSession.create(client, {
+      const session = await ChatSession.create(client, {
 
         assistantId: this.options.assistantId,
         // agent only reads the streamed turn; skip the full chat refetch after every send
         refreshOnComplete: false,
 
       });
-
-      const [survey, session] = await Promise.all([surveyPromise, sessionPromise]);
 
       this.session = session;
 
@@ -601,7 +562,7 @@ export class MiniAgent {
 
       });
 
-      let message = prompt(this.cwd, task, survey);
+      let message = prompt(this.cwd, task);
       let misses = 0;
       let lastProse = "";
 
@@ -678,8 +639,8 @@ export class MiniAgent {
           message = [
 
             `Your block was not run: ${truncated}. It reached me cut off at ${command.length} characters, so the rest never arrived.`,
-            "Do not resend the same block. Prefer `swe-replace` for surgical edits, or split a large write: `swe-write`/`cat >` for the first chunk, then `cat >> 'file' <<'EOF'` for the rest, one block per turn.",
-            "After the final chunk, verify with `wc -c 'file'` and `tail -3 'file'` — exit 0 alone does not prove the file is whole.",
+            "Do not resend the same block. Prefer a smaller apply_patch, or split a large add: `*** Add File` for the first chunk only, then a follow-up Update — or `cat >` then `cat >>` for plain writes.",
+            "After a write, check with `wc -c 'file'` and `tail -3 'file'` if the fence looked truncated.",
 
           ].join("\n");
 
@@ -749,11 +710,11 @@ export class MiniAgent {
 
         phase("Running");
 
-        const run = await runCommand(wrapCommand(command, this.helpersDir), this.cwd, timeoutMs, (child) => {
+        const run = await runCommand(wrapCommand(command, this.toolPath), this.cwd, timeoutMs, (child) => {
 
           this.child = child;
 
-        }, this.shellEnv());
+        });
 
         this.child = null;
 
@@ -791,17 +752,17 @@ export class MiniAgent {
 
         }
 
-        // failed unique-replace: nudge toward re-read instead of a blind rewrite
-        const replaceMiss = exitCode !== 0 && /expected exactly 1 match/i.test(output);
+        // failed patch: nudge toward re-read instead of a blind whole-file rewrite
+        const patchMiss = exitCode !== 0 && /apply_patch:|Invalid Context|failed to update|git apply/i.test(output);
 
-        message = replaceMiss
+        message = patchMiss
           ? [
 
               `Exit code: ${exitCode}`,
               "",
               truncate(output) || "<no output>",
               "",
-              "swe-replace needs a unique SEARCH span. Re-cat the file (or the relevant lines), copy an exact unique span, and retry swe-replace — do not rewrite the whole file from memory.",
+              "Patch context did not match. Re-cat the file, fix the @@ context lines, and retry apply_patch (or git apply) — do not rewrite the whole file from memory.",
 
             ].join("\n")
           : `Exit code: ${exitCode}\n\n${truncate(output) || "<no output>"}`;
@@ -830,21 +791,6 @@ export class MiniAgent {
 
       this.session = null;
       this.child = null;
-
-      if (this.helpersDir) {
-
-        try {
-
-          rmSync(this.helpersDir, { recursive: true, force: true });
-
-        } catch {
-
-          // temp cleanup is best-effort
-        }
-
-        this.helpersDir = null;
-
-      }
 
     }
 
