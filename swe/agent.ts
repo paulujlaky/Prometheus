@@ -7,6 +7,7 @@ import { ChatSession } from "../sdk/index";
 
 import { estimateTokens } from "./lib/tokens";
 import { extractCommand, extractFinishedSummary, FINISHED, incompleteReason, parseReply, } from "./parse";
+import { recordUsage } from "./usage";
 
 import type { BoodleClient } from "../sdk/client";
 
@@ -38,6 +39,9 @@ export interface AgentOptions {
 
   assistantId?: string;
 
+  /** Human label for daily usage totals (falls back to assistantId). */
+  modelLabel?: string;
+
   maxSteps?: number;
   commandTimeoutMs?: number;
 
@@ -65,14 +69,17 @@ function toBashPath(p: string): string {
 
 }
 
+/** Seed prompt: command-generator framing (avoids Sonnet 5 "no shell" refusals). */
 function prompt(cwd: string, task: string): string {
 
-  const win = process.platform === "win32" ? "- You are on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n" : "";
+  const win = process.platform === "win32" ? "- Runner is on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n" : "";
 
   return [
-    "You are a coding agent. Bash you write is executed on the user's machine; stdout/stderr come back. Do not simulate or refuse shell access.",
+    "You generate the next shell command for an automated runner.",
+    "The runner executes your bash on the user's machine and returns Exit code + stdout/stderr in the next message.",
+    "You do not execute anything yourself — only emit the next command in the schema below. Never invent command output.",
     "",
-    `Current Path: ${cwd}`,
+    `Working directory for the runner: ${cwd}`,
     `Shell: ${SHELL} (${process.platform})`,
     "",
     "Every reply must be EXACTLY this shape (machine-parsed, streamed live):",
@@ -98,7 +105,7 @@ function prompt(cwd: string, task: string): string {
     "- Open ```bash on the next line so the command streams early.",
     "- Thinking out loud belongs only between the label and the fence (the UI folds it under Thought for Ns). Never before the label, never after the closing fence.",
     "",
-    "Editing — use the bundled tools (already on PATH). Do NOT invent ad-hoc Python/sed editors.",
+    "Editing — use the bundled tools (already on the runner PATH). Do NOT invent ad-hoc Python/sed editors.",
     "",
     "1) apply_patch — preferred for create/update/delete, multi-file in one call:",
     "  apply_patch <<'PATCH'",
@@ -121,7 +128,7 @@ function prompt(cwd: string, task: string): string {
     "4) cat > 'path' <<'EOF' … EOF — new files only, when apply_patch is awkward.",
     "",
     "Behaviour Notes:",
-    "- One action per turn: read OR edit OR write. Inspect the tree yourself when needed (`ls`, `git status -sb`, `rg`).",
+    "- One action per turn: read OR edit OR write. Inspect the tree when needed (`ls`, `git status -sb`, `rg`).",
     "- Quote paths. Prefer apply_patch over whole-file rewrites.",
     "- No verify parades: at most one build/test after real edits; never re-check the same fact; when done, finish immediately.",
     `- Done: echo "${FINISHED}: <one-line summary>" with the label \`done:\``,
@@ -478,9 +485,12 @@ export class MiniAgent {
   /** Cumulative estimated tokens of everything sent + received this run (server keeps full history). */
   private tokensUsed = 0;
 
+  private modelLabel: string;
+
   constructor(options: AgentOptions) {
 
     this.options = options;
+    this.modelLabel = (options.modelLabel || options.assistantId || "unknown").trim() || "unknown";
 
     // bun inlines __dirname; resolve tools relative to the running main bundle (swe/dist)
     const bundleDir = resolve(dirname(process.argv[1] ?? "."));
@@ -516,7 +526,10 @@ export class MiniAgent {
 
   private noteTokens(text: string, step: number) {
 
-    this.tokensUsed += estimateTokens(text);
+    const n = estimateTokens(text);
+
+    this.tokensUsed += n;
+    recordUsage(this.modelLabel, n);
     this.options.onEvent({ type: "usage", used: this.tokensUsed, step });
 
   }
@@ -680,9 +693,9 @@ export class MiniAgent {
 
           message = [
 
-            "That reply contained no bash code block, so nothing ran and the task did not advance.",
-            "Your commands are really executed on the user's machine and the output comes back to you — do not answer with prose, files, or artifacts.",
-            "Reply now — line 1 is the label, line 2 opens the fence:\n\nread|search|write|edit|run|test|fix|think|done: <≤8 word label>\n```bash\n<one command>\n```",
+            "That reply contained no bash code block, so the runner executed nothing and the task did not advance.",
+            "Emit only the next command in the schema — no prose, no capability discussion:",
+            "read|search|write|edit|run|test|fix|think|done: <≤8 word label>\n```bash\n<one command>\n```",
 
           ].join("\n");
 

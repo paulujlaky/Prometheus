@@ -1,6 +1,7 @@
 import { Component, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, TriangleAlertIcon, WrenchIcon } from "lucide-react";
 
+import { UsageHeatmap, type UsageFile } from "@/comps/heatmap";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/message-scroller";
 
 import { cn } from "@/lib/utils";
@@ -155,14 +156,13 @@ export function Pixels({ className, cell = 5 }: { className?: string; cell?: num
 
 }
 
-/** The agent is busy with nothing to show yet — no row, no chevron, nothing to expand. */
+/** Stable, quiet placeholder while the model has not labeled a step yet. */
 export function Working() {
 
   return (
 
-    <div className="flex items-center gap-3 py-1">
+    <div className="flex h-9 w-full min-w-0 items-center">
 
-      <Pixels />
       <span className="shimmer-label text-[14px] font-medium">Working</span>
 
     </div>
@@ -209,7 +209,7 @@ function ToolRow({ icon: Icon, working, label, open, onToggle, trailing, childre
 
   return (
 
-    <div className="w-full">
+    <div className="w-full animate-tool-reveal">
 
       <button type="button" aria-expanded={open} onClick={onToggle} className="group/row flex h-9 w-full min-w-0 cursor-pointer items-center gap-2.5 text-left" >
 
@@ -588,6 +588,9 @@ interface TranscriptProps {
 
   empty: string;
 
+  /** Daily token totals for the empty-state heatmap. */
+  usage?: UsageFile;
+
   isOpen: (entry: Entry) => boolean;
   onToggle: (entry: Entry) => void;
 
@@ -626,7 +629,7 @@ function toBlocks(entries: Entry[]): Block[] {
 
 }
 
-export function Transcript({ entries, running, empty, isOpen, onToggle }: TranscriptProps) {
+export function Transcript({ entries, running, empty, usage, isOpen, onToggle }: TranscriptProps) {
 
   const blocks = toBlocks(entries);
 
@@ -645,7 +648,13 @@ export function Transcript({ entries, running, empty, isOpen, onToggle }: Transc
 
             {!entries.length && (
 
-              <p className="pt-24 text-center text-[14px] text-ink-3">{empty}</p>
+              <div className="flex flex-col items-center gap-6 pt-20 pb-6">
+
+                {usage ? <UsageHeatmap usage={usage} /> : null}
+
+                <p className="text-center text-[14px] text-ink-3">{empty}</p>
+
+              </div>
 
             )}
 

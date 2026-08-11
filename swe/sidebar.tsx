@@ -1,5 +1,5 @@
 import { Component, createRef, type MouseEvent as ReactMouseEvent } from "react";
-import { PlusIcon, Trash2Icon } from "lucide-react";
+import { EllipsisVerticalIcon, PlusIcon, Trash2Icon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -244,10 +244,12 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
             {chats.map((chat) => {
 
               const active = chat.id === activeId;
+              const hovered = this.state.hovered === chat.id;
+              const menuFor = menu?.chat.id === chat.id;
 
               return (
 
-                <button key={chat.id} className="relative z-10 flex w-full flex-col items-start gap-0.5 rounded-control px-2.5 py-2 text-left transition-transform duration-150 active:scale-[0.98]"
+                <button key={chat.id} className="relative z-10 flex w-full items-center gap-1.5 rounded-control py-2 pl-2.5 pr-1.5 text-left transition-transform duration-150 active:scale-[0.98]"
 
                   ref={(node) => {
 
@@ -274,17 +276,37 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
                 >
 
-                  <span className={cn("line-clamp-2 w-full text-[13.5px] leading-snug", active ? "font-medium text-ink" : "text-ink-2")}>
+                  <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
 
-                    {displayTitle(chat)}
+                    <span className={cn("line-clamp-2 w-full break-words text-[13.5px] leading-snug", active ? "font-medium text-ink" : "text-ink-2")}>
+
+                      {displayTitle(chat)}
+
+                    </span>
+
+                    {chat.modified > 0 && (
+
+                      <span className="w-full truncate text-[11.5px] text-ink-3 tabular-nums">{relativeTime(chat.modified)}</span>
+
+                    )}
 
                   </span>
 
-                  {chat.modified > 0 && (
+                  <span
+                    role="button"
+                    tabIndex={-1}
+                    aria-label="Session options"
+                    onClick={(event) => this.onContextMenu(event, chat)}
+                    onContextMenu={(event) => this.onContextMenu(event, chat)}
+                    className={cn(
+                      "flex size-6 shrink-0 items-center justify-center self-center rounded-chip text-ink-3 transition-[opacity,color,background-color] duration-150 hover:bg-hover hover:text-ink-2",
+                      hovered || active || menuFor ? "opacity-100" : "opacity-0",
+                    )}
+                  >
 
-                    <span className="text-[11.5px] text-ink-3 tabular-nums">{relativeTime(chat.modified)}</span>
+                    <EllipsisVerticalIcon className="size-4" />
 
-                  )}
+                  </span>
 
                 </button>
 

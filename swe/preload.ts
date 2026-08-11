@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import type { AgentEvent } from "./agent";
 import type { AssistantSummary } from "../sdk/types";
+import type { UsageFile } from "./usage";
 
 export interface SweChatSummary {
 
@@ -19,12 +20,14 @@ contextBridge.exposeInMainWorld("swe", {
   pickDir: (): Promise<string | null> => ipcRenderer.invoke("pick-dir"),
   lastCwd: (): Promise<string | null> => ipcRenderer.invoke("settings:last-cwd"),
 
+  usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
+
   listChats: (): Promise<SweChatSummary[]> => ipcRenderer.invoke("chats:list"),
   deleteChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:delete", chatId),
   getChat: (chatId: string): Promise<{ id: string; name: string; title: string; entries: unknown[] }> => ipcRenderer.invoke("chats:get", chatId),
   rememberChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:remember", chatId),
 
-  start: (options: { task: string; cwd: string; assistantId?: string; mode: string }): Promise<void> => ipcRenderer.invoke("start", options),
+  start: (options: { task: string; cwd: string; assistantId?: string; modelLabel?: string; mode: string }): Promise<void> => ipcRenderer.invoke("start", options),
   stop: (): Promise<void> => ipcRenderer.invoke("stop"),
 
   approve: (id: number, ok: boolean): Promise<void> => ipcRenderer.invoke("approve", { id, ok }),

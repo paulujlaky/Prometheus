@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { MiniAgent, riskReason, type AgentEvent } from "./agent";
 import { entriesFromChatDetail } from "./history";
 import { forgetChatId, loadChatIds, loadLastCwd, loadSettings, rememberChatId, saveSettings } from "./settings";
+import { loadUsage } from "./usage";
 
 export type ApprovalMode = "ask" | "smart" | "auto";
 import { BoodleClient } from "../sdk/index";
@@ -151,6 +152,8 @@ ipcMain.handle("settings:get", () => loadSettings());
 
 ipcMain.handle("settings:last-cwd", () => loadLastCwd());
 
+ipcMain.handle("usage:get", () => loadUsage());
+
 ipcMain.handle("chats:list", async () => {
 
   const known = new Set(loadChatIds());
@@ -252,7 +255,7 @@ ipcMain.handle("pick-dir", async () => {
 
 });
 
-ipcMain.handle("start", async (_event, options: { task: string; cwd: string; assistantId?: string; mode: ApprovalMode }) => {
+ipcMain.handle("start", async (_event, options: { task: string; cwd: string; assistantId?: string; modelLabel?: string; mode: ApprovalMode }) => {
 
   if (agent) {
 
@@ -266,6 +269,7 @@ ipcMain.handle("start", async (_event, options: { task: string; cwd: string; ass
     cwd: options.cwd,
 
     assistantId: options.assistantId,
+    modelLabel: options.modelLabel,
 
     onEvent: (event) => {
 

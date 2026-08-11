@@ -3,9 +3,10 @@ import { createRoot } from "react-dom/client";
 import { CheckIcon, ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 
 import { Composer } from "@/comps/composer";
+import type { UsageFile } from "@/comps/heatmap";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown-menu";
 
-import { contextLimitOf } from "@/lib/models";
+import { contextLimitOf, displayName } from "@/lib/models";
 import { usageOf } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 
@@ -23,12 +24,14 @@ interface SweBridge {
   pickDir: () => Promise<string | null>;
   lastCwd: () => Promise<string | null>;
 
+  usage: () => Promise<UsageFile>;
+
   listChats: () => Promise<SweChat[]>;
   deleteChat: (chatId: string) => Promise<void>;
   getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; entries: Entry[] }>;
   rememberChat: (chatId: string) => Promise<void>;
 
-  start: (options: { task: string; cwd: string; assistantId?: string; mode: ApprovalMode }) => Promise<void>;
+  start: (options: { task: string; cwd: string; assistantId?: string; modelLabel?: string; mode: ApprovalMode }) => Promise<void>;
   stop: () => Promise<void>;
 
   approve: (id: number, ok: boolean) => Promise<void>;
@@ -138,6 +141,9 @@ interface AppState {
   /** Estimated cumulative tokens for this run (local; Boodlebox does not report usage). */
   tokensUsed: number;
 
+  /** Daily totals from ~/.bbx/usage.json for the empty-state heatmap. */
+  usage: UsageFile;
+
   chats: SweChat[];
   chatsLoading: boolean;
   activeChatId: string | null;
@@ -168,6 +174,8 @@ export class App extends Component<{}, AppState> {
     approval: null,
 
     tokensUsed: 0,
+
+    usage: {},
 
     chats: [],
     chatsLoading: true,
@@ -205,9 +213,26 @@ export class App extends Component<{}, AppState> {
 
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
+    void this.refreshUsage();
     void this.refreshChats();
 
   }
+
+  private refreshUsage = async () => {
+
+    try {
+
+      const usage = await window.swe.usage();
+
+      this.setState({ usage });
+
+    } catch {
+
+      // heatmap is best-effort; leave previous totals
+
+    }
+
+  };
 
   private refreshChats = async () => {
 
@@ -572,7 +597,7 @@ export class App extends Component<{}, AppState> {
 
   private start = async (task: string) => {
 
-    const { cwd, assistantId, mode } = this.state;
+    const { cwd, assistantId, mode, assistants } = this.state;
 
     if (!cwd) {
 
@@ -581,6 +606,9 @@ export class App extends Component<{}, AppState> {
     }
 
     this.seq = 1; // note: each MiniAgent run opens a new Boodle chat
+
+    const model = assistants.find((a) => a.id === assistantId);
+    const modelLabel = model ? displayName(model.name) : assistantId ?? undefined;
 
     this.setState({
 
@@ -604,7 +632,7 @@ export class App extends Component<{}, AppState> {
 
     try {
 
-      await window.swe.start({ task, cwd, assistantId: assistantId ?? undefined, mode });
+      await window.swe.start({ task, cwd, assistantId: assistantId ?? undefined, modelLabel, mode });
 
     } catch (err) {
 
@@ -614,6 +642,7 @@ export class App extends Component<{}, AppState> {
 
       this.setState({ running: false, startedAt: null, approval: null, stream: null });
       void this.refreshChats();
+      void this.refreshUsage();
 
     }
 
@@ -621,7 +650,7 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const { entries, assistants, assistantId, cwd, mode, running, startedAt, status, stream, approval, tokensUsed, chats, chatsLoading, activeChatId } = this.state;
+    const { entries, assistants, assistantId, cwd, mode, running, startedAt, status, stream, approval, tokensUsed, usage: dailyUsage, chats, chatsLoading, activeChatId } = this.state;
 
     const model = assistants.find((a) => a.id === assistantId);
     const liveThought = this.streamStartedAt != null && this.thinkEndedAt != null ? this.thinkEndedAt - this.streamStartedAt : null;
@@ -728,6 +757,7 @@ export class App extends Component<{}, AppState> {
             running={running}
 
             empty={cwd ? "Describe a task below to start." : "Choose a working folder to start."}
+            usage={dailyUsage}
 
             isOpen={this.isOpen}
             onToggle={this.toggle}

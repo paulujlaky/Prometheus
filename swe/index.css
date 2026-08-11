@@ -175,6 +175,13 @@
 
 }
 
+@keyframes tool-reveal {
+
+  from { opacity: 0.55; }
+  to { opacity: 1; }
+
+}
+
 @keyframes shimmer-text {
 
   from { background-position: 150% center; }
@@ -215,18 +222,25 @@
 
 }
 
+@utility animate-tool-reveal {
+
+  animation: tool-reveal 180ms ease-out both;
+
+}
+
 /*
  * Label that reads as "still generating" without a spinner next to it.
+ * Soft pass of light across muted ink — intentional, not flashy.
 */
 @utility shimmer-label {
 
-  background-image: linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%);
-  background-size: 200% 100%;
+  background-image: linear-gradient(90deg, var(--ink-3) 30%, var(--ink-2) 50%, var(--ink-3) 70%);
+  background-size: 220% 100%;
   background-repeat: repeat;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: shimmer-text 1.4s linear infinite;
+  animation: shimmer-text 2.2s ease-in-out infinite;
 
 }
 
