@@ -1,7 +1,7 @@
 import { Component, createRef, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowUpIcon, ChevronDownIcon, SquareIcon } from "lucide-react";
 
-import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, } from "@/comps/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, } from "@/comps/ui/dropdown";
 
 import { displayName, groupAssistants, providerOf } from "@/lib/models";
 import { formatTokens } from "@/lib/tokens";
@@ -181,7 +181,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
               <DropdownMenuTrigger asChild>
 
-                <button type="button" disabled={disabled || groups.length === 0} className="flex h-8 min-w-0 items-center gap-2 rounded-control px-2.5 text-[13px] text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink disabled:opacity-50" >
+                <button type="button" disabled={disabled || groups.length === 0} className="flex h-8 min-w-0 items-center gap-2 rounded-control px-2.5 text-[13px] text-ink-2 outline-none transition-colors duration-100 hover:bg-hover hover:text-ink focus:outline-none focus-visible:outline-none disabled:opacity-50" >
 
                   <span className="max-w-56 truncate">
 

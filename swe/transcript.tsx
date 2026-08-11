@@ -2,7 +2,7 @@ import { Component, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, TriangleAlertIcon, WrenchIcon } from "lucide-react";
 
 import { UsageHeatmap, type UsageFile } from "@/comps/heatmap";
-import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/message-scroller";
+import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/scroller";
 
 import { cn } from "@/lib/utils";
 

@@ -4,7 +4,7 @@ import { CheckIcon, ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, 
 
 import { Composer } from "@/comps/composer";
 import type { UsageFile } from "@/comps/heatmap";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown";
 
 import { contextLimitOf, displayName } from "@/lib/models";
 import { usageOf } from "@/lib/tokens";
@@ -699,7 +699,7 @@ export class App extends Component<{}, AppState> {
 
               <DropdownMenuTrigger asChild>
 
-                <button type="button" className="flex h-9 items-center gap-2 rounded-control px-3 text-[13px] font-medium text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink" >
+                <button type="button" className="flex h-9 items-center gap-2 rounded-control px-3 text-[13px] font-medium text-ink-2 outline-none transition-colors duration-100 hover:bg-hover hover:text-ink focus:outline-none focus-visible:outline-none" >
 
                   <ModeIcon className="size-4 text-ink-3" />
                   {activeMode.label}
