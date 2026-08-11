@@ -31,11 +31,11 @@ export type HistoryEntry =
 
     }
 
-  | { id: string; kind: "task"; text: string }
+  | { id: string; kind: "task"; text: string; attachments?: string[] }
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
 
-function assistantText(message: Extract<ApiChatMessage, { type: "Assistant" }>, chatId: string): string {
+function assistantParts(message: Extract<ApiChatMessage, { type: "Assistant" }>, chatId: string): { text: string; reasoning: string } {
 
   const stream = ResponseStream.fromHistory(chatId, message.responses ?? [], {
 
@@ -44,7 +44,12 @@ function assistantText(message: Extract<ApiChatMessage, { type: "Assistant" }>, 
 
   });
 
-  return stream.fullText().trim();
+  return {
+
+    text: stream.fullText().trim(),
+    reasoning: stream.reasoningText().trim(),
+
+  };
 
 }
 
@@ -227,9 +232,9 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
       }
 
-      const text = assistantText(message, chatId);
+      const { text, reasoning } = assistantParts(message, chatId);
 
-      if (!text) {
+      if (!text && !reasoning) {
 
         continue;
 
@@ -245,7 +250,9 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
       }
 
-      const { tool, desc, thinking, command } = parseReply(text);
+      const { tool, desc, thinking: harnessThinking, command } = parseReply(text);
+      // prefer platform Reasoning section over harness prose between label and fence
+      const thinking = reasoning || harnessThinking;
 
       // FINISHED echo is often itself a bash step: desc + echo MINI_SWE_FINISHED
       if (command && extractFinishedSummary(command)) {
@@ -280,7 +287,7 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
       }
 
-      if (!command && !desc) {
+      if (!command && !desc && !thinking) {
 
         continue;
 

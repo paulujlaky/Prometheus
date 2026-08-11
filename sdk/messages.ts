@@ -86,21 +86,28 @@ export function turnFromAssistantMessage( message: AssistantMessage, chatId: str
   });
 
   const snapshot = stream.snapshot();
+  const status = mapApiState(message.state, "assistant");
+  const errBlock = snapshot.blocks.find((b) => b.kind === "error");
 
   return {
 
     id: submissionId,
     role: "assistant",
 
-    status: mapApiState(message.state, "assistant"), // submission on Assistant rows is the user prompt — never use it as assistant text
+    // submission on Assistant rows is the user prompt — never use it as assistant text
+    status: errBlock ? "error" : status,
 
     text: snapshot.text,
+    reasoning: snapshot.reasoning || undefined,
+
     blocks: snapshot.blocks.filter((b) => b.kind !== "progress"),
 
     submissionId,
     assistantId: snapshot.assistantId,
 
     created: message.created,
+
+    error: errBlock && errBlock.kind === "error" ? errBlock.content : undefined,
 
   };
 
@@ -162,22 +169,33 @@ export function turnsFromChatDetail(detail: ChatDetail): ChatTurn[] {
 
 export function turnFromSnapshot(snapshot: import("./types").ResponseSnapshot, options: { id?: string; error?: string } = {}): ChatTurn {
 
-  const status = snapshot.status === "complete" ? "complete" : snapshot.status === "streaming" ? "streaming" : "pending";
+  const status =
+    options.error || snapshot.status === "error" || snapshot.error
+      ? "error"
+      : snapshot.status === "complete"
+        ? "complete"
+        : snapshot.status === "streaming"
+          ? "streaming"
+          : "pending";
 
   return {
 
     id: options.id ?? snapshot.submissionId ?? `stream-${snapshot.chatId}`,
     role: "assistant",
 
-    status: options.error ? "error" : status,
+    status,
 
     text: snapshot.text,
+    reasoning: snapshot.reasoning || undefined,
+
     blocks: snapshot.blocks,
 
     submissionId: snapshot.submissionId ?? undefined,
     assistantId: snapshot.assistantId,
 
-    error: options.error,
+    error: options.error ?? snapshot.error ?? undefined,
+
+    usage: snapshot.usage,
 
   };
 

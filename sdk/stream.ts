@@ -107,6 +107,12 @@ interface SectionState {
 
 }
 
+function isReasoningSection(sectionType: string): boolean {
+
+  return sectionType.toLowerCase() === "reasoning";
+
+}
+
 // Pure assembler for one assistant generation (one submissionId). Accepts incremental WS parts and full history `responses` arrays
 export class ResponseStream {
 
@@ -125,9 +131,14 @@ export class ResponseStream {
   private links: Extract<ContentBlock, { kind: "link" }>[] = [];
 
   private unknowns: Extract<ContentBlock, { kind: "unknown" }>[] = [];
+  private errors: Extract<ContentBlock, { kind: "error" }>[] = [];
 
   private unknownSeq = 0;
   private progressSeq = 0;
+  private errorSeq = 0;
+
+  private lastError: string | null = null;
+  private usage: import("./types").UsageBucket | null = null;
 
   constructor(chatId: string, submissionId: string | null = null) {
 
@@ -161,8 +172,13 @@ export class ResponseStream {
     this.links = [];
 
     this.unknowns = [];
+    this.errors = [];
     this.unknownSeq = 0;
     this.progressSeq = 0;
+    this.errorSeq = 0;
+
+    this.lastError = null;
+    this.usage = null;
 
     this.status = "idle";
 
@@ -182,16 +198,23 @@ export class ResponseStream {
       status: this.status,
 
       text: this.fullText(),
+      reasoning: this.reasoningText(),
+
       blocks: this.blocks(),
 
       progress: this.latestProgress,
 
       links: [...this.links],
 
+      error: this.lastError,
+
+      usage: this.usage,
+
     };
 
   }
 
+  /** Answer surface only — excludes reasoning so tool parsers stay clean. */
   fullText(): string {
 
     const parts: string[] = [];
@@ -200,7 +223,31 @@ export class ResponseStream {
 
       const section = this.sections.get(index);
 
-      if (section?.text) {
+      // keep non-reasoning sections (Text, WebSearch, CodeExecution, …); drop chain-of-thought
+      if (!section?.text || isReasoningSection(section.sectionType)) {
+
+        continue;
+
+      }
+
+      parts.push(section.text);
+
+    }
+
+    return parts.join("\n\n");
+
+  }
+
+  /** Platform chain-of-thought sections only. */
+  reasoningText(): string {
+
+    const parts: string[] = [];
+
+    for (const index of this.sectionOrder) {
+
+      const section = this.sections.get(index);
+
+      if (section?.text && isReasoningSection(section.sectionType)) {
 
         parts.push(section.text);
 
@@ -226,24 +273,41 @@ export class ResponseStream {
 
       }
 
-      out.push({
+      if (isReasoningSection(section.sectionType)) {
 
-        kind: "text",
-        key: sectionKey(index),
+        out.push({
 
-        sectionType: section.sectionType,
+          kind: "reasoning",
+          key: sectionKey(index),
 
-        text: section.text,
+          sectionType: section.sectionType,
 
-        streaming: section.streaming,
+          text: section.text,
 
-      });
+          streaming: section.streaming,
+
+        });
+
+      } else {
+
+        out.push({
+
+          kind: "text",
+          key: sectionKey(index),
+
+          sectionType: section.sectionType,
+
+          text: section.text,
+
+          streaming: section.streaming,
+
+        });
+
+      }
 
     }
 
     for (const content of this.progressItems) {
-
-      // we need only include the latest progress item in the snapshot, but we keep all items in the stream for history
 
       out.push({
 
@@ -259,6 +323,12 @@ export class ResponseStream {
     for (const link of this.links) {
 
       out.push(link);
+
+    }
+
+    for (const err of this.errors) {
+
+      out.push(err);
 
     }
 
@@ -322,9 +392,11 @@ export class ResponseStream {
       this.links = [];
 
       this.unknowns = [];
+      this.errors = [];
       this.progressItems = [];
 
       this.latestProgress = null;
+      this.lastError = null;
 
     }
 
@@ -376,21 +448,37 @@ export class ResponseStream {
   private onFinal(data: WsData): StreamChange[] {
 
     this.bindMeta(data);
+    this.bindUsage(data);
 
     // final payload is authoritative. we must rebuild text/links from it.
     const changes = this.ingestParts(asPartArray(data.message), { replace: true });
 
-    this.status = "complete";
     this.latestProgress = null;
 
-    // we can now mark all text sections as non-streaming
     for (const section of this.sections.values()) {
 
       section.streaming = false;
 
     }
 
-    changes.push({ kind: "complete", snapshot: this.snapshot() });
+    if (this.lastError && !this.fullText()) {
+
+      this.status = "error";
+      changes.push({
+
+        kind: "error",
+        snapshot: this.snapshot(),
+
+        content: this.lastError,
+
+      });
+
+    } else {
+
+      this.status = "complete";
+      changes.push({ kind: "complete", snapshot: this.snapshot() });
+
+    }
 
     return changes;
 
@@ -409,6 +497,16 @@ export class ResponseStream {
     if ("assistantId" in data) {
 
       this.assistantId = str(data.assistantId);
+
+    }
+
+  }
+
+  private bindUsage(data: WsData) {
+
+    if (data.usage != null && typeof data.usage === "object") {
+
+      this.usage = data.usage as import("./types").UsageBucket;
 
     }
 
@@ -440,6 +538,10 @@ export class ResponseStream {
 
         return this.onLink(part);
 
+      case "Error":
+
+        return this.onError(part);
+
       default:
 
         return this.onUnknownPart(part, type);
@@ -458,9 +560,19 @@ export class ResponseStream {
 
     }
 
-    this.ensureSection(index, str(part.sectionType) ?? "Text", true);
+    const sectionType = str(part.sectionType) ?? "Text";
 
-    return [{ kind: "section", snapshot: this.snapshot(), sectionKey: sectionKey(index) }];
+    this.ensureSection(index, sectionType, true);
+
+    return [{
+
+      kind: "section",
+      snapshot: this.snapshot(),
+
+      sectionKey: sectionKey(index),
+      sectionType,
+
+    }];
 
   }
 
@@ -474,7 +586,9 @@ export class ResponseStream {
 
     }
 
-    const section = this.ensureSection(index, "Text", true);
+    // preserve an existing Reasoning/Text type; only default when the section is new
+    const existing = this.sections.get(index);
+    const section = this.ensureSection(index, existing?.sectionType ?? "Text", true);
     const changes: StreamChange[] = [];
     const chunks = Array.isArray(part.content) ? part.content : [];
 
@@ -496,8 +610,16 @@ export class ResponseStream {
       }
 
       const piece = typeof rec.content === "string" ? rec.content : "";
+      const seq = num(rec.seq);
 
+      // empty content with seq -1 is the section end marker, not a text delta
       if (!piece) {
+
+        if (seq === -1) {
+
+          section.streaming = false;
+
+        }
 
         continue;
 
@@ -510,6 +632,8 @@ export class ResponseStream {
 
         kind: "delta",
         sectionKey: sectionKey(index),
+
+        sectionType: section.sectionType,
 
         snapshot: this.snapshot(),
         text: piece,
@@ -541,6 +665,41 @@ export class ResponseStream {
 
       snapshot: this.snapshot(),
       sectionKey: sectionKey(index),
+
+      sectionType,
+
+    }];
+
+  }
+
+  private onError(part: RawPart): StreamChange[] {
+
+    const content = str(part.content) ?? extractText(part.content) ?? "Something went wrong.";
+    const opcode = num(part.opcode) ?? undefined;
+
+    this.lastError = content;
+    this.errorSeq += 1;
+
+    const block: Extract<ContentBlock, { kind: "error" }> = {
+
+      kind: "error",
+      key: `error:${this.errorSeq}`,
+
+      content,
+      opcode,
+
+    };
+
+    this.errors.push(block);
+    this.status = "error";
+
+    return [{
+
+      kind: "error",
+      snapshot: this.snapshot(),
+
+      content,
+      opcode,
 
     }];
 
@@ -624,6 +783,8 @@ export class ResponseStream {
 
         snapshot: this.snapshot(),
         sectionKey: sectionKey(index),
+
+        sectionType: section.sectionType,
 
       }];
 

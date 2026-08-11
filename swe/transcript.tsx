@@ -42,7 +42,7 @@ export interface Step {
 
 export type Entry =
   | Step
-  | { id: string; kind: "task"; text: string }
+  | { id: string; kind: "task"; text: string; attachments?: string[] }
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
 
@@ -108,16 +108,19 @@ export function stepStatus(step: Pick<Step, "streaming" | "output" | "exitCode">
 }
 
 /**
- * The step being streamed; the id is stable so React keeps the nodes as the text grows.
+ * The step being streamed; `id` must stay stable through settle so React does not remount
+ * (and re-animate) the row when the live entry becomes a real one.
  * `thoughtMs` is threaded in live so the duration does not jump when the step settles.
 */
-export function streamStep(stream: string, thoughtMs: number | null): Step {
+export function streamStep(stream: string, thoughtMs: number | null, platformReasoning = "", id = "stream"): Step {
 
-  const { tool, desc, thinking, command } = parseReply(stream);
+  const { tool, desc, thinking: harnessThinking, command } = parseReply(stream);
+  // live platform Reasoning takes priority over harness prose between label and fence
+  const thinking = platformReasoning.trim() || harnessThinking;
 
   return {
 
-    id: "stream",
+    id,
     kind: "step",
 
     tool,
@@ -156,12 +159,12 @@ export function Pixels({ className, cell = 5 }: { className?: string; cell?: num
 
 }
 
-/** Stable, quiet placeholder while the model has not labeled a step yet. */
+/** Stable, quiet placeholder while the model has not labeled a step yet. Not a dropdown. */
 export function Working() {
 
   return (
 
-    <div className="flex h-9 w-full min-w-0 items-center">
+    <div className="flex h-8 w-full min-w-0 items-center" aria-busy="true" aria-label="Working">
 
       <span className="shimmer-label text-[14px] font-medium">Working</span>
 
@@ -280,15 +283,6 @@ class StepRow extends Component<StepRowProps, StepRowState> {
     const { step, open, onToggle } = this.props;
     const { thinkOpen } = this.state;
 
-    const empty = !step.desc && !step.thinking && step.command == null;
-
-    // nothing has streamed yet — a bare pulse rather than an empty row
-    if (step.streaming && empty) {
-
-      return <Working />;
-
-    }
-
     const thinking = step.thinking.trim();
     const seconds = thoughtSeconds(step);
 
@@ -302,11 +296,31 @@ class StepRow extends Component<StepRowProps, StepRowState> {
     // a reply with no bash at all is a protocol miss; show the prose instead of an empty body
     const proseOnly = !step.streaming && !step.command;
 
+    // no label/command yet — static Working, never a dropdown (body would be empty)
+    if (step.streaming && !step.desc && step.command == null) {
+
+      return <Working />;
+
+    }
+
     // thinking already has its own row when shown; repeating it here is the same duplication
     const prose = [step.desc, showThinking ? "" : thinking].filter(Boolean).join("\n\n");
 
     // parsed as it streams: a partial patch yields the files it has reached so far, and grows
     const writes = step.command ? parseWrites(step.command) : [];
+
+    // line counts for write/edit steps — tick live as the patch streams, then replace Succeeded/Failed
+    let linesAdded = 0;
+    let linesRemoved = 0;
+
+    for (const write of writes) {
+
+      linesAdded += write.added;
+      linesRemoved += write.removed;
+
+    }
+
+    const hasLineCounts = linesAdded > 0 || linesRemoved > 0;
 
     // while working the label carries the motion, so no caret is needed to signal streaming
     const label = working ? (
@@ -318,6 +332,25 @@ class StepRow extends Component<StepRowProps, StepRowState> {
       <span className={cn("min-w-0 truncate", step.streaming && "animate-stream-in")}>
 
         <Md inline className="text-[14px] font-medium text-ink">{stepLabel(step)}</Md>
+
+      </span>
+
+    );
+
+    const trailing = hasLineCounts ? (
+
+      <span className="flex shrink-0 items-center gap-1.5 font-mono text-[12px] tabular-nums" title={failed ? `Exit code ${step.exitCode}` : undefined}>
+
+        {linesAdded > 0 ? <span className="text-green">+{linesAdded}</span> : null}
+        {linesRemoved > 0 ? <span className="text-red">−{linesRemoved}</span> : null}
+
+      </span>
+
+    ) : working || status === "unknown" ? null : (
+
+      <span className={cn("shrink-0 text-[12.5px] animate-fade-in", failed ? "text-red/85" : "text-green/85")} title={failed ? `Exit code ${step.exitCode}` : undefined} >
+
+        {failed ? "Failed" : "Succeeded"}
 
       </span>
 
@@ -357,19 +390,7 @@ class StepRow extends Component<StepRowProps, StepRowState> {
           open={open}
           onToggle={onToggle}
 
-          trailing={
-
-            working || status === "unknown" ? null : (
-
-              <span className={cn("shrink-0 text-[12.5px] animate-fade-in", failed ? "text-red/85" : "text-green/85")} title={failed ? `Exit code ${step.exitCode}` : undefined} >
-
-                {failed ? "Failed" : "Succeeded"}
-
-              </span>
-
-            )
-
-          }
+          trailing={trailing}
 
         >
 
@@ -417,7 +438,7 @@ function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
 
   return (
 
-    <div className="grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]" style={{ gridTemplateRows: open ? "1fr" : "0fr", opacity: open ? 1 : 0 }} >
+    <div className="grid transition-[grid-template-rows,opacity] duration-300 ease-glide" style={{ gridTemplateRows: open ? "1fr" : "0fr", opacity: open ? 1 : 0 }} >
 
       <div className="min-h-0 overflow-hidden">{children}</div>
 
@@ -464,6 +485,9 @@ interface RunProps {
   /** The whole session is done — mid-run the summary would flash in between every step. */
   finished: boolean;
 
+  /** Between steps: show Working inside this run (gap-1) instead of as a separate block. */
+  showWorking?: boolean;
+
   isOpen: (entry: Entry) => boolean;
   onToggle: (entry: Entry) => void;
 
@@ -478,7 +502,7 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
 
   render() {
 
-    const { steps, finished, isOpen, onToggle } = this.props;
+    const { steps, finished, showWorking, isOpen, onToggle } = this.props;
     const { allEdits } = this.state;
 
     const edits = finished ? editsOf(steps) : [];
@@ -499,6 +523,8 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
             </div>
 
           ))}
+
+          {showWorking ? <Working /> : null}
 
         </div>
 
@@ -541,15 +567,43 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
 
 }
 
-function TaskBubble({ text }: { text: string }) {
+function fileLabel(path: string): string {
+
+  const parts = path.replaceAll("\\", "/").split("/");
+
+  return parts[parts.length - 1] || path;
+
+}
+
+function TaskBubble({ text, attachments }: { text: string; attachments?: string[] }) {
+
+  const files = attachments?.filter(Boolean) ?? [];
 
   return (
 
     <div className="flex justify-end pl-12">
 
-      <div className="max-w-[min(100%,34rem)] rounded-window bg-field px-3.5 py-2 text-[14.5px] leading-[1.5] whitespace-pre-wrap text-ink animate-fade-up">
+      <div className="flex max-w-[min(100%,34rem)] flex-col gap-2 rounded-window bg-field px-3.5 py-2 text-[14.5px] leading-normal text-ink animate-fade-up">
 
-        {text}
+        {text ? <div className="whitespace-pre-wrap">{text}</div> : null}
+
+        {files.length ? (
+
+          <div className="flex flex-wrap gap-1.5">
+
+            {files.map((path) => (
+
+              <span key={path} className="inline-flex max-w-full items-center rounded-control border border-line bg-inset px-2 py-0.5 font-mono text-[12px] text-ink-2" title={path}>
+
+                <span className="min-w-0 truncate">{fileLabel(path)}</span>
+
+              </span>
+
+            ))}
+
+          </div>
+
+        ) : null}
 
       </div>
 
@@ -658,45 +712,57 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
 
             )}
 
-            {blocks.map((block) => (
+            {blocks.map((block, index) => {
 
-              <MessageScrollerItem key={block.key} messageId={block.key} scrollAnchor={block.kind === "entry" && block.entry.kind === "task"} >
+              const last = index === blocks.length - 1;
+              // keep Working inside the run's gap-1 so it sits closer than a block-level gap-6
+              const workInRun = running && !busy && last && block.kind === "run";
 
-                {block.kind === "run" ? (
+              return (
 
-                  <Run steps={block.steps} finished={!running} isOpen={isOpen} onToggle={onToggle} />
+                <MessageScrollerItem key={block.key} messageId={block.key} scrollAnchor={block.kind === "entry" && block.entry.kind === "task"} >
 
-                ) : block.entry.kind === "task" ? (
+                  {block.kind === "run" ? (
 
-                  <TaskBubble text={block.entry.text} />
+                    <Run steps={block.steps} finished={!running} showWorking={workInRun} isOpen={isOpen} onToggle={onToggle} />
 
-                ) : block.entry.kind === "done" ? (
+                  ) : block.entry.kind === "task" ? (
 
-                  <Verdict tone="green" icon={<CheckIcon className="size-3.5" strokeWidth={3.5} />}>
+                    <TaskBubble text={block.entry.text} attachments={block.entry.attachments} />
 
-                    <Md className="text-[14px] text-ink">{cleanSummary(block.entry.text)}</Md>
+                  ) : block.entry.kind === "done" ? (
 
-                  </Verdict>
+                    <Verdict tone="green" icon={<CheckIcon className="size-3.5" strokeWidth={3.5} />}>
 
-                ) : (
+                      <Md className="text-[14px] text-ink">{cleanSummary(block.entry.text)}</Md>
 
-                  <Verdict tone="red" icon={<TriangleAlertIcon className="size-3.5" strokeWidth={2.5} />}>
+                    </Verdict>
 
-                    <p className="text-[14px] leading-[1.5] text-ink">{block.entry.text}</p>
+                  ) : (
 
-                  </Verdict>
+                    <Verdict tone="red" icon={<TriangleAlertIcon className="size-3.5" strokeWidth={2.5} />}>
 
-                )}
+                      <p className="text-[14px] leading-normal text-ink">{block.entry.text}</p>
 
-              </MessageScrollerItem>
+                    </Verdict>
 
-            ))}
+                  )}
 
-            {running && !busy ? (
+                </MessageScrollerItem>
+
+              );
+
+            })}
+
+            {running && !busy && (blocks.length === 0 || blocks[blocks.length - 1]?.kind !== "run") ? (
 
               <MessageScrollerItem messageId="working">
 
-                <Working />
+                <div className="-mt-2">
+
+                  <Working />
+
+                </div>
 
               </MessageScrollerItem>
 

@@ -41,8 +41,14 @@ export function displayName(name: string): string {
 
 }
 
-/** Published context-window sizes for common model families.*/
-export function contextLimitOf(assistant: Pick<AssistantSummary, "name" | "alias" | "description"> | string | null | undefined): number {
+/** Prefer catalog contextLength; fall back to family heuristics. */
+export function contextLimitOf(assistant: Pick<AssistantSummary, "name" | "alias" | "description" | "contextLength"> | string | null | undefined): number {
+
+  if (assistant && typeof assistant === "object" && typeof assistant.contextLength === "number" && assistant.contextLength > 0) {
+
+    return assistant.contextLength;
+
+  }
 
   const name = typeof assistant === "string"
     ? assistant

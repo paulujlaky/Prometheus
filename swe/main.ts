@@ -123,8 +123,8 @@ function createWindow() {
 
   window = new BrowserWindow({
 
-    width: 1100,
-    height: 780,
+    width: 1096,
+    height: 1024,
 
     backgroundColor: "#111318",
     title: "Boombox Agent",
@@ -255,7 +255,48 @@ ipcMain.handle("pick-dir", async () => {
 
 });
 
-ipcMain.handle("start", async (_event, options: { task: string; cwd: string; assistantId?: string; modelLabel?: string; mode: ApprovalMode }) => {
+ipcMain.handle("pick-images", async () => {
+
+  const result = await dialog.showOpenDialog({
+
+    properties: ["openFile", "multiSelections"],
+    filters: [
+
+      { name: "Images & documents", extensions: ["png", "jpg", "jpeg", "webp", "gif", "pdf", "txt", "csv", "docx", "xlsx", "pptx"] },
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] },
+      { name: "All files", extensions: ["*"] },
+
+    ],
+
+  });
+
+  if (result.canceled) {
+
+    return [];
+
+  }
+
+  return result.filePaths;
+
+});
+
+ipcMain.handle("start", async (_event, options: {
+
+  task: string;
+  cwd: string;
+
+  assistantId?: string;
+  modelLabel?: string;
+
+  mode: ApprovalMode;
+
+  /** Resume this Boodle chat as a follow-up (no full system reseed). */
+  chatId?: string;
+
+  /** Absolute paths of files/images to upload and attach. */
+  imagePaths?: string[];
+
+}) => {
 
   if (agent) {
 
@@ -310,7 +351,12 @@ ipcMain.handle("start", async (_event, options: { task: string; cwd: string; ass
 
   try {
 
-    await agent.run(options.task);
+    await agent.run(options.task, {
+
+      chatId: options.chatId,
+      imagePaths: options.imagePaths,
+
+    });
 
   } finally {
 
@@ -349,6 +395,19 @@ ipcMain.handle("stop", () => {
   approvals.clear();
 
   agent?.stop();
+
+});
+
+/** Queue a user note into the active agent loop (applied on the next model turn). */
+ipcMain.handle("interject", (_event, options: { text: string; imagePaths?: string[] }) => {
+
+  if (!agent) {
+
+    throw new Error("No run in progress");
+
+  }
+
+  agent.interject(options.text ?? "", options.imagePaths ?? []);
 
 });
 

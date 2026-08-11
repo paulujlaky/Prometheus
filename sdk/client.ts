@@ -6,7 +6,10 @@ import type {
   Chat,
   ChatDetail,
   ChatListResponse,
+  CreateChatOptions,
   CreateChatResponse,
+  KnowledgeItem,
+  KnowledgeUploadInit,
   SendMessageOptions,
   SendMessageRequest,
   UserMessage,
@@ -63,15 +66,221 @@ export class BoodleClient {
 
   }
 
-  async createChat(): Promise<Chat> {
+  async createChat(options: CreateChatOptions = {}): Promise<Chat> {
 
     const body = await this.requestJson<CreateChatResponse>("POST", "/chat", {
 
-      knowledgeIds: [], // not really used for now
+      knowledgeIds: options.knowledgeIds ?? [],
 
     });
 
     return body.chat;
+
+  }
+
+  /**
+   * Find a recent chat with no messages to reuse instead of POST /chat.
+   * Prefers default "New Chat" titles / never-messaged rows, then verifies via getChat.
+   */
+  async findEmptyChat(options: { scan?: number; verify?: number } = {}): Promise<Chat | null> {
+
+    const scan = options.scan ?? 20;
+    const verify = options.verify ?? 5;
+
+    const list = await this.listChats(scan, 0);
+    const entries = [...(list.entries ?? [])].sort(
+      (a, b) => (b.modified ?? b.lastMessage ?? b.created ?? 0) - (a.modified ?? a.lastMessage ?? a.created ?? 0),
+    );
+
+    if (!entries.length) {
+
+      return null;
+
+    }
+
+    const likelyEmpty = (c: Chat) => {
+
+      const name = (c.name ?? "").trim().toLowerCase();
+
+      if (name === "new chat" || name === "") {
+
+        return true;
+
+      }
+
+      // never received a user/assistant turn after creation
+      if (c.lastMessage != null && c.created != null && c.lastMessage === c.created) {
+
+        return true;
+
+      }
+
+      return false;
+
+    };
+
+    const ranked = [
+      ...entries.filter(likelyEmpty),
+      // fall through only if nothing looked empty from list metadata
+    ];
+
+    const pool = (ranked.length ? ranked : entries).slice(0, verify);
+
+    for (const entry of pool) {
+
+      try {
+
+        const detail = await this.getChat(entry.id);
+
+        if ((detail.messages ?? []).length === 0) {
+
+          return detail.chat;
+
+        }
+
+      } catch {
+
+        // deleted / inaccessible — skip
+      }
+
+    }
+
+    return null;
+
+  }
+
+  /**
+   * Reuse a recent empty chat when possible; otherwise create one.
+   * Attaches `knowledgeIds` in both paths.
+   */
+  async createOrReuseChat(options: CreateChatOptions = {}): Promise<Chat> {
+
+    const empty = await this.findEmptyChat();
+
+    if (empty) {
+
+      if (options.knowledgeIds?.length) {
+
+        await this.attachChatKnowledge(empty.id, options.knowledgeIds);
+
+      }
+
+      return empty;
+
+    }
+
+    return this.createChat(options);
+
+  }
+
+  /**
+   * Step 1 of file/image upload: allocate a knowledge row + S3 presign URL.
+   * Then PUT raw bytes to `uploadUrl`, then call `confirmKnowledgeUpload`.
+   */
+  async initKnowledgeUpload(file: { name: string; size: number; context?: string }): Promise<KnowledgeUploadInit> {
+
+    return this.requestJson<KnowledgeUploadInit>("POST", "/knowledge/upload", {
+
+      context: file.context ?? "Chat",
+      fileName: encodeURIComponent(file.name),
+      fileSize: file.size,
+      name: file.name,
+
+    });
+
+  }
+
+  /** Step 3: mark the S3 put as Success/Error so Boodle processes the file. */
+  async confirmKnowledgeUpload(
+    knowledgeId: string,
+    result: "Success" | "Error" = "Success",
+    errorReason?: string,
+  ): Promise<KnowledgeItem> {
+
+    const payload: Record<string, string> = {
+
+      knowledgeId,
+      uploadResult: result,
+
+    };
+
+    if (errorReason) {
+
+      payload.errorReason = errorReason;
+
+    }
+
+    return this.requestJson<KnowledgeItem>("POST", `/knowledge/upload/${knowledgeId}`, payload);
+
+  }
+
+  /**
+   * Full upload: init → PUT bytes to S3 → confirm Success.
+   * `data` is the raw file body (image/png, text, …).
+   */
+  async uploadKnowledge(
+    file: { name: string; data: ArrayBuffer | Uint8Array | Buffer; context?: string },
+  ): Promise<KnowledgeItem> {
+
+    const raw = file.data instanceof ArrayBuffer
+      ? new Uint8Array(file.data)
+      : new Uint8Array(file.data.buffer, file.data.byteOffset, file.data.byteLength);
+
+    // copy into a plain ArrayBuffer so fetch/Blob typings are happy across bun/node
+    const ab = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
+    const size = ab.byteLength;
+
+    const { knowledge, uploadUrl } = await this.initKnowledgeUpload({
+
+      name: file.name,
+      size,
+      context: file.context,
+
+    });
+
+    const put = await fetch(uploadUrl, {
+
+      method: "PUT",
+      headers: {
+
+        "User-Agent": this.userAgent,
+
+      },
+      body: ab,
+
+    });
+
+    if (!put.ok) {
+
+      const reason = `S3 PUT failed: ${put.status}`;
+
+      try {
+
+        await this.confirmKnowledgeUpload(knowledge.id, "Error", reason);
+
+      } catch {
+
+        // best-effort
+      }
+
+      throw new Error(reason);
+
+    }
+
+    return this.confirmKnowledgeUpload(knowledge.id, "Success");
+
+  }
+
+  /** Attach knowledge items to an existing chat (also available via createChat knowledgeIds). */
+  async attachChatKnowledge(chatId: string, knowledgeIds: string[]): Promise<unknown> {
+
+    if (!knowledgeIds.length) {
+
+      return [];
+
+    }
+
+    return this.requestJson("POST", `/chat/${chatId}/knowledge`, { knowledgeIds });
 
   }
 
@@ -139,6 +348,12 @@ export class BoodleClient {
       assistantId,
 
     };
+
+    if (options.knowledgeIds?.length) {
+
+      payload.knowledgeIds = options.knowledgeIds;
+
+    }
 
     return this.requestJson<UserMessage>("POST", `/chat/${chatId}/message`, payload);
 
@@ -275,18 +490,29 @@ function flattenAssistants(raw: unknown): AssistantSummary[] {
 
         seen.add(obj.id);
 
+        // catalog nests provider meta under `llm` / `model`; surface it for context limits + UI
+        const llm = asMeta(obj.llm) ?? asMeta(obj.model);
+
         out.push({
 
           id: obj.id,
           name: obj.name,
 
           alias: typeof obj.alias === "string" ? obj.alias : undefined,
-          avatarUrl: typeof obj.avatarUrl === "string" ? obj.avatarUrl : undefined,
+          avatarUrl: typeof obj.avatarUrl === "string" ? obj.avatarUrl : typeof llm?.avatarUrl === "string" ? llm.avatarUrl : undefined,
           description: typeof obj.description === "string" ? obj.description : undefined,
 
           displayCategory: typeof obj.displayCategory === "string" ? obj.displayCategory : undefined,
 
           state: typeof obj.state === "string" ? obj.state : undefined,
+
+          api: typeof llm?.api === "string" ? llm.api : undefined,
+          model: typeof llm?.model === "string" ? llm.model : undefined,
+
+          contextLength: typeof llm?.contextLength === "number" ? llm.contextLength : undefined,
+          maxTokens: typeof llm?.maxTokens === "number" ? llm.maxTokens : undefined,
+
+          premiumCategory: typeof llm?.premiumCategory === "string" ? llm.premiumCategory : undefined,
 
         });
 
@@ -305,5 +531,17 @@ function flattenAssistants(raw: unknown): AssistantSummary[] {
   visit(raw);
 
   return out;
+
+}
+
+function asMeta(value: unknown): Record<string, unknown> | null {
+
+  if (value != null && typeof value === "object" && !Array.isArray(value)) {
+
+    return value as Record<string, unknown>;
+
+  }
+
+  return null;
 
 }

@@ -200,7 +200,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
     // pt centres the first control against the 56px header across the split
     return (
 
-      <aside className="flex h-full w-64 shrink-0 flex-col gap-2 border-r border-line bg-canvas p-2.5 pt-[10px]">
+      <aside className="flex h-full w-64 shrink-0 flex-col gap-2 border-r border-line bg-canvas p-2.5 pt-2.5">
 
         <button
           type="button"
@@ -278,7 +278,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
                   <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
 
-                    <span className={cn("line-clamp-2 w-full break-words text-[13.5px] leading-snug", active ? "font-medium text-ink" : "text-ink-2")}>
+                    <span className={cn("line-clamp-2 w-full wrap-break-word text-[13.5px] leading-snug", active ? "font-medium text-ink" : "text-ink-2")}>
 
                       {displayTitle(chat)}
 

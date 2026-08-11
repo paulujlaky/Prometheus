@@ -25,13 +25,21 @@ function DropdownMenuTrigger({ className, ...props }: React.ComponentProps<typeo
 
   return (
 
-    <DropdownMenuPrimitive.Trigger
-      data-slot="dropdown-menu-trigger"
+    <DropdownMenuPrimitive.Trigger data-slot="dropdown-menu-trigger"
+
       className={cn(
-        "outline-none ring-0 focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0",
+
+        "rounded-control bg-surface text-ink-2 outline-none ring-0 transition-colors duration-100",
+        "hover:bg-hover hover:text-ink",
+        "focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0",
+        "disabled:opacity-50",
+
         className,
+
       )}
+
       {...props}
+
     />
 
   );

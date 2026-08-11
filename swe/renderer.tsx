@@ -31,7 +31,25 @@ interface SweBridge {
   getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; entries: Entry[] }>;
   rememberChat: (chatId: string) => Promise<void>;
 
-  start: (options: { task: string; cwd: string; assistantId?: string; modelLabel?: string; mode: ApprovalMode }) => Promise<void>;
+  pickImages: () => Promise<string[]>;
+
+  start: (options: {
+
+    task: string;
+    cwd: string;
+
+    assistantId?: string;
+    modelLabel?: string;
+
+    mode: ApprovalMode;
+
+    chatId?: string;
+    imagePaths?: string[];
+
+  }) => Promise<void>;
+
+  interject: (options: { text: string; imagePaths?: string[] }) => Promise<void>;
+
   stop: () => Promise<void>;
 
   approve: (id: number, ok: boolean) => Promise<void>;
@@ -191,6 +209,30 @@ export class App extends Component<{}, AppState> {
   /** When the bash fence opened — the thought ends there, not when the whole reply finishes. */
   private thinkEndedAt: number | null = null;
 
+  /** Accumulated platform Reasoning section for the in-flight turn. */
+  private streamReasoning = "";
+
+  /** Bumps so reasoning-only updates re-render the live stream step. */
+  private reasoningTick = 0;
+
+  /**
+   * Stable id for the in-flight stream step — allocated on first token and reused on settle
+   * so the row does not remount (and re-play slide-in) when the reply completes.
+  */
+  private streamEntryId: string | null = null;
+
+  private ensureStreamId(): string {
+
+    if (this.streamEntryId == null) {
+
+      this.streamEntryId = `e${(this.seq += 1)}`;
+
+    }
+
+    return this.streamEntryId;
+
+  }
+
   componentDidMount() {
 
     window.swe.onEvent(this.onEvent);
@@ -295,6 +337,13 @@ export class App extends Component<{}, AppState> {
 
     }
 
+    // UI already paints the task bubble when the user sends; agent just acks the queue
+    if (event.type === "interjection") {
+
+      return;
+
+    }
+
     if (event.type === "usage") {
 
       this.setState({ tokensUsed: event.used });
@@ -321,9 +370,26 @@ export class App extends Component<{}, AppState> {
 
       }));
 
-      // Boodle often titles after the first exchange — refresh a few times
-      window.setTimeout(() => void this.refreshChats(), 1_500);
-      window.setTimeout(() => void this.refreshChats(), 6_000);
+      return;
+
+    }
+
+    if (event.type === "reasoning") {
+
+      // platform chain-of-thought — folds into Thought UI; does not feed the fence parser
+      if (this.streamStartedAt == null) {
+
+        this.streamStartedAt = Date.now();
+        this.thinkEndedAt = null;
+
+      }
+
+      this.ensureStreamId();
+      this.streamReasoning += event.text;
+      this.reasoningTick += 1;
+
+      // force a paint while only reasoning is flowing (no answer delta yet)
+      this.forceUpdate();
 
       return;
 
@@ -335,8 +401,9 @@ export class App extends Component<{}, AppState> {
 
         if (prev.stream === null) {
 
-          this.streamStartedAt = Date.now();
+          this.streamStartedAt ??= Date.now();
           this.thinkEndedAt = null;
+          this.ensureStreamId();
 
         }
 
@@ -360,7 +427,9 @@ export class App extends Component<{}, AppState> {
     if (event.type === "assistant") {
 
       // settle the streamed step into a real entry in one update, so nothing flickers between the two
-      const { tool, desc, thinking, command } = parseReply(event.text);
+      const { tool, desc, thinking: harnessThinking, command } = parseReply(event.text);
+      // platform Reasoning section wins over harness prose between label and fence
+      const thinking = (event.reasoning ?? this.streamReasoning).trim() || harnessThinking;
 
       // measure to the fence, not to the end of the reply — otherwise a long command reads as long thinking
       const thoughtMs = this.streamStartedAt != null
@@ -369,42 +438,31 @@ export class App extends Component<{}, AppState> {
           ? Math.max(1000, Math.round(thinking.length / 50) * 1000)
           : null;
 
+      // reuse the live stream id so the row stays mounted (no slide-up re-animation)
+      const id = this.streamEntryId ?? `e${(this.seq += 1)}`;
+
       this.streamStartedAt = null;
       this.thinkEndedAt = null;
+      this.streamReasoning = "";
+      this.streamEntryId = null;
 
-      this.setState((prev) => {
+      this.setState((prev) => ({
 
-        const id = `e${(this.seq += 1)}`;
-        // preserve every open step; only remap the live "stream" id if it was expanded
-        const toggled = new Set(prev.toggled);
+        entries: [...prev.entries, {
+          id,
+          kind: "step",
+          tool,
+          desc,
+          thinking,
+          thoughtMs,
+          command,
+          output: null,
+          exitCode: null,
+          streaming: false,
+        }],
+        stream: null,
 
-        if (toggled.delete("stream")) {
-
-          toggled.add(id);
-
-        }
-
-        return {
-
-          entries: [...prev.entries, {
-            id,
-            kind: "step",
-            tool,
-            desc,
-            thinking,
-            thoughtMs,
-            command,
-            output: null,
-            exitCode: null,
-            streaming: false,
-          }],
-          stream: null,
-
-          toggled,
-
-        };
-
-      });
+      }));
 
       return;
 
@@ -461,7 +519,6 @@ export class App extends Component<{}, AppState> {
 
       this.push({ kind: "done", text: cleanSummary(event.summary) });
       this.setState({ status: "Done" });
-      void this.refreshChats();
 
       return;
 
@@ -508,6 +565,8 @@ export class App extends Component<{}, AppState> {
     }
 
     this.seq = 0;
+    this.streamEntryId = null;
+    this.streamReasoning = "";
     this.setState({
 
       entries: [],
@@ -530,6 +589,8 @@ export class App extends Component<{}, AppState> {
 
     }
 
+    this.streamEntryId = null;
+    this.streamReasoning = "";
     this.setState({
 
       activeChatId: chat.id,
@@ -548,6 +609,7 @@ export class App extends Component<{}, AppState> {
 
       // keep seq ahead of loaded ids so live steps don't collide
       this.seq = entries.length + 100;
+      this.streamEntryId = null;
 
       this.setState({
 
@@ -595,9 +657,45 @@ export class App extends Component<{}, AppState> {
 
   };
 
-  private start = async (task: string) => {
+  /** Mid-run user note — shows as a task bubble and queues into the agent loop. */
+  private interject = async (task: string, imagePaths: string[] = []) => {
 
-    const { cwd, assistantId, mode, assistants } = this.state;
+    this.seq += 1;
+
+    this.setState((prev) => ({
+
+      entries: [...prev.entries, {
+
+        id: `e${this.seq}`,
+        kind: "task" as const,
+
+        text: task,
+        attachments: imagePaths.length ? imagePaths : undefined,
+
+      }],
+
+    }));
+
+    try {
+
+      await window.swe.interject({
+
+        text: task,
+        imagePaths: imagePaths.length ? imagePaths : undefined,
+
+      });
+
+    } catch (err) {
+
+      this.push({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+
+    }
+
+  };
+
+  private start = async (task: string, imagePaths: string[] = []) => {
+
+    const { cwd, assistantId, mode, assistants, activeChatId, entries, running } = this.state;
 
     if (!cwd) {
 
@@ -605,34 +703,100 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    this.seq = 1; // note: each MiniAgent run opens a new Boodle chat
+    // already looping — fold into the current run instead of starting another
+    if (running) {
+
+      await this.interject(task, imagePaths);
+
+      return;
+
+    }
 
     const model = assistants.find((a) => a.id === assistantId);
     const modelLabel = model ? displayName(model.name) : assistantId ?? undefined;
 
-    this.setState({
+    // follow-up when a chat is already active (and not mid-run); otherwise open a new Boodle chat
+    const chatId = activeChatId ?? undefined;
+    const followUp = Boolean(chatId);
 
-      entries: [{ id: "e1", kind: "task", text: task }],
+    this.streamReasoning = "";
+    this.streamStartedAt = null;
+    this.thinkEndedAt = null;
+    this.streamEntryId = null;
 
-      running: true,
+    if (followUp) {
 
-      startedAt: Date.now(),
-      status: "Starting",
+      this.seq = Math.max(this.seq, entries.length) + 1;
 
-      toggled: new Set<string>(),
-      tokensUsed: 0,
+      this.setState((prev) => ({
 
-      stream: null,
+        entries: [...prev.entries, {
 
-      approval: null,
+          id: `e${this.seq}`,
+          kind: "task" as const,
 
-      activeChatId: null,
+          text: task,
+          attachments: imagePaths.length ? imagePaths : undefined,
 
-    });
+        }],
+
+        running: true,
+
+        startedAt: Date.now(),
+        status: "Starting",
+
+        stream: null,
+        approval: null,
+
+      }));
+
+    } else {
+
+      this.seq = 1;
+
+      this.setState({
+
+        entries: [{
+
+          id: "e1",
+          kind: "task",
+
+          text: task,
+          attachments: imagePaths.length ? imagePaths : undefined,
+
+        }],
+
+        running: true,
+
+        startedAt: Date.now(),
+        status: "Starting",
+
+        toggled: new Set<string>(),
+        tokensUsed: 0,
+
+        stream: null,
+        approval: null,
+
+      });
+
+    }
 
     try {
 
-      await window.swe.start({ task, cwd, assistantId: assistantId ?? undefined, modelLabel, mode });
+      await window.swe.start({
+
+        task,
+        cwd,
+
+        assistantId: assistantId ?? undefined,
+        modelLabel,
+
+        mode,
+
+        chatId,
+        imagePaths: imagePaths.length ? imagePaths : undefined,
+
+      });
 
     } catch (err) {
 
@@ -640,6 +804,7 @@ export class App extends Component<{}, AppState> {
 
     } finally {
 
+      this.streamEntryId = null;
       this.setState({ running: false, startedAt: null, approval: null, stream: null });
       void this.refreshChats();
       void this.refreshUsage();
@@ -655,7 +820,11 @@ export class App extends Component<{}, AppState> {
     const model = assistants.find((a) => a.id === assistantId);
     const liveThought = this.streamStartedAt != null && this.thinkEndedAt != null ? this.thinkEndedAt - this.streamStartedAt : null;
 
-    const rows = stream === null ? entries : [...entries, streamStep(stream, liveThought)];
+    // include a synthetic stream row when only platform reasoning has arrived (no answer tokens yet)
+    const liveStream = stream ?? (this.streamReasoning && running ? "" : null);
+    const rows = liveStream === null
+      ? entries
+      : [...entries, streamStep(liveStream, liveThought, this.streamReasoning, this.streamEntryId ?? "stream")];
 
     const activeMode = MODES.find((m) => m.value === mode) ?? MODES[1];
     const ModeIcon = activeMode.icon;
@@ -699,7 +868,7 @@ export class App extends Component<{}, AppState> {
 
               <DropdownMenuTrigger asChild>
 
-                <button type="button" className="flex h-9 items-center gap-2 rounded-control px-3 text-[13px] font-medium text-ink-2 outline-none transition-colors duration-100 hover:bg-hover hover:text-ink focus:outline-none focus-visible:outline-none" >
+                <button type="button" className="flex h-9 items-center gap-2 px-3 text-[13px] font-medium">
 
                   <ModeIcon className="size-4 text-ink-3" />
                   {activeMode.label}
@@ -865,7 +1034,7 @@ export class App extends Component<{}, AppState> {
             contextUsed={usage.used}
             contextLimit={usage.limit}
 
-            placeholder="Describe the task..."
+            placeholder={running ? "Send a note while it works..." : activeChatId ? "Follow up on this session..." : "Describe the task..."}
             disabledPlaceholder="Choose a working folder first..."
 
             onModelChange={(id) => {
@@ -875,7 +1044,8 @@ export class App extends Component<{}, AppState> {
 
             }}
 
-            onSend={(task) => void this.start(task)}
+            onSend={(task, imagePaths) => void this.start(task, imagePaths)}
+            onPickImages={() => window.swe.pickImages()}
             onStop={() => void window.swe.stop()}
 
           />

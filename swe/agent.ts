@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
 
 import { ChatSession } from "../sdk/index";
 
@@ -23,14 +23,25 @@ const MAX_MISSES = 3;
 
 export type AgentEvent =
   | { type: "delta"; text: string }
-  | { type: "assistant"; text: string }
+  /** Platform chain-of-thought (sectionType Reasoning) — not harness prose. */
+  | { type: "reasoning"; text: string }
+  | { type: "assistant"; text: string; reasoning?: string }
   | { type: "command"; command: string }
   | { type: "observation"; text: string; exitCode: number }
   | { type: "status"; text: string }
   | { type: "usage"; used: number; step: number }
   | { type: "session"; chatId: string; title: string }
+  /** User message injected mid-loop (queued until the next model turn). */
+  | { type: "interjection"; text: string }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };
+
+export interface Interjection {
+
+  text: string;
+  imagePaths?: string[];
+
+}
 
 export interface AgentOptions {
 
@@ -50,7 +61,50 @@ export interface AgentOptions {
 
 }
 
+export interface AgentRunOptions {
+
+  /** Resume an existing Boodle chat (follow-up). Omit to create a new chat. */
+  chatId?: string;
+
+  /** Local image/file paths to upload and attach for this run. */
+  imagePaths?: string[];
+
+}
+
 const SHELL = process.env.SWE_SHELL ?? "bash";
+
+/** Fallback sidebar / Boodle title from the user prompt — first few words, capped. */
+function titleFromPrompt(task: string): string {
+
+  const cleaned = task.replace(/\s+/g, " ").trim();
+
+  if (!cleaned) {
+
+    return "New chat";
+
+  }
+
+  const words = cleaned.split(" ");
+  const title = words.slice(0, 8).join(" ");
+
+  if (title.length > 60) {
+
+    return `${title.slice(0, 57).trimEnd()}…`;
+
+  }
+
+  return words.length > 8 ? `${title}…` : title;
+
+}
+
+/** True when Boodle never assigned a real title (still the create default). */
+function isUntitled(name: string): boolean {
+
+  const n = name.replace(/\s+/g, " ").trim().toLowerCase();
+
+  return !n || n === "new chat" || n === "untitled";
+
+}
 
 /** MSYS/Git-Bash path so `export PATH=…` works under bash on Windows. */
 function toBashPath(p: string): string {
@@ -134,11 +188,59 @@ function prompt(cwd: string, task: string): string {
     `- Done: echo "${FINISHED}: <one-line summary>" with the label \`done:\``,
     `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with rg/grep/tail.`,
     "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y. `cd` persists; env does not.",
+    "- Images/files attached to this chat are already in context — reference them; do not ask the user to re-upload.",
     win,
 
     `\nTask: ${task}`,
 
   ].join("\n");
+
+}
+
+/**
+ * Follow-up on an existing chat: server already has the system protocol + history.
+ * Keep this short so we don't re-burn the full seed prompt every turn.
+ */
+function followUpPrompt(cwd: string, task: string): string {
+
+  return [
+    "Continue the same runner session. Protocol unchanged:",
+    "  <tool>: <≤8 word label>",
+    "  ```bash",
+    "  <one focused command>",
+    "  ```",
+    `tool ∈ read|search|write|edit|run|test|fix|think|done — first token is the label line; open the fence next.`,
+    `cwd: ${cwd} · shell still ${SHELL}. Prefer apply_patch. Done: echo "${FINISHED}: <summary>" with label done:`,
+    "Do not restate prior work. Emit only the next action.",
+    "",
+    `Follow-up: ${task}`,
+
+  ].join("\n");
+
+}
+
+/** Upload local files as Boodle knowledge items (images/docs). */
+async function uploadPaths(client: BoodleClient, paths: string[]): Promise<string[]> {
+
+  const ids: string[] = [];
+
+  for (const path of paths) {
+
+    if (!existsSync(path)) {
+
+      throw new Error(`Attachment not found: ${path}`);
+
+    }
+
+    const data = readFileSync(path);
+    const name = basename(path);
+    const item = await client.uploadKnowledge({ name, data, context: "Chat" });
+
+    ids.push(item.id);
+
+  }
+
+  return ids;
 
 }
 
@@ -487,6 +589,9 @@ export class MiniAgent {
 
   private modelLabel: string;
 
+  /** User notes queued while a turn or command is in flight; drained before the next send. */
+  private pending: Interjection[] = [];
+
   constructor(options: AgentOptions) {
 
     this.options = options;
@@ -500,6 +605,36 @@ export class MiniAgent {
 
   }
 
+  /**
+   * Queue a user message into the active loop. Applied on the next model turn
+   * (after the current stream / command finishes) — the session cannot accept
+   * a second send while a response is in flight.
+   */
+  interject(text: string, imagePaths: string[] = []) {
+
+    if (this.stopped || !this.session) {
+
+      throw new Error("No run in progress");
+
+    }
+
+    const trimmed = text.trim();
+    const paths = imagePaths.filter(Boolean);
+
+    if (!trimmed && !paths.length) {
+
+      throw new Error("Interjection is empty");
+
+    }
+
+    const note = trimmed || (paths.length ? "Use the attached image(s) for this task." : "");
+
+    this.pending.push({ text: note, imagePaths: paths.length ? paths : undefined });
+    this.options.onEvent({ type: "interjection", text: note });
+    this.options.onEvent({ type: "status", text: "Note queued" });
+
+  }
+
   /** Interrupts at whichever point the run is sitting: a running command, or a model turn we are waiting on. */
   stop() {
 
@@ -510,6 +645,7 @@ export class MiniAgent {
     }
 
     this.stopped = true;
+    this.pending = [];
 
     this.options.onEvent({ type: "status", text: "Stopping..." });
 
@@ -524,6 +660,55 @@ export class MiniAgent {
 
   }
 
+  /** Fold any queued user notes into the next outbound message; attach new images first. */
+  private async applyInterjections(message: string): Promise<string> {
+
+    if (!this.pending.length || !this.session) {
+
+      return message;
+
+    }
+
+    const batch = this.pending;
+    this.pending = [];
+
+    const notes: string[] = [];
+
+    for (const item of batch) {
+
+      if (item.imagePaths?.length) {
+
+        const ids = await uploadPaths(this.options.client, item.imagePaths);
+        await this.session.attachKnowledge(ids);
+
+      }
+
+      if (item.text.trim()) {
+
+        notes.push(item.text.trim());
+
+      }
+
+    }
+
+    if (!notes.length) {
+
+      return message;
+
+    }
+
+    return [
+
+      message,
+      "",
+      "The user sent a message while you were working. Read it carefully and adjust your next action. Address it before continuing prior work if it conflicts.",
+      "",
+      ...notes.flatMap((note, i) => (i === 0 ? [note] : ["", note])),
+
+    ].join("\n");
+
+  }
+
   private noteTokens(text: string, step: number) {
 
     const n = estimateTokens(text);
@@ -534,7 +719,7 @@ export class MiniAgent {
 
   }
 
-  async run(task: string): Promise<void> {
+  async run(task: string, runOptions: AgentRunOptions = {}): Promise<void> {
 
     const { client, onEvent, approve } = this.options;
 
@@ -545,39 +730,99 @@ export class MiniAgent {
     this.cwd = this.options.cwd.replaceAll("\\", "/");
     this.tokensUsed = 0;
 
+    const followUp = Boolean(runOptions.chatId);
+    const imagePaths = (runOptions.imagePaths ?? []).filter(Boolean);
+
+    // only new chats get a prompt-fallback title if Boodle never auto-named them
+    let newChatId: string | null = null;
+
     try {
 
-      onEvent({ type: "status", text: "Thinking" });
+      onEvent({ type: "status", text: imagePaths.length ? "Uploading" : "Thinking" });
 
-      const session = await ChatSession.create(client, {
+      let knowledgeIds: string[] = [];
 
-        assistantId: this.options.assistantId,
-        // agent only reads the streamed turn; skip the full chat refetch after every send
-        refreshOnComplete: false,
+      if (imagePaths.length) {
 
-      });
+        knowledgeIds = await uploadPaths(client, imagePaths);
+
+      }
+
+      if (this.stopped) {
+
+        onEvent({ type: "status", text: "Stopped" });
+
+        return;
+
+      }
+
+      const session = followUp
+        ? await ChatSession.open(client, runOptions.chatId!, {
+
+            assistantId: this.options.assistantId,
+            refreshOnComplete: false,
+
+          })
+        : await ChatSession.create(client, {
+
+            assistantId: this.options.assistantId,
+            refreshOnComplete: false,
+            knowledgeIds: knowledgeIds.length ? knowledgeIds : undefined,
+
+          });
 
       this.session = session;
 
-      // let Boodle title the chat; we only track the id for the sidebar
+      // follow-ups: attach any new images to the existing chat
+      if (followUp && knowledgeIds.length) {
+
+        await session.attachKnowledge(knowledgeIds);
+
+      }
+
+      // seed sidebar with whatever Boodle has; auto-title may replace it during the run
       const seedTitle = session.state.chat?.name?.trim() || "New chat";
 
       onEvent({ type: "session", chatId: session.chatId, title: seedTitle });
 
+      if (!followUp) {
+
+        newChatId = session.chatId;
+
+      }
+
       // history lives on the server, so each step only sends the new observation
+      // stream only answer deltas into the fence parser — reasoning is a separate channel
       this.session.on((event) => {
 
-        if (event.type === "stream" && event.change.kind === "delta") {
+        if (event.type !== "stream") {
 
-          onEvent({ type: "delta", text: event.change.text });
+          return;
+
+        }
+
+        const { change } = event;
+
+        if (change.kind === "delta") {
+
+          if (change.sectionType?.toLowerCase() === "reasoning") {
+
+            onEvent({ type: "reasoning", text: change.text });
+
+          } else {
+
+            onEvent({ type: "delta", text: change.text });
+
+          }
 
         }
 
       });
 
-      let message = prompt(this.cwd, task);
+      let message = followUp ? followUpPrompt(this.cwd, task) : prompt(this.cwd, task);
       let misses = 0;
       let lastProse = "";
+      let firstSend = true;
 
       for (let step = 1; step <= maxSteps; step += 1) {
 
@@ -592,6 +837,17 @@ export class MiniAgent {
         // Thinking | Drafting | Running — default working state is Thinking
         const phase = (text: string) => onEvent({ type: "status", text: `Step ${step} · ${text}` });
 
+        // mid-loop user notes land here — after the prior command, before the next model turn
+        message = await this.applyInterjections(message);
+
+        if (this.stopped) {
+
+          onEvent({ type: "status", text: "Stopped" });
+
+          return;
+
+        }
+
         phase("Thinking");
         this.noteTokens(message, step);
 
@@ -599,7 +855,7 @@ export class MiniAgent {
 
         const unsubDraft = this.session.on((event) => {
 
-          if (event.type === "stream" && event.change.kind === "delta" && !drafting) {
+          if (event.type === "stream" && event.change.kind === "delta" && event.change.sectionType?.toLowerCase() !== "reasoning" && !drafting) {
 
             drafting = true;
             phase("Drafting");
@@ -608,7 +864,15 @@ export class MiniAgent {
 
         });
 
-        const turn = await this.session.send(message);
+        // attach knowledgeIds only on the first user message of a new chat (createChat already linked them;
+        // re-send is harmless; on follow-up we already attachKnowledge above)
+        const sendOpts = firstSend && knowledgeIds.length && !followUp
+          ? { knowledgeIds }
+          : {};
+
+        firstSend = false;
+
+        const turn = await this.session.send(message, sendOpts);
 
         unsubDraft();
 
@@ -620,8 +884,9 @@ export class MiniAgent {
 
         }
 
-        this.noteTokens(turn.text, step);
-        onEvent({ type: "assistant", text: turn.text });
+        // turn.text is answer-only (reasoning stripped) — keeps tool parsing reliable
+        this.noteTokens(turn.text + (turn.reasoning ?? ""), step);
+        onEvent({ type: "assistant", text: turn.text, reasoning: turn.reasoning });
         phase("Thinking");
 
         const parsed = parseReply(turn.text);
@@ -759,6 +1024,23 @@ export class MiniAgent {
           // prefer the model's own one-liner when FINISHED was bare
           const finalSummary = summary === "Task complete." && lastProse ? lastProse.split(/\r?\n/)[0].trim() : summary;
 
+          // a note arrived while the finish command ran — keep the loop open for it
+          if (this.pending.length) {
+
+            message = await this.applyInterjections([
+
+              `Exit code: ${exitCode}`,
+              "",
+              truncate(output) || "<no output>",
+              "",
+              `You were about to finish ("${finalSummary}"). The user sent a new message — address it before finishing again.`,
+
+            ].join("\n"));
+
+            continue;
+
+          }
+
           onEvent({ type: "done", summary: finalSummary });
 
           return;
@@ -800,10 +1082,40 @@ export class MiniAgent {
 
     } finally {
 
+      // if auto-title never fired, fall back to the first words of the prompt
+      if (newChatId) {
+
+        try {
+
+          const detail = await client.getChat(newChatId);
+          const current = (detail.chat?.name ?? "").trim();
+
+          if (isUntitled(current)) {
+
+            const title = titleFromPrompt(task);
+
+            await client.renameChat(newChatId, title);
+            onEvent({ type: "session", chatId: newChatId, title });
+
+          } else {
+
+            // surface Boodle's name so the sidebar does not stay on "New chat"
+            onEvent({ type: "session", chatId: newChatId, title: current });
+
+          }
+
+        } catch {
+
+          // naming is best-effort
+        }
+
+      }
+
       this.session?.dispose();
 
       this.session = null;
       this.child = null;
+      this.pending = [];
 
     }
 

@@ -27,7 +27,26 @@ contextBridge.exposeInMainWorld("swe", {
   getChat: (chatId: string): Promise<{ id: string; name: string; title: string; entries: unknown[] }> => ipcRenderer.invoke("chats:get", chatId),
   rememberChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:remember", chatId),
 
-  start: (options: { task: string; cwd: string; assistantId?: string; modelLabel?: string; mode: string }): Promise<void> => ipcRenderer.invoke("start", options),
+  pickImages: (): Promise<string[]> => ipcRenderer.invoke("pick-images"),
+
+  start: (options: {
+
+    task: string;
+    cwd: string;
+
+    assistantId?: string;
+    modelLabel?: string;
+
+    mode: string;
+
+    chatId?: string;
+    imagePaths?: string[];
+
+  }): Promise<void> => ipcRenderer.invoke("start", options),
+
+  /** Inject a user message into the active run (queued until the next model turn). */
+  interject: (options: { text: string; imagePaths?: string[] }): Promise<void> => ipcRenderer.invoke("interject", options),
+
   stop: (): Promise<void> => ipcRenderer.invoke("stop"),
 
   approve: (id: number, ok: boolean): Promise<void> => ipcRenderer.invoke("approve", { id, ok }),

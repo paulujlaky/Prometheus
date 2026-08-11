@@ -88,6 +88,50 @@ export interface AssistantSummary {
 
   avatarUrl?: string;
 
+  /** Provider slug from the catalog (`openai`, `anthropic`, …). */
+  api?: string;
+
+  /** Upstream model id (`claude-4.6-sonnet`, `gpt-5.6-sol`, …). */
+  model?: string;
+
+  contextLength?: number;
+  maxTokens?: number;
+
+  premiumCategory?: string;
+
+}
+
+export interface KnowledgeItem {
+
+  id: string;
+  name: string;
+
+  description?: string;
+  state?: string;
+
+  docType?: string;
+  fileName?: string;
+  size?: number;
+
+  thumbnail?: unknown;
+
+  created?: number;
+  modified?: number;
+
+}
+
+export interface KnowledgeUploadInit {
+
+  knowledge: KnowledgeItem;
+  uploadUrl: string;
+
+}
+
+export interface UsageBucket {
+
+  orgId?: string;
+  usage?: unknown[];
+
 }
 
 /** Opaque message-part object from the API (stream or history). */
@@ -162,10 +206,16 @@ export interface SendMessageOptions {
   assistantId?: string;
 
   coachModeUsed?: boolean;
+
+  /** UI “knowledge to context” — full-text search over attached knowledge. */
   fullTextSearchUsed?: boolean;
+
   memoryModeUsed?: boolean;
 
   mentions?: unknown[];
+
+  /** Attach already-uploaded knowledge items to this turn / chat. */
+  knowledgeIds?: string[];
 
 }
 
@@ -185,6 +235,14 @@ export interface SendMessageRequest {
   };
 
   assistantId: string;
+
+  knowledgeIds?: string[];
+
+}
+
+export interface CreateChatOptions {
+
+  knowledgeIds?: string[];
 
 }
 
@@ -239,6 +297,17 @@ export type ContentBlock =
     }
   | {
 
+      kind: "reasoning";
+
+      key: string;
+      sectionType: string;
+
+      text: string;
+      streaming: boolean;
+
+    }
+  | {
+
       kind: "progress";
 
       key: string;
@@ -254,6 +323,15 @@ export type ContentBlock =
       url: string;
 
       linkType: string;
+
+    }
+  | {
+
+      kind: "error";
+
+      key: string;
+      content: string;
+      opcode?: number;
 
     }
   | {
@@ -274,7 +352,12 @@ export interface ChatTurn {
   role: "user" | "assistant";
   status: TurnStatus;
 
+  /** Visible answer text (excludes reasoning sections). */
   text: string;
+
+  /** Platform reasoning / chain-of-thought, when streamed as its own section. */
+  reasoning?: string;
+
   blocks: ContentBlock[];
 
   submissionId?: string;
@@ -282,6 +365,8 @@ export interface ChatTurn {
 
   created?: number;
   error?: string;
+
+  usage?: UsageBucket | null;
 
 }
 
@@ -292,14 +377,23 @@ export interface ResponseSnapshot {
   submissionId: string | null;
   assistantId: string | null;
 
-  status: "idle" | "streaming" | "complete";
+  status: "idle" | "streaming" | "complete" | "error";
 
+  /** Answer text only — safe for tool/command parsing. */
   text: string;
+
+  /** Reasoning section text, when present. */
+  reasoning: string;
+
   blocks: ContentBlock[];
 
   progress: string | null;
 
   links: Extract<ContentBlock, { kind: "link" }>[];
+
+  error: string | null;
+
+  usage: UsageBucket | null;
 
 }
 
@@ -321,6 +415,9 @@ export type StreamChange =
       text: string;
       sectionKey: string;
 
+      /** Section this delta belongs to (`Reasoning`, `Text`, …). */
+      sectionType: string;
+
     }
   | {
 
@@ -328,6 +425,8 @@ export type StreamChange =
 
       snapshot: ResponseSnapshot;
       sectionKey: string;
+
+      sectionType: string;
 
     }
   | {
@@ -350,6 +449,15 @@ export type StreamChange =
 
       kind: "complete";
       snapshot: ResponseSnapshot;
+
+    }
+  | {
+
+      kind: "error";
+      snapshot: ResponseSnapshot;
+
+      content: string;
+      opcode?: number;
 
     }
   | {

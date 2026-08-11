@@ -1,5 +1,5 @@
 import { Component, createRef, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUpIcon, ChevronDownIcon, SquareIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronDownIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, } from "@/comps/ui/dropdown";
 
@@ -26,14 +26,20 @@ interface ComposerProps {
   contextLimit?: number;
 
   onModelChange: (id: string) => void;
-  onSend: (task: string) => void;
+  onSend: (task: string, imagePaths: string[]) => void;
   onStop: () => void;
+
+  /** Open a multi-file picker; return absolute paths. */
+  onPickImages?: () => Promise<string[]>;
 
 }
 
 interface ComposerState {
 
   text: string;
+
+  /** Absolute paths queued for upload with the next send. */
+  attachments: string[];
 
 }
 
@@ -76,9 +82,17 @@ function ContextRing({ ratio, used, limit, onStop }: { ratio: number; used?: num
 
 }
 
+function fileLabel(path: string): string {
+
+  const parts = path.replaceAll("\\", "/").split("/");
+
+  return parts[parts.length - 1] || path;
+
+}
+
 export class Composer extends Component<ComposerProps, ComposerState> {
 
-  state: ComposerState = { text: "" };
+  state: ComposerState = { text: "", attachments: [] };
 
   private input = createRef<HTMLTextAreaElement>();
 
@@ -117,15 +131,26 @@ export class Composer extends Component<ComposerProps, ComposerState> {
     event?.preventDefault();
 
     const task = this.state.text.trim();
+    const { attachments } = this.state;
 
-    if (!task || this.props.disabled || this.props.busy) {
+    // busy only swaps the send control for stop — typing and interjections stay open
+    if ((!task && !attachments.length) || this.props.disabled) {
 
       return;
 
     }
 
-    this.props.onSend(task);
-    this.setState({ text: "" });
+    // images alone still need a short instruction so the harness has something to do
+    const payload = task || (attachments.length ? "Use the attached image(s) for this task." : "");
+
+    if (!payload) {
+
+      return;
+
+    }
+
+    this.props.onSend(payload, attachments);
+    this.setState({ text: "", attachments: [] });
 
   };
 
@@ -140,18 +165,51 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
   };
 
+  private pickImages = async () => {
+
+    if (!this.props.onPickImages || this.props.disabled) {
+
+      return;
+
+    }
+
+    const paths = await this.props.onPickImages();
+
+    if (!paths?.length) {
+
+      return;
+
+    }
+
+    this.setState((prev) => ({
+
+      attachments: [...new Set([...prev.attachments, ...paths])],
+
+    }));
+
+  };
+
+  private removeAttachment = (path: string) => {
+
+    this.setState((prev) => ({
+
+      attachments: prev.attachments.filter((p) => p !== path),
+
+    }));
+
+  };
+
   render() {
 
-    const { assistants, assistantId, busy, disabled, placeholder, disabledPlaceholder, contextRatio = 0, contextUsed, contextLimit, onModelChange, onStop } = this.props;
+    const { assistants, assistantId, busy, disabled, placeholder, disabledPlaceholder, contextRatio = 0, contextUsed, contextLimit, onModelChange, onStop, onPickImages } = this.props;
 
-    const { text } = this.state;
+    const { text, attachments } = this.state;
 
     const model = assistants.find((assistant) => assistant.id === assistantId);
     const groups = groupAssistants(assistants);
     const provider = model ? providerOf(model) : null;
 
-    const locked = disabled || busy;
-    const canSend = !locked && text.trim().length > 0;
+    const canSend = !disabled && (text.trim().length > 0 || attachments.length > 0);
 
     return (
 
@@ -159,12 +217,36 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
         <div role="presentation" onClick={() => this.input.current?.focus()} className="flex cursor-text flex-col gap-2.5 rounded-window border border-line bg-field p-3 shadow-card transition-[border-color] duration-150 focus-within:border-line-strong" >
 
-          <textarea className="min-h-7 w-full resize-none bg-transparent px-1 text-[14.5px] leading-[1.5] text-ink outline-none placeholder:text-ink-3 disabled:opacity-60"
+          {attachments.length > 0 ? (
+
+            <div className="flex flex-wrap gap-1.5 px-1 pb-2">
+
+              {attachments.map((path) => (
+
+                <span key={path} className="inline-flex max-w-full items-center gap-1 rounded-control border border-line bg-inset px-2 py-0.5 text-[12px] text-ink-2">
+
+                  <span className="min-w-0 truncate" title={path}>{fileLabel(path)}</span>
+
+                  <button type="button" aria-label={`Remove ${fileLabel(path)}`} disabled={disabled} onClick={(e) => { e.stopPropagation(); this.removeAttachment(path); }} className="shrink-0 rounded p-0.5 text-ink-3 hover:bg-hover hover:text-ink disabled:opacity-50">
+
+                    <XIcon className="size-3" />
+
+                  </button>
+
+                </span>
+
+              ))}
+
+            </div>
+
+          ) : null}
+
+          <textarea className="min-h-7 w-full resize-none bg-transparent px-1 text-[14.5px] leading-normal text-ink outline-none placeholder:text-ink-3 disabled:opacity-60"
 
             ref={this.input}
 
             value={text}
-            disabled={locked}
+            disabled={disabled}
 
             placeholder={disabled ? disabledPlaceholder : placeholder}
 
@@ -179,9 +261,9 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
             <DropdownMenu>
 
-              <DropdownMenuTrigger asChild>
+              <DropdownMenuTrigger asChild className="text-ink-2 hover:text-ink -ml-1" style={{ background: "none" }}>
 
-                <button type="button" disabled={disabled || groups.length === 0} className="flex h-8 min-w-0 items-center gap-2 rounded-control px-2.5 text-[13px] text-ink-2 outline-none transition-colors duration-100 hover:bg-hover hover:text-ink focus:outline-none focus-visible:outline-none disabled:opacity-50" >
+                <button type="button" disabled={disabled || groups.length === 0} className="flex h-8 min-w-0 items-center gap-2 px-2.5 text-[13px] disabled:opacity-50" >
 
                   <span className="max-w-56 truncate">
 
@@ -237,26 +319,58 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
             </DropdownMenu>
 
-            {busy ? (
+            <div className="flex shrink-0 items-center gap-1">
 
-              <ContextRing ratio={contextRatio} used={contextUsed} limit={contextLimit} onStop={onStop} />
+              {onPickImages ? (
 
-            ) : (
+                <button type="button" aria-label="Attach files" disabled={disabled} onClick={(e) => { e.stopPropagation(); void this.pickImages(); }} className="flex size-8 shrink-0 items-center justify-center rounded-control text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink disabled:opacity-50" title="Attach images or files">
 
-              <button type="submit" aria-label="Send" disabled={!canSend}
+                  <PaperclipIcon className="size-4" />
 
-                className={cn(
-                  "flex size-8 items-center justify-center rounded-control transition-[background-color,color,transform] duration-200",
-                  canSend ? "bg-ink text-page active:scale-[0.96]" : "bg-line-strong text-ink-3",
-                )}
+                </button>
 
-              >
+              ) : null}
 
-                <ArrowUpIcon className="size-4.5" strokeWidth={2.4} />
+              {busy ? (
 
-              </button>
+                <>
 
-            )}
+                  {canSend ? (
+
+                    <button type="submit" aria-label="Send note" title="Send note to the agent"
+
+                      className="flex size-8 items-center justify-center rounded-full bg-ink text-page transition-[background-color,color,transform] duration-200 active:scale-[0.96]"
+
+                    >
+
+                      <ArrowUpIcon className="size-4.5" strokeWidth={2.4} />
+
+                    </button>
+
+                  ) : null}
+
+                  <ContextRing ratio={contextRatio} used={contextUsed} limit={contextLimit} onStop={onStop} />
+
+                </>
+
+              ) : (
+
+                <button type="submit" aria-label="Send" disabled={!canSend}
+
+                  className={cn(
+                    "flex size-8 items-center justify-center rounded-full transition-[background-color,color,transform] duration-200",
+                    canSend ? "bg-ink text-page active:scale-[0.96]" : "bg-line-strong text-ink-3",
+                  )}
+
+                >
+
+                  <ArrowUpIcon className="size-4.5" strokeWidth={2.4} />
+
+                </button>
+
+              )}
+
+            </div>
 
           </div>
 

@@ -315,11 +315,11 @@ export class UsageHeatmap extends Component<UsageHeatmapProps, UsageHeatmapState
 
           </div>
 
-          <div className="flex gap-[4px]">
+          <div className="flex gap-1">
 
             {weeks.map((week, wi) => (
 
-              <div key={wi} className="flex flex-col gap-[4px]">
+              <div key={wi} className="flex flex-col gap-1">
 
                 {week.map((cell, di) => {
 
@@ -330,7 +330,7 @@ export class UsageHeatmap extends Component<UsageHeatmapProps, UsageHeatmapState
                       <div
 
                         key={`f-${wi}-${di}`}
-                        className={cn("size-[13px] rounded-[3px]", CELL[0], "opacity-35")}
+                        className={cn("size-3.25 rounded-[3px]", CELL[0], "opacity-35")}
 
                       />
 
@@ -352,7 +352,7 @@ export class UsageHeatmap extends Component<UsageHeatmapProps, UsageHeatmapState
 
                       className={cn(
 
-                        "size-[13px] rounded-[3px] outline-none transition-[transform,filter] duration-100",
+                        "size-3.25 rounded-[3px] outline-none transition-[transform,filter] duration-100",
                         CELL[level],
                         active && "scale-110 brightness-110",
 
@@ -374,7 +374,7 @@ export class UsageHeatmap extends Component<UsageHeatmapProps, UsageHeatmapState
 
         {hover ? (
 
-          <div className="pointer-events-none absolute z-10 min-w-[9rem] -translate-x-1/2 -translate-y-full rounded-[8px] bg-[#222427] px-3 py-2 shadow-raised animate-fade-in" style={{ left: hover.x, top: hover.y - 8 }} >
+          <div className="pointer-events-none absolute z-10 min-w-36 -translate-x-1/2 -translate-y-full rounded-control bg-[#222427] px-3 py-2 shadow-raised animate-fade-in" style={{ left: hover.x, top: hover.y - 8 }} >
 
             <div className="flex items-baseline justify-between gap-4">
 
@@ -395,7 +395,7 @@ export class UsageHeatmap extends Component<UsageHeatmapProps, UsageHeatmapState
 
                   <li key={row.name} className="flex items-center justify-between gap-4 text-[12px]">
 
-                    <span className="min-w-0 max-w-[8rem] truncate text-ink-3">{row.name}</span>
+                    <span className="min-w-0 max-w-32 truncate text-ink-3">{row.name}</span>
                     <span className="shrink-0 font-mono text-ink-2 tabular-nums">~{formatTokens(row.tokens)}</span>
 
                   </li>

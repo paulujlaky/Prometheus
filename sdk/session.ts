@@ -15,7 +15,11 @@ export interface ChatSessionOptions {
 
   timeoutMs?: number;
 
-  refreshOnComplete?: boolean; // If true, refreshes the chat state after a final response is received
+  /** If true, refetches full chat history after each final response (default false — stream is authoritative). */
+  refreshOnComplete?: boolean;
+
+  /** Attach knowledge when creating a brand-new chat. */
+  knowledgeIds?: string[];
 
 }
 
@@ -41,7 +45,7 @@ export class ChatSession {
   readonly client: BoodleClient;
   readonly chatId: string;
 
-  private options: Required< Pick< ChatSessionOptions, | "reconnect" | "reconnectDelayMs" | "maxReconnectAttempts" | "timeoutMs" | "refreshOnComplete" >> & { assistantId?: string };
+  private options: Required< Pick< ChatSessionOptions, | "reconnect" | "reconnectDelayMs" | "maxReconnectAttempts" | "timeoutMs" | "refreshOnComplete" >> & { assistantId?: string; knowledgeIds?: string[] };
 
   private chat: Chat | null = null;
   private messages: ChatTurn[] = [];
@@ -74,6 +78,7 @@ export class ChatSession {
     this.options = {
 
       assistantId: options.assistantId,
+      knowledgeIds: options.knowledgeIds,
 
       reconnect: options.reconnect ?? true,
       reconnectDelayMs: options.reconnectDelayMs ?? 1500,
@@ -81,7 +86,8 @@ export class ChatSession {
 
       timeoutMs: options.timeoutMs ?? 180_000,
 
-      refreshOnComplete: options.refreshOnComplete ?? true,
+      // stream snapshot is authoritative; avoid a full GET after every turn
+      refreshOnComplete: options.refreshOnComplete ?? false,
 
     };
 
@@ -89,7 +95,13 @@ export class ChatSession {
 
   static async create(client: BoodleClient, options: ChatSessionOptions = {}): Promise<ChatSession> {
 
-    const chat = await client.createChat();
+    // prefer a recent empty chat over minting a new one every run
+    const chat = await client.createOrReuseChat({
+
+      knowledgeIds: options.knowledgeIds,
+
+    });
+
     const session = new ChatSession(client, chat.id, options);
 
     session.chat = chat;
@@ -215,6 +227,19 @@ export class ChatSession {
 
   }
 
+  /** Attach knowledge items to this chat (images/files already uploaded). */
+  async attachKnowledge(knowledgeIds: string[]): Promise<void> {
+
+    if (!knowledgeIds.length) {
+
+      return;
+
+    }
+
+    await this.client.attachChatKnowledge(this.chatId, knowledgeIds);
+
+  }
+
   /** Send a user message and wait until the assistant turn completes or times out. */
   async send(content: string, options: SendMessageOptions = {}): Promise<ChatTurn> {
 
@@ -306,6 +331,12 @@ export class ChatSession {
       this.emitState();
 
       const completed = await this.waitForFinal(pending.id);
+
+      if (completed.status === "error" || completed.error) {
+
+        throw new Error(completed.error ?? "Assistant returned an error");
+
+      }
 
       if (this.options.refreshOnComplete) {
 
@@ -603,7 +634,7 @@ export class ChatSession {
     this.emitEvent({ type: "stream", change, turn });
     this.emitState();
 
-    if (change.kind === "complete") {
+    if (change.kind === "complete" || change.kind === "error") {
 
       const pending = this.pendingFinal;
 
@@ -624,7 +655,9 @@ export class ChatSession {
 
     return new Promise((resolve, reject) => {
 
-      const existing = this.messages.find((m) => m.role === "assistant" && m.submissionId === submissionId && m.status === "complete"); // already complete?
+      const existing = this.messages.find(
+        (m) => m.role === "assistant" && m.submissionId === submissionId && (m.status === "complete" || m.status === "error"),
+      );
 
       if (existing) {
 
