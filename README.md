@@ -28,9 +28,19 @@ That builds the renderer (Vite) and the process (Bun), then launches Electron.
 
 1. Choose a **working folder** (last path is remembered).
 2. Pick a **model** (grouped by provider) and an **approval mode**.
-3. Describe a task. The agent streams a short prose line plus one bash block.
+3. Describe a task. Each reply opens with a one-word tool classifier plus a short label, then one bash block.
 4. The block is written to a temp script and executed with `bash` (or `SWE_SHELL`).
 5. Output is fed back; the loop continues until `MINI_SWE_FINISHED` appears in the output, or the step limit is hit.
+
+### Step Protocol
+
+Every reply is exactly `<tool>: <≤8 word label>` followed by one ```bash block. The tool is parsed from a
+closed vocabulary and drives the icon and grouping in the transcript:
+
+`read` · `search` · `write` · `edit` · `run` · `test` · `fix` · `think` · `done`
+
+Anything the model writes between the label and the fence is folded away as *Thought for Ns*. When a reply
+skips the classifier, the tool is inferred from the command itself (`apply_patch` → edit, `rg` → search, …).
 
 ---
 

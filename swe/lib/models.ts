@@ -2,6 +2,7 @@ import type { AssistantSummary } from "../../sdk/types";
 
 /** Major chat providers the picker surfaces, in display order. */
 const PROVIDERS = [
+
   "Anthropic",
   "OpenAI",
   "Google",
@@ -11,6 +12,7 @@ const PROVIDERS = [
   "DeepSeek",
   "Perplexity",
   "Cohere",
+
 ] as const;
 
 export type Provider = (typeof PROVIDERS)[number];

@@ -16,10 +16,13 @@ const here = resolve(dirname(process.argv[1] ?? ""));
 function resolveIcon(): string | undefined {
 
   const candidates = [
+
     join(here, "assets", "icon.png"),
+
     // source tree when running main from a non-dist layout
     resolve(here, "../assets/icon.png"),
     resolve(here, "../../swe/assets/icon.png"),
+
   ];
 
   for (const path of candidates) {

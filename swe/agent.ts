@@ -67,9 +67,7 @@ function toBashPath(p: string): string {
 
 function prompt(cwd: string, task: string): string {
 
-  const win = process.platform === "win32"
-    ? "- You are on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n"
-    : "";
+  const win = process.platform === "win32" ? "- You are on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n" : "";
 
   return [
     "You are a coding agent. Bash you write is executed on the user's machine; stdout/stderr come back. Do not simulate or refuse shell access.",
@@ -79,20 +77,30 @@ function prompt(cwd: string, task: string): string {
     "",
     "Every reply must be EXACTLY this shape (machine-parsed, streamed live):",
     "",
-    "desc: <an ~8 word label>",
+    "<tool>: <≤8 word label>",
     "```bash",
     "<single focused command>",
     "```",
     "",
-    "Important: output order is mandatory (the step is shown as soon as desc arrives):",
-    "- Token 1 of the reply must start the line `desc: ...` — nothing else first.",
-    "- Prefer the next line to open ```bash immediately so the command streams early.",
-    "- Thinking out-loud: only between `desc:` and the ```bash fence (the UI hides it under Thinking / Thought for Ns).",
-    "- Again, never put thinking before `desc:` or after the closing fence. Only the key `desc:` is a valid step label.",
+    `<tool> is ONE word, chosen from this list only — it is parsed as the step's tool type and drives the UI:`,
+    "  read    inspecting files or directories (cat, ls, head, wc)",
+    "  search  locating things (rg, grep, find)",
+    "  write   creating a new file",
+    "  edit    changing an existing file (apply_patch, git apply, sg)",
+    "  run     builds, installs, scaffolds, git, anything else",
+    "  test    running tests, type-checks or lints",
+    "  fix     a retry after the previous step failed",
+    "  think   planning with a read-only probe",
+    "  done    the final FINISHED echo",
+    "",
+    "Output order is mandatory (the step renders as soon as the label arrives):",
+    "- Token 1 of the reply starts the label line. Nothing may precede it.",
+    "- Open ```bash on the next line so the command streams early.",
+    "- Thinking out loud belongs only between the label and the fence (the UI folds it under Thought for Ns). Never before the label, never after the closing fence.",
     "",
     "Editing — use the bundled tools (already on PATH). Do NOT invent ad-hoc Python/sed editors.",
     "",
-    "1) apply_patch (preferred for create/update/delete) — open Codex-style multi-file patches:",
+    "1) apply_patch — preferred for create/update/delete, multi-file in one call:",
     "  apply_patch <<'PATCH'",
     "  *** Begin Patch",
     "  *** Update File: path/to/file.ts",
@@ -105,35 +113,24 @@ function prompt(cwd: string, task: string): string {
     "  *** Delete File: path/to/gone.ts",
     "  *** End Patch",
     "  PATCH",
-    "  Paths must be relative. Context lines start with a space; removals `-`; additions `+`.",
-    "  If apply_patch fails, re-read the file and fix the context — do not fall back to rewriting the whole file from memory.",
+    "  Relative paths. Context lines start with a space; removals `-`; additions `+`.",
+    "  If it fails, re-read the file and fix the context — never fall back to rewriting the whole file from memory.",
     "",
-    "2) git apply — only for standard unified diffs (git format-patch / diff -u):",
-    "  git apply --whitespace=nowarn -p0 <<'DIFF'",
-    "  --- a/file.ts",
-    "  +++ b/file.ts",
-    "  @@ -1,3 +1,3 @@",
-    "  ...",
-    "  DIFF",
-    "",
-    "3) sg (ast-grep, available to you) — structural search/replace when an AST pattern is clearer than a line patch:",
-    "  sg -p 'console.log($A)' -r 'logger.info($A)' -l ts --update-all",
-    "  Preview first without --update-all when unsure.",
-    "",
-    "4) New file only if apply_patch is awkward — quoted heredoc (no inventing replace scripts):",
-    "  cat > 'path/to/file.ts' <<'EOF'",
-    "  ...entire file...",
-    "  EOF",
+    "2) git apply --whitespace=nowarn -p0 <<'DIFF' … DIFF — only for standard unified diffs.",
+    "3) sg -p '<pattern>' -r '<replacement>' -l ts --update-all — structural rewrites; preview without --update-all when unsure.",
+    "4) cat > 'path' <<'EOF' … EOF — new files only, when apply_patch is awkward.",
     "",
     "Behaviour Notes:",
     "- One action per turn: read OR edit OR write. Inspect the tree yourself when needed (`ls`, `git status -sb`, `rg`).",
     "- Quote paths. Prefer apply_patch over whole-file rewrites.",
     "- No verify parades: at most one build/test after real edits; never re-check the same fact; when done, finish immediately.",
-    `- Done: echo "${FINISHED}: <one-line summary>"`,
+    `- Done: echo "${FINISHED}: <one-line summary>" with the label \`done:\``,
     `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with rg/grep/tail.`,
     "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y. `cd` persists; env does not.",
     win,
+
     `\nTask: ${task}`,
+
   ].join("\n");
 
 }
@@ -194,9 +191,8 @@ function truncate(text: string): string {
 }
 
 /**
- * PATH prefixes for bundled tools (apply_patch, sg/ast-grep), then cwd marker.
- * `toolBins` should already be bash-friendly paths joined with `:`.
- */
+ * PATH prefixes for bundled tools (apply_patch, sg/ast-grep)
+*/
 export function wrapCommand(command: string, toolBins?: string): string {
 
   // $PWD under Git Bash is an MSYS path (/tmp, /c/...) that Windows cannot spawn into; pwd -W gives the native one
@@ -221,9 +217,12 @@ export function resolveToolBinDirs(bundleDir: string): string[] {
 
   // electron runs swe/dist/main.cjs → project root is ../..
   const rootCandidates = [
+
     resolve(bundleDir, "../.."),
     resolve(bundleDir, "../../.."),
+
     process.cwd(),
+
   ];
 
   for (const root of rootCandidates) {
@@ -325,6 +324,7 @@ function killTree(child: ChildProcess) {
     } catch {
 
       // already gone
+
     }
 
   }
@@ -682,7 +682,7 @@ export class MiniAgent {
 
             "That reply contained no bash code block, so nothing ran and the task did not advance.",
             "Your commands are really executed on the user's machine and the output comes back to you — do not answer with prose, files, or artifacts.",
-            "Reply now — first line MUST be desc:, second line MUST open ```bash:\n\ndesc: <≤8 word label>\n```bash\n<one command>\n```",
+            "Reply now — line 1 is the label, line 2 opens the fence:\n\nread|search|write|edit|run|test|fix|think|done: <≤8 word label>\n```bash\n<one command>\n```",
 
           ].join("\n");
 
@@ -694,7 +694,7 @@ export class MiniAgent {
 
         onEvent({ type: "command", command });
 
-        // approve() resolves immediately in auto/smart-safe modes; stay on Thinking while parked on a prompt
+        // approve() resolves immediately in auto/smart-safe modes; we should stay on Thinking while parked on a prompt
         const approval = approve(command);
         const waiting = setTimeout(() => phase("Thinking"), 40);
         const ok = await approval;
@@ -755,17 +755,17 @@ export class MiniAgent {
         // failed patch: nudge toward re-read instead of a blind whole-file rewrite
         const patchMiss = exitCode !== 0 && /apply_patch:|Invalid Context|failed to update|git apply/i.test(output);
 
-        message = patchMiss
-          ? [
+        message = patchMiss ? [
 
-              `Exit code: ${exitCode}`,
-              "",
-              truncate(output) || "<no output>",
-              "",
-              "Patch context did not match. Re-cat the file, fix the @@ context lines, and retry apply_patch (or git apply) — do not rewrite the whole file from memory.",
+            `Exit code: ${exitCode}`,
+            "",
+            truncate(output) || "<no output>",
+            "",
+            "Patch context did not match. Re-cat the file, fix the @@ context lines, and retry apply_patch (or git apply) — do not rewrite the whole file from memory.",
 
-            ].join("\n")
-          : `Exit code: ${exitCode}\n\n${truncate(output) || "<no output>"}`;
+          ].join("\n")
+
+        : `Exit code: ${exitCode}\n\n${truncate(output) || "<no output>"}`;
 
       }
 

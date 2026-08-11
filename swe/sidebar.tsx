@@ -1,7 +1,6 @@
-import { Component, type MouseEvent as ReactMouseEvent } from "react";
-import { MessageSquareIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { Component, createRef, type MouseEvent as ReactMouseEvent } from "react";
+import { PlusIcon, Trash2Icon } from "lucide-react";
 
-import { Button } from "@/comps/ui/button";
 import { cn } from "@/lib/utils";
 
 export interface SweChat {
@@ -36,6 +35,8 @@ interface SidebarProps {
 interface SidebarState {
 
   menu: ContextMenu | null;
+  hovered: string | null;
+  box: { top: number; height: number } | null;
 
 }
 
@@ -87,13 +88,25 @@ function relativeTime(ts: number): string {
 
 export class Sidebar extends Component<SidebarProps, SidebarState> {
 
-  state: SidebarState = { menu: null };
+  state: SidebarState = { menu: null, hovered: null, box: null };
+
+  private list = createRef<HTMLDivElement>();
+
+  private rows = new Map<string, HTMLButtonElement>();
 
   componentDidMount() {
 
     window.addEventListener("click", this.closeMenu);
     window.addEventListener("scroll", this.closeMenu, true);
     window.addEventListener("keydown", this.onKey);
+
+    this.moveHighlight();
+
+  }
+
+  componentDidUpdate() {
+
+    this.moveHighlight();
 
   }
 
@@ -102,6 +115,36 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
     window.removeEventListener("click", this.closeMenu);
     window.removeEventListener("scroll", this.closeMenu, true);
     window.removeEventListener("keydown", this.onKey);
+
+  }
+
+  /** One pill glides between rows instead of each row toggling its own background. */
+  private moveHighlight() {
+
+    const container = this.list.current;
+    const target = this.rows.get(this.state.hovered ?? this.props.activeId ?? "");
+
+    if (!container || !target) {
+
+      if (this.state.box) {
+
+        this.setState({ box: null });
+
+      }
+
+      return;
+
+    }
+
+    const top = target.offsetTop;
+    const height = target.offsetHeight;
+    const box = this.state.box;
+
+    if (box?.top !== top || box.height !== height) {
+
+      this.setState({ box: { top, height } });
+
+    }
 
   }
 
@@ -130,17 +173,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
     event.preventDefault();
     event.stopPropagation();
 
-    this.setState({
-
-      menu: {
-
-        x: event.clientX,
-        y: event.clientY,
-        chat,
-
-      },
-
-    });
+    this.setState({ menu: { x: event.clientX, y: event.clientY, chat } });
 
   };
 
@@ -162,46 +195,51 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
   render() {
 
     const { chats, activeId, loading, onSelect, onNew } = this.props;
-    const { menu } = this.state;
+    const { menu, box } = this.state;
 
+    // pt centres the first control against the 56px header across the split
     return (
 
-      <aside className="flex h-full w-56 shrink-0 flex-col border-r border-border bg-muted/15">
+      <aside className="flex h-full w-64 shrink-0 flex-col gap-2 border-r border-line bg-canvas p-2.5 pt-[10px]">
 
-        <div className="flex h-14 items-center justify-between gap-2 border-b border-border px-3">
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex w-full items-center gap-2 rounded-control px-2.5 py-2 text-[14px] font-medium text-brand transition-[background-color,transform] duration-100 hover:bg-brand-tint active:scale-[0.97]"
+        >
 
-          <span className="text-sm font-medium text-muted-foreground">Sessions</span>
+          <span className="min-w-0 flex-1 truncate text-left">New session</span>
 
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="size-7"
-            title="New session"
-            onClick={onNew}
-          >
+          <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-brand text-white">
 
-            <PlusIcon className="size-3.5" />
+            <PlusIcon className="size-3" strokeWidth={3} />
 
-          </Button>
+          </span>
 
-        </div>
+        </button>
 
-        <div className="flex-1 overflow-y-auto px-1.5 py-2">
+        <div className="min-h-0 flex-1 overflow-y-auto">
 
-          {loading && !chats.length && (
+          {loading && !chats.length && <p className="px-2.5 py-2 text-[13px] text-ink-3">Loading...</p>}
 
-            <p className="px-2 py-3 text-xs text-muted-foreground">Loading...</p>
+          {!loading && !chats.length && <p className="px-2.5 py-2 text-[13px] text-ink-3">No sessions, yet.</p>}
 
-          )}
+          <div ref={this.list} onMouseLeave={() => this.setState({ hovered: null })} className="relative flex flex-col gap-px" >
 
-          {!loading && !chats.length && (
+            <span aria-hidden className="pointer-events-none absolute inset-x-0 rounded-control bg-hover"
 
-            <p className="px-2 py-3 text-xs text-muted-foreground">No sessions, yet.</p>
+              style={{
 
-          )}
+                top: box?.top ?? 0,
+                height: box?.height ?? 0,
 
-          <ul className="flex flex-col gap-0.5">
+                opacity: box ? 1 : 0,
+
+                transition: "top 220ms var(--ease-glide), height 220ms var(--ease-glide), opacity 150ms ease",
+
+              }}
+
+            />
 
             {chats.map((chat) => {
 
@@ -209,72 +247,77 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
               return (
 
-                <li key={chat.id}>
+                <button key={chat.id} className="relative z-10 flex w-full flex-col items-start gap-0.5 rounded-control px-2.5 py-2 text-left transition-transform duration-150 active:scale-[0.98]"
 
-                  <button
-                    type="button"
-                    onClick={() => onSelect(chat)}
-                    onContextMenu={(event) => this.onContextMenu(event, chat)}
-                    className={cn(
+                  ref={(node) => {
 
-                      "flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left text-sm transition-colors",
-                      active
-                        ? "bg-secondary text-foreground"
-                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                    if (node) {
 
-                    )}
-                  >
+                      this.rows.set(chat.id, node);
 
-                    <MessageSquareIcon className="mt-0.5 size-3.5 shrink-0 opacity-70" />
+                    } else {
 
-                    <span className="min-w-0 flex-1">
+                      this.rows.delete(chat.id);
 
-                      <span className="line-clamp-2 text-[13px] leading-snug font-medium text-foreground/90">
+                    }
 
-                        {displayTitle(chat)}
+                  }}
 
-                      </span>
+                  type="button"
 
-                      {chat.modified > 0 && (
+                  onClick={() => onSelect(chat)}
+                  onMouseEnter={() => this.setState({ hovered: chat.id })}
+                  onFocus={() => this.setState({ hovered: chat.id })}
+                  onContextMenu={(event) => this.onContextMenu(event, chat)}
 
-                        <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                  aria-current={active ? "page" : undefined}
 
-                          {relativeTime(chat.modified)}
+                >
 
-                        </span>
+                  <span className={cn("line-clamp-2 w-full text-[13.5px] leading-snug", active ? "font-medium text-ink" : "text-ink-2")}>
 
-                      )}
+                    {displayTitle(chat)}
 
-                    </span>
+                  </span>
 
-                  </button>
+                  {chat.modified > 0 && (
 
-                </li>
+                    <span className="text-[11.5px] text-ink-3 tabular-nums">{relativeTime(chat.modified)}</span>
+
+                  )}
+
+                </button>
 
               );
 
             })}
 
-          </ul>
+          </div>
 
         </div>
 
         {menu && (
 
-          <div
-            className="fixed z-50 min-w-40 overflow-hidden rounded-lg border border-border bg-popover p-1 text-sm text-popover-foreground shadow-lg"
-            style={{ left: menu.x, top: menu.y }}
+          <div className="fixed z-50 min-w-40 overflow-hidden rounded-card bg-surface p-1 text-[13.5px] shadow-overlay"
+
+            style={{
+
+              left: menu.x,
+              top: menu.y,
+
+              animation: "pop-in 160ms var(--ease-glide) both",
+              transformOrigin: "top left"
+
+            }}
+
             onClick={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
+
           >
 
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-destructive hover:bg-destructive/10"
-              onClick={this.deleteFromMenu}
-            >
+            <button type="button" className="flex w-full items-center gap-2 rounded-chip px-2.5 py-2 text-left text-red transition-colors duration-100 hover:bg-red-tint" onClick={this.deleteFromMenu} >
 
-              <Trash2Icon className="size-3.5" />
+              <Trash2Icon className="size-4" />
               Delete session
 
             </button>

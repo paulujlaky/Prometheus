@@ -1,11 +1,9 @@
-import { Component } from "react";
+import { Component, Fragment } from "react";
 import { createRoot } from "react-dom/client";
-import { ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 
 import { Composer } from "@/comps/composer";
-import { Button } from "@/comps/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown-menu";
-import { Spinner } from "@/comps/ui/spinner";
 
 import { contextLimitOf } from "@/lib/models";
 import { usageOf } from "@/lib/tokens";
@@ -77,6 +75,45 @@ type WithoutId<T> = T extends unknown ? Omit<T, "id"> : never;
 
 type NewEntry = WithoutId<Entry>;
 
+/** Owns its own interval so a 10Hz clock never re-renders the transcript. */
+class Elapsed extends Component<{ since: number }, { now: number }> {
+
+  state = { now: Date.now() };
+
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  componentDidMount() {
+
+    this.timer = setInterval(() => this.setState({ now: Date.now() }), 100);
+
+  }
+
+  componentWillUnmount() {
+
+    if (this.timer) {
+
+      clearInterval(this.timer);
+
+    }
+
+  }
+
+  render() {
+
+    return (
+
+      <span className="font-mono text-[13px] text-ink-3 tabular-nums">
+
+        {((this.state.now - this.props.since) / 1000).toFixed(1)}s
+
+      </span>
+
+    );
+
+  }
+
+}
+
 interface AppState {
 
   entries: Entry[];
@@ -88,6 +125,7 @@ interface AppState {
   mode: ApprovalMode;
 
   running: boolean;
+  startedAt: number | null;
 
   status: string;
 
@@ -119,6 +157,7 @@ export class App extends Component<{}, AppState> {
     mode: (localStorage.getItem(MODE_KEY) as ApprovalMode | null) ?? "smart",
 
     running: false,
+    startedAt: null,
 
     status: "Idle",
 
@@ -140,6 +179,9 @@ export class App extends Component<{}, AppState> {
 
   /** Wall-clock start of the current model stream (for "Thought for Ns"). */
   private streamStartedAt: number | null = null;
+
+  /** When the bash fence opened — the thought ends there, not when the whole reply finishes. */
+  private thinkEndedAt: number | null = null;
 
   componentDidMount() {
 
@@ -269,10 +311,20 @@ export class App extends Component<{}, AppState> {
         if (prev.stream === null) {
 
           this.streamStartedAt = Date.now();
+          this.thinkEndedAt = null;
 
         }
 
-        return { stream: (prev.stream ?? "") + event.text };
+        const stream = (prev.stream ?? "") + event.text;
+
+        // the fence is where thinking stops and the command starts
+        if (this.thinkEndedAt == null && stream.includes("```")) {
+
+          this.thinkEndedAt = Date.now();
+
+        }
+
+        return { stream };
 
       });
 
@@ -283,14 +335,17 @@ export class App extends Component<{}, AppState> {
     if (event.type === "assistant") {
 
       // settle the streamed step into a real entry in one update, so nothing flickers between the two
-      const { desc, thinking, command } = parseReply(event.text);
+      const { tool, desc, thinking, command } = parseReply(event.text);
+
+      // measure to the fence, not to the end of the reply — otherwise a long command reads as long thinking
       const thoughtMs = this.streamStartedAt != null
-        ? Math.max(0, Date.now() - this.streamStartedAt)
+        ? Math.max(0, (this.thinkEndedAt ?? Date.now()) - this.streamStartedAt)
         : thinking.trim()
           ? Math.max(1000, Math.round(thinking.length / 50) * 1000)
           : null;
 
       this.streamStartedAt = null;
+      this.thinkEndedAt = null;
 
       this.setState((prev) => {
 
@@ -309,6 +364,7 @@ export class App extends Component<{}, AppState> {
           entries: [...prev.entries, {
             id,
             kind: "step",
+            tool,
             desc,
             thinking,
             thoughtMs,
@@ -348,7 +404,7 @@ export class App extends Component<{}, AppState> {
 
         }
 
-        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", desc: "", thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
+        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", tool: null, desc: "", thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
 
       });
 
@@ -368,7 +424,7 @@ export class App extends Component<{}, AppState> {
 
         }
 
-        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", desc: "", thinking: "", command: null, output: event.text, exitCode: event.exitCode, streaming: false }] };
+        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", tool: null, desc: "", thinking: "", command: null, output: event.text, exitCode: event.exitCode, streaming: false }] };
 
       });
 
@@ -524,17 +580,24 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    // each MiniAgent run opens a new Boodle chat — never append onto a browsed history
-    this.seq = 1;
+    this.seq = 1; // note: each MiniAgent run opens a new Boodle chat
+
     this.setState({
 
       entries: [{ id: "e1", kind: "task", text: task }],
+
       running: true,
-      status: "Starting...",
+
+      startedAt: Date.now(),
+      status: "Starting",
+
       toggled: new Set<string>(),
       tokensUsed: 0,
+
       stream: null,
+
       approval: null,
+
       activeChatId: null,
 
     });
@@ -549,7 +612,7 @@ export class App extends Component<{}, AppState> {
 
     } finally {
 
-      this.setState({ running: false, approval: null, stream: null });
+      this.setState({ running: false, startedAt: null, approval: null, stream: null });
       void this.refreshChats();
 
     }
@@ -558,24 +621,13 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const {
-      entries,
-      assistants,
-      assistantId,
-      cwd,
-      mode,
-      running,
-      status,
-      stream,
-      approval,
-      tokensUsed,
-      chats,
-      chatsLoading,
-      activeChatId,
-    } = this.state;
+    const { entries, assistants, assistantId, cwd, mode, running, startedAt, status, stream, approval, tokensUsed, chats, chatsLoading, activeChatId } = this.state;
 
     const model = assistants.find((a) => a.id === assistantId);
-    const rows = stream === null ? entries : [...entries, streamStep(stream)];
+    const liveThought = this.streamStartedAt != null && this.thinkEndedAt != null ? this.thinkEndedAt - this.streamStartedAt : null;
+
+    const rows = stream === null ? entries : [...entries, streamStep(stream, liveThought)];
+
     const activeMode = MODES.find((m) => m.value === mode) ?? MODES[1];
     const ModeIcon = activeMode.icon;
 
@@ -586,27 +638,31 @@ export class App extends Component<{}, AppState> {
 
     return (
 
-      <div className="flex h-full">
+      <div className="flex h-full bg-page">
 
         <Sidebar
+
           chats={chats}
           activeId={activeChatId}
+
           loading={chatsLoading}
+
           onSelect={(chat) => void this.selectChat(chat)}
           onDelete={(chat) => void this.deleteChat(chat)}
           onNew={this.newSession}
+
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
 
-          <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3 text-sm">
+          <header className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
 
-            <Button variant="ghost" size="default" className="gap-1.5 text-sm" onClick={() => void this.pickFolder()}>
+            <button type="button" onClick={() => void this.pickFolder()} className="flex h-9 items-center gap-2 rounded-control border border-line bg-surface px-3 text-[13px] font-medium text-ink transition-colors duration-100 hover:bg-hover" >
 
-              <FolderOpenIcon className="size-4" />
-              {cwd ? folderName : "Choose folder"}
+              <FolderOpenIcon className="size-4 text-ink-3" />
+              <span className="max-w-56 truncate">{cwd ? folderName : "Choose folder"}</span>
 
-            </Button>
+            </button>
 
             <div className="min-w-0 flex-1" />
 
@@ -614,13 +670,13 @@ export class App extends Component<{}, AppState> {
 
               <DropdownMenuTrigger asChild>
 
-                <Button variant="ghost" size="default" className="gap-1.5 bg-secondary/50 text-sm font-normal text-foreground hover:bg-secondary focus:ring-0 border-none">
+                <button type="button" className="flex h-9 items-center gap-2 rounded-control px-3 text-[13px] font-medium text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink" >
 
-                  <ModeIcon className="size-4 text-muted-foreground" />
+                  <ModeIcon className="size-4 text-ink-3" />
                   {activeMode.label}
-                  <ChevronDownIcon className="size-4 opacity-50" />
+                  <ChevronDownIcon className="size-3.5 opacity-60" />
 
-                </Button>
+                </button>
 
               </DropdownMenuTrigger>
 
@@ -631,13 +687,16 @@ export class App extends Component<{}, AppState> {
                 <DropdownMenuSeparator />
 
                 <DropdownMenuRadioGroup
+
                   value={mode}
+
                   onValueChange={(value) => {
 
                     localStorage.setItem(MODE_KEY, value);
                     this.setState({ mode: value as ApprovalMode });
 
                   }}
+
                 >
 
                   {MODES.map((option) => (
@@ -664,53 +723,70 @@ export class App extends Component<{}, AppState> {
           </header>
 
           <Transcript
+
             entries={rows}
+            running={running}
+
             empty={cwd ? "Describe a task below to start." : "Choose a working folder to start."}
+
             isOpen={this.isOpen}
             onToggle={this.toggle}
+
           />
 
           {approval && (
 
-            <div className="mx-auto w-full max-w-3xl px-4">
+            <div className="mx-auto w-full max-w-3xl px-5 pb-2">
 
-              <div className={cn(
+              <div className="overflow-hidden rounded-card bg-surface shadow-card animate-fade-up">
 
-                "flex items-center gap-2 rounded-xl border p-2",
-                approval.reason ? "border-destructive/50 bg-destructive/10" : "border-primary/40 bg-primary/5",
+                <div className="flex items-center gap-2.5 p-3.5">
 
-              )}>
+                  {approval.reason ? (
 
-                <div className="min-w-0 flex-1">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-red text-white">
 
-                  {approval.reason && (
+                      <TriangleAlertIcon className="size-3.5" strokeWidth={2.5} />
 
-                    <div className="mb-1 flex items-center gap-1.5 px-1 text-xs font-medium text-destructive">
+                    </span>
 
-                      <TriangleAlertIcon className="size-3.5" />
-                      Looks destructive — {approval.reason}
+                  ) : null}
 
-                    </div>
+                  <span className="text-[14px] font-medium text-ink">
 
-                  )}
+                    {approval.reason ? `Looks destructive — ${approval.reason}` : "Run this command?"}
 
-                  <code className="block max-h-24 overflow-y-auto px-1 font-mono text-xs whitespace-pre-wrap">{approval.command}</code>
+                  </span>
 
                 </div>
 
-                <Button variant="ghost" size="sm" className="gap-1.5" onClick={() => this.resolveApproval(false)}>
+                <div className="border-t border-line bg-inset px-3.5 py-3">
 
-                  <XIcon className="size-3.5" />
-                  Skip
+                  <pre className="max-h-32 overflow-y-auto font-mono text-[12.5px] leading-[1.65] whitespace-pre-wrap text-ink-2">
 
-                </Button>
+                    {approval.command}
 
-                <Button size="sm" variant={approval.reason ? "destructive" : "default"} className="gap-1.5" onClick={() => this.resolveApproval(true)}>
+                  </pre>
 
-                  <PlayIcon className="size-3.5" />
-                  Run
+                </div>
 
-                </Button>
+                <div className="flex items-center justify-end gap-2 border-t border-line px-3.5 py-3">
+
+                  <button type="button" onClick={() => this.resolveApproval(false)} className="flex h-9 items-center gap-2 rounded-control px-3 text-[13px] font-medium text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink" >
+
+                    <XIcon className="size-4" />
+                    Skip
+
+                  </button>
+
+                  <button type="button" onClick={() => this.resolveApproval(true)} className={cn( "flex h-9 items-center gap-2 rounded-control px-3 text-[13px] font-medium transition-[background-color,transform] duration-100 active:scale-[0.97]", approval.reason ? "bg-red text-white hover:bg-red/85" : "bg-ink text-page hover:bg-ink/85", )} >
+
+                    <PlayIcon className="size-4 fill-current" />
+                    Run
+
+                  </button>
+
+                </div>
 
               </div>
 
@@ -718,36 +794,60 @@ export class App extends Component<{}, AppState> {
 
           )}
 
-          <div className="flex justify-center pb-3">
+          <div className="flex justify-center pt-1 pb-4">
 
-            <div className="flex w-fit items-center justify-center gap-2 rounded-full bg-muted px-3 py-1.5 text-sm text-muted-foreground">
+            <div className="flex w-fit items-center gap-2.5 rounded-full bg-field px-3.5 py-1.5 shadow-hairline">
 
-              {running && <Spinner className="size-3.5" />}
+              {status === "Done" ? <CheckIcon className="size-3.5 text-green" strokeWidth={3} /> : null}
 
-              <span>{status}</span>
+              {/* the agent sends "Step 2 · Drafting"; splitting it lets the gap come from flex, not the glyph */}
+              {status.split(" · ").map((part, index) => (
+
+                <Fragment key={index}>
+
+                  {index > 0 ? <span className="text-[13px] text-ink-3">·</span> : null}
+
+                  <span className={cn( "text-[13px] font-medium", status === "Error" ? "text-red" : status === "Done" ? "text-green" : "text-ink-2", )} >
+
+                    {part}
+
+                  </span>
+
+                </Fragment>
+
+              ))}
+
+              {running && startedAt != null ? <Elapsed since={startedAt} /> : null}
 
             </div>
 
           </div>
 
           <Composer
+
             assistants={assistants}
             assistantId={assistantId}
+
             busy={running}
             disabled={!cwd}
+
             contextRatio={usage.ratio}
             contextUsed={usage.used}
             contextLimit={usage.limit}
+
             placeholder="Describe the task..."
             disabledPlaceholder="Choose a working folder first..."
+
             onModelChange={(id) => {
 
               localStorage.setItem(MODEL_KEY, id);
               this.setState({ assistantId: id });
 
             }}
+
             onSend={(task) => void this.start(task)}
             onStop={() => void window.swe.stop()}
+
           />
 
         </div>

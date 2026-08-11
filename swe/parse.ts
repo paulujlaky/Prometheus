@@ -1,10 +1,15 @@
-/**
- * Single protocol parser for mini-swe replies.
-*/
+// Single protocol parser for mini-swe replies.
 
 export const FINISHED = "MINI_SWE_FINISHED";
 
-/** Only `desc:` — keeps the surface tiny so the model cannot invent alternate labels. */
+/** Closed vocabulary: the label key doubles as the tool type the UI renders. */
+export const TOOLS = ["read", "search", "write", "edit", "run", "test", "fix", "think", "done"] as const;
+
+export type Tool = (typeof TOOLS)[number];
+
+const TOOL_LINE = new RegExp(`^(${TOOLS.join("|")})\\s*:\\s*(.+)$`, "i");
+
+// pre-classifier protocol; still parsed so archived chats keep replaying
 const DESC_LINE = /^desc\s*:\s*(.+)$/i;
 
 // opening fence with optional shell language
@@ -13,6 +18,9 @@ const FENCE_OPENING_PARTIAL = /```[ \t]*(?:bash|sh|shell)?[ \t]*$/im;
 const PARTIAL_FENCE = /(^|\n)[ \t]*`{1,3}[a-zA-Z]*$/;
 
 export interface ParsedReply {
+
+  /** Preset classifier from the label line; null until it arrives (or on legacy `desc:`). */
+  tool: Tool | null;
 
   desc: string;
   thinking: string;
@@ -23,26 +31,40 @@ export interface ParsedReply {
 }
 
 /** Label + optional thinking from text before the bash fence. */
-export function parseLeading(leading: string): { desc: string; thinking: string } {
+export function parseLeading(leading: string): { tool: Tool | null; desc: string; thinking: string } {
 
   const raw = leading.replace(PARTIAL_FENCE, "").trim();
 
   if (!raw) {
 
-    return { desc: "", thinking: "" };
+    return { tool: null, desc: "", thinking: "" };
 
   }
 
   const think: string[] = [];
+
+  let tool: Tool | null = null;
   let desc = "";
 
   for (const line of raw.split(/\r?\n/)) {
 
-    const match = DESC_LINE.exec(line.trim());
+    const trimmed = line.trim();
+    const classified = TOOL_LINE.exec(trimmed);
 
-    if (match) {
+    if (classified) {
 
-      desc = match[1].replace(/\s+/g, " ").trim();
+      tool = classified[1].toLowerCase() as Tool;
+      desc = classified[2].replace(/\s+/g, " ").trim();
+
+      continue;
+
+    }
+
+    const legacy = DESC_LINE.exec(trimmed);
+
+    if (legacy) {
+
+      desc = legacy[1].replace(/\s+/g, " ").trim();
       continue;
 
     }
@@ -55,12 +77,12 @@ export function parseLeading(leading: string): { desc: string; thinking: string 
 
   if (desc) {
 
-    return { desc, thinking };
+    return { tool, desc, thinking };
 
   }
 
-  // no `desc:` yet — do not promote monologue into the title (UI shows Working… until classifier arrives)
-  return { desc: "", thinking: raw };
+  // no label yet — do not promote monologue into the title (UI shows Working… until it arrives)
+  return { tool: null, desc: "", thinking: raw };
 
 }
 
@@ -82,15 +104,15 @@ export function parseReply(text: string): ParsedReply {
 
   if (partial) {
 
-    const { desc, thinking } = parseLeading(text.slice(0, partial.index));
+    const { tool, desc, thinking } = parseLeading(text.slice(0, partial.index));
 
-    return { desc, thinking, command: "", hasFence: true };
+    return { tool, desc, thinking, command: "", hasFence: true };
 
   }
 
-  const { desc, thinking } = parseLeading(text);
+  const { tool, desc, thinking } = parseLeading(text);
 
-  return { desc, thinking, command: null, hasFence: false };
+  return { tool, desc, thinking, command: null, hasFence: false };
 
 }
 
@@ -122,11 +144,12 @@ function finishFence(text: string, fenceIndex: number, openLen: number): ParsedR
 
   }
 
-  const { desc, thinking } = parseLeading(text.slice(0, fenceIndex));
+  const { tool, desc, thinking } = parseLeading(text.slice(0, fenceIndex));
   const command = body.trim();
 
   return {
 
+    tool,
     desc,
     thinking: [thinking, trailing].filter(Boolean).join("\n\n").trim(),
     command: command || null,
@@ -204,6 +227,222 @@ export function extractCommand(reply: string): string | null {
 
 }
 
+const REDIRECT = /(?:^|[|;&]\s*)(?:cat|tee)\s*>>?\s*['"]?([^\s'"|;&<]+)/m;
+
+// first match wins, so order matters: `git apply` is an edit before it is a run
+const INFERRED: [RegExp, Tool][] = [
+
+  [new RegExp(FINISHED), "done"],
+  [/^\s*(apply_patch|sg\b|git\s+apply)/m, "edit"],
+  [/^\s*cat\s*>/m, "write"],
+  [/^\s*(rg|grep|find|ag|ack)\b/m, "search"],
+  [/^\s*(cat|head|tail|less|ls|wc|stat|file)\b/m, "read"],
+  [/\b(test|jest|vitest|pytest|tsc|eslint|lint)\b/, "test"],
+
+];
+
+/** Icon type for a step whose reply skipped the classifier (or replays from a legacy `desc:` chat). */
+export function inferTool(command: string | null): Tool {
+
+  if (!command) {
+
+    return "think";
+
+  }
+
+  for (const [pattern, tool] of INFERRED) {
+
+    if (pattern.test(command)) {
+
+      return tool;
+
+    }
+
+  }
+
+  return "run";
+
+}
+
+export type WriteKind = "add" | "update" | "delete";
+
+export interface WriteLine {
+
+  text: string;
+  kind: "add" | "remove" | "context" | "gap";
+
+}
+
+export interface FileWrite {
+
+  file: string;
+  kind: WriteKind;
+
+  added: number;
+  removed: number;
+
+  /** Full content for an add, the patch hunks for an update. */
+  lines: WriteLine[];
+
+}
+
+export interface FileEdit {
+
+  file: string;
+
+  added: number;
+  removed: number;
+
+}
+
+const PATCH_SECTION = /^\*\*\*\s*(Add|Update|Delete)\s+File:\s*(.+)$/;
+const DIFF_HEADER = /^\+\+\+\s+(?:b\/)?(.+)$/;
+const HEREDOC_OPEN = /<<-?\s*['"]?(\w+)['"]?/;
+
+/**
+ * The code the agent actually wrote, parsed from the command itself.
+*/
+export function parseWrites(command: string): FileWrite[] {
+
+  const writes: FileWrite[] = [];
+  const lines = command.split(/\r?\n/);
+
+  const open = (file: string, kind: WriteKind): FileWrite => {
+
+    const existing = writes.find((write) => write.file === file);
+
+    if (existing) {
+
+      return existing;
+
+    }
+
+    const write: FileWrite = { file: file.trim(), kind, added: 0, removed: 0, lines: [] };
+
+    writes.push(write);
+
+    return write;
+
+  };
+
+  // `cat > 'file' <<'EOF'` — the heredoc body is the file's new content verbatim
+  const redirect = REDIRECT.exec(lines[0] ?? "");
+  const heredoc = HEREDOC_OPEN.exec(lines[0] ?? "");
+
+  if (redirect && heredoc) {
+
+    const write = open(redirect[1], "add");
+
+    for (const line of lines.slice(1)) {
+
+      if (line.trim() === heredoc[1]) {
+
+        break;
+
+      }
+
+      write.lines.push({ text: line, kind: "add" });
+      write.added += 1;
+
+    }
+
+    return writes;
+
+  }
+
+  let current: FileWrite | null = null;
+
+  for (const line of lines) {
+
+    const section = PATCH_SECTION.exec(line);
+
+    if (section) {
+
+      const kind = section[1].toLowerCase() as WriteKind;
+
+      current = open(section[2], kind);
+      current.kind = kind;
+
+      continue;
+
+    }
+
+    const header = DIFF_HEADER.exec(line);
+
+    if (header) {
+
+      current = open(header[1], "update");
+      continue;
+
+    }
+
+    if (!current || line.startsWith("---") || line.startsWith("+++")) {
+
+      continue;
+
+    }
+
+    // hunk boundary: a visual break, not content
+    if (line.startsWith("@@")) {
+
+      if (current.lines.length) {
+
+        current.lines.push({ text: "", kind: "gap" });
+
+      }
+
+      continue;
+
+    }
+
+    if (line.startsWith("+")) {
+
+      current.lines.push({ text: line.slice(1), kind: "add" });
+      current.added += 1;
+
+      continue;
+
+    }
+
+    if (line.startsWith("-")) {
+
+      current.lines.push({ text: line.slice(1), kind: "remove" });
+      current.removed += 1;
+
+      continue;
+
+    }
+
+    if (line.startsWith(" ")) {
+
+      current.lines.push({ text: line.slice(1), kind: "context" });
+
+    }
+
+  }
+
+  // a trailing gap is the End Patch marker, not a break between hunks
+  for (const write of writes) {
+
+    while (write.lines[write.lines.length - 1]?.kind === "gap") {
+
+      write.lines.pop();
+
+    }
+
+  }
+
+  return writes.filter((write) => write.kind === "delete" || write.lines.length > 0);
+
+}
+
+/** Per-file line counts, for the run summary chips. */
+export function fileEdits(command: string): FileEdit[] {
+
+  return parseWrites(command).map(({ file, added, removed }) => ({ file, added, removed }));
+
+}
+
 export function extractFinishedSummary(output: string): string | null {
 
   const index = output.indexOf(FINISHED);
@@ -227,6 +466,8 @@ export function cleanSummary(text: string): string {
   s = s.replace(new RegExp(`^${FINISHED}[:\\s|-]*`, "i"), "");
   s = s.replace(/```[\s\S]*$/g, "").trim();
   s = s.replace(/\s+/g, " ");
+
+  s.endsWith('"') && (s = s.slice(0, -1).trim()); // replace trailing quote from `echo "Task complete."` in a finished bash block
 
   return s || "Task complete.";
 

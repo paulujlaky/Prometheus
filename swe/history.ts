@@ -1,24 +1,36 @@
-import { extractCommand, extractFinishedSummary, extractTaskText, parseReply } from "./parse";
+import { extractCommand, extractFinishedSummary, extractTaskText, parseReply, type Tool } from "./parse";
 
 import { isAssistantMessage, isUserMessage } from "../sdk/messages";
 import { ResponseStream } from "../sdk/stream";
 
 import type { ApiChatMessage, ChatDetail } from "../sdk/types";
 
+// a bare Omit collapses a union to its common keys; this keeps each variant intact
+type WithoutId<T> = T extends unknown ? Omit<T, "id"> : never;
+
 /** Serializable transcript rows for the renderer (mirrors transcript.Entry). */
 export type HistoryEntry =
+
   | {
+
       id: string;
+
       kind: "step";
-      text: string;
+      tool: Tool | null;
+
       desc: string;
+
       thinking: string;
       thoughtMs?: number | null;
+
       command: string | null;
       output: string | null;
       exitCode: number | null;
+
       streaming: false;
+
     }
+
   | { id: string; kind: "task"; text: string }
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
@@ -71,7 +83,7 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
   let openStep: Extract<HistoryEntry, { kind: "step" }> | null = null;
   let pushedDone = false;
 
-  const push = (entry: Omit<HistoryEntry, "id"> & { id?: string }) => {
+  const push = (entry: WithoutId<HistoryEntry> & { id?: string }) => {
 
     seq += 1;
     const full = { ...entry, id: entry.id ?? `h${seq}` } as HistoryEntry;
@@ -233,7 +245,7 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
       }
 
-      const { desc, thinking, command } = parseReply(text);
+      const { tool, desc, thinking, command } = parseReply(text);
 
       // FINISHED echo is often itself a bash step: desc + echo MINI_SWE_FINISHED
       if (command && extractFinishedSummary(command)) {
@@ -249,12 +261,17 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
         openStep = push({
 
           kind: "step",
+
+          tool: tool ?? "done",
           desc: desc || "Finish",
+
           thinking,
           thoughtMs: thinking.trim() ? Math.max(1000, Math.round(thinking.length / 50) * 1000) : null,
+
           command,
           output: null,
           exitCode: null,
+
           streaming: false,
 
         }) as (Extract<HistoryEntry, { kind: "step" }>);
@@ -269,10 +286,10 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
       }
 
+      // exitCode stays null: we never saw the result, so the row must not claim success
       if (openStep && openStep.output === null) {
 
         openStep.output = "<no observation stored>";
-        openStep.exitCode = 0;
         openStep = null;
 
       }
@@ -280,12 +297,17 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
       openStep = push({
 
         kind: "step",
+
+        tool,
         desc: desc || "Command",
+
         thinking,
         thoughtMs: thinking.trim() ? Math.max(1000, Math.round(thinking.length / 50) * 1000) : null,
+
         command,
         output: null,
         exitCode: null,
+
         streaming: false,
 
       }) as Extract<HistoryEntry, { kind: "step" }>;
@@ -297,12 +319,13 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
   if (openStep && openStep.output === null) {
 
     openStep.output = "";
-    openStep.exitCode = 0;
 
-    // last step was the FINISHED echo itself
+    // last step was the FINISHED echo itself — that one really did succeed
     if (openStep.command && extractFinishedSummary(openStep.command)) {
 
       openStep.output = openStep.command;
+      openStep.exitCode = 0;
+
       pushDone(extractFinishedSummary(openStep.command) ?? "Task complete.");
 
     }
