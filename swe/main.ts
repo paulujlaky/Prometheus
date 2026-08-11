@@ -3,13 +3,40 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { MiniAgent, riskReason, type AgentEvent } from "./agent";
-import { loadLastCwd, loadSettings, saveSettings } from "./settings";
+import { entriesFromChatDetail } from "./history";
+import { forgetChatId, loadChatIds, loadLastCwd, loadSettings, rememberChatId, saveSettings } from "./settings";
 
 export type ApprovalMode = "ask" | "smart" | "auto";
 import { BoodleClient } from "../sdk/index";
 
 // bun inlines __dirname to the source directory, so assets are resolved from the running bundle instead
 const here = resolve(dirname(process.argv[1] ?? ""));
+
+/** Window / taskbar icon — copied into dist/assets by swe:build. */
+function resolveIcon(): string | undefined {
+
+  const candidates = [
+    join(here, "assets", "icon.png"),
+    // source tree when running main from a non-dist layout
+    resolve(here, "../assets/icon.png"),
+    resolve(here, "../../swe/assets/icon.png"),
+  ];
+
+  for (const path of candidates) {
+
+    if (existsSync(path)) {
+
+      return path;
+
+    }
+
+  }
+
+  return undefined;
+
+}
+
+const appIcon = resolveIcon();
 
 let window: BrowserWindow | null = null;
 let agent: MiniAgent | null = null;
@@ -96,7 +123,8 @@ function createWindow() {
     height: 780,
 
     backgroundColor: "#111318",
-    title: "mini-swe-agent",
+    title: "Boombox Agent",
+    ...(appIcon ? { icon: appIcon } : {}),
 
     webPreferences: {
 
@@ -119,6 +147,84 @@ ipcMain.handle("models", async () => getClient().listAssistants());
 ipcMain.handle("settings:get", () => loadSettings());
 
 ipcMain.handle("settings:last-cwd", () => loadLastCwd());
+
+ipcMain.handle("chats:list", async () => {
+
+  const known = new Set(loadChatIds());
+
+  if (!known.size) {
+
+    return [];
+
+  }
+
+  // pull a wide recent page and keep only chats we created (titles stay whatever Boodle assigned)
+  const list = await getClient().listChats(100, 0);
+  const found = new Set<string>();
+
+  const rows = (list.entries ?? []).filter((chat) => known.has(chat.id) || (typeof chat.name === "string" && chat.name.startsWith("[SWE] "))).map((chat) => {
+
+      found.add(chat.id);
+      rememberChatId(chat.id);
+
+      const raw = (chat.name ?? "").trim();
+
+      // we should migrate old local titles; new chats use Boodle's name as-is
+      const title = raw.startsWith("[SWE] ") ? raw.slice(6).trim() || raw : raw || "Untitled";
+
+      return {
+
+        id: chat.id,
+        name: chat.name,
+        title,
+        modified: chat.modified ?? chat.lastMessage ?? chat.created ?? 0,
+
+      };
+
+    }).sort((a, b) => b.modified - a.modified);
+
+  // drop ids Boodle no longer returns (deleted elsewhere)
+  for (const id of known) {
+
+    if (!found.has(id)) {
+
+      forgetChatId(id);
+
+    }
+
+  }
+
+  return rows;
+
+});
+
+ipcMain.handle("chats:delete", async (_event, chatId: string) => {
+
+  await getClient().deleteChat(chatId);
+  forgetChatId(chatId);
+
+});
+
+ipcMain.handle("chats:get", async (_event, chatId: string) => {
+
+  const detail = await getClient().getChat(chatId);
+
+  return {
+
+    id: detail.chat.id,
+    name: detail.chat.name,
+    title: (detail.chat.name ?? "").trim() || "Untitled",
+    entries: entriesFromChatDetail(detail),
+
+  };
+
+});
+
+ipcMain.handle("chats:remember", (_event, chatId: string) => {
+
+  rememberChatId(chatId);
+
+});
 
 ipcMain.handle("pick-dir", async () => {
 
@@ -158,7 +264,17 @@ ipcMain.handle("start", async (_event, options: { task: string; cwd: string; ass
 
     assistantId: options.assistantId,
 
-    onEvent: send,
+    onEvent: (event) => {
+
+      if (event.type === "session") {
+
+        rememberChatId(event.chatId);
+
+      }
+
+      send(event);
+
+    },
 
     approve: (command) => {
 
@@ -230,6 +346,13 @@ ipcMain.handle("stop", () => {
 });
 
 void app.whenReady().then(() => {
+
+  // Windows taskbar grouping / identity
+  if (process.platform === "win32") {
+
+    app.setAppUserModelId("com.boombox.agent");
+
+  }
 
   Menu.setApplicationMenu(null);
   createWindow();

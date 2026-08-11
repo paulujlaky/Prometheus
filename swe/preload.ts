@@ -3,16 +3,28 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { AgentEvent } from "./agent";
 import type { AssistantSummary } from "../sdk/types";
 
+export interface SweChatSummary {
+
+  id: string;
+  name: string;
+  title: string;
+  modified: number;
+
+}
+
 contextBridge.exposeInMainWorld("swe", {
 
   models: (): Promise<AssistantSummary[]> => ipcRenderer.invoke("models"),
 
   pickDir: (): Promise<string | null> => ipcRenderer.invoke("pick-dir"),
-
   lastCwd: (): Promise<string | null> => ipcRenderer.invoke("settings:last-cwd"),
 
-  start: (options: { task: string; cwd: string; assistantId?: string; mode: string }): Promise<void> => ipcRenderer.invoke("start", options),
+  listChats: (): Promise<SweChatSummary[]> => ipcRenderer.invoke("chats:list"),
+  deleteChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:delete", chatId),
+  getChat: (chatId: string): Promise<{ id: string; name: string; title: string; entries: unknown[] }> => ipcRenderer.invoke("chats:get", chatId),
+  rememberChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:remember", chatId),
 
+  start: (options: { task: string; cwd: string; assistantId?: string; mode: string }): Promise<void> => ipcRenderer.invoke("start", options),
   stop: (): Promise<void> => ipcRenderer.invoke("stop"),
 
   approve: (id: number, ok: boolean): Promise<void> => ipcRenderer.invoke("approve", { id, ok }),

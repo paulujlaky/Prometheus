@@ -81,6 +81,24 @@ export class BoodleClient {
 
   }
 
+  /** Best-effort rename — Boodlebox may accept PATCH or PUT; failures are non-fatal for callers. */
+  async renameChat(chatId: string, name: string): Promise<void> {
+
+    try {
+
+      await this.request("PATCH", `/chat/${chatId}`, { name });
+
+      return;
+
+    } catch {
+
+      // fall through
+    }
+
+    await this.request("PUT", `/chat/${chatId}`, { name });
+
+  }
+
   async getChat(chatId: string): Promise<ChatDetail> {
 
     return this.requestJson<ChatDetail>("GET", `/chat/${chatId}`);

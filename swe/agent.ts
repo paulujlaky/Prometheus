@@ -5,9 +5,13 @@ import { dirname, join } from "node:path";
 
 import { ChatSession } from "../sdk/index";
 
+import { estimateTokens } from "./lib/tokens";
+import { extractCommand, extractFinishedSummary, FINISHED, incompleteReason, parseReply, } from "./parse";
+
 import type { BoodleClient } from "../sdk/client";
 
-const FINISHED = "MINI_SWE_FINISHED";
+export { extractCommand, extractFinishedSummary, incompleteReason, FINISHED } from "./parse";
+
 const MAX_OBSERVATION = Number(process.env.SWE_MAX_OUTPUT ?? 16000);
 const DEFAULT_MAX_STEPS = Number(process.env.SWE_MAX_STEPS ?? 100);
 
@@ -22,6 +26,8 @@ export type AgentEvent =
   | { type: "command"; command: string }
   | { type: "observation"; text: string; exitCode: number }
   | { type: "status"; text: string }
+  | { type: "usage"; used: number; step: number }
+  | { type: "session"; chatId: string; title: string }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };
 
@@ -40,103 +46,132 @@ export interface AgentOptions {
 
 }
 
+/** CRLF-safe unique-string replace; exits non-zero instead of corrupting the file. */
+const REPLACE_HELPER = `
+import sys
+from pathlib import Path
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+if len(sys.argv) != 2:
+    die("usage: swe-replace <file>  (stdin: <<<<<<< SEARCH / ======= / >>>>>>> REPLACE)")
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    die("not a file: %s" % path)
+
+raw = sys.stdin.read().replace("\\r\\n", "\\n")
+start, mid, end = "<<<<<<< SEARCH\\n", "\\n=======\\n", "\\n>>>>>>> REPLACE"
+if start not in raw or mid not in raw:
+    die("stdin must be:\\n<<<<<<< SEARCH\\n<old>\\n=======\\n<new>\\n>>>>>>> REPLACE")
+
+i = raw.index(start) + len(start)
+j = raw.index(mid, i)
+# end marker optional if stdin ends after new text
+if end in raw[j:]:
+    k = raw.index(end, j)
+    new = raw[j + len(mid):k]
+else:
+    new = raw[j + len(mid):]
+old = raw[i:j]
+
+data = path.read_bytes()
+nl = "\\r\\n" if (b"\\r\\n" in data and data.count(b"\\r\\n") >= data.count(b"\\n") - data.count(b"\\r\\n")) else "\\n"
+text = data.decode("utf-8")
+norm = text.replace("\\r\\n", "\\n")
+count = norm.count(old)
+if count != 1:
+    die("expected exactly 1 match, found %d" % count)
+out = norm.replace(old, new, 1)
+if nl == "\\r\\n":
+    out = out.replace("\\n", "\\r\\n")
+path.write_bytes(out.encode("utf-8"))
+print("replaced 1 span in %s" % path)
+`;
+
+const WRITE_HELPER = `
+import sys
+from pathlib import Path
+
+if len(sys.argv) != 2:
+    print("usage: swe-write <file>  (stdin: full file body)", file=sys.stderr)
+    raise SystemExit(1)
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+body = sys.stdin.buffer.read()
+path.write_bytes(body)
+print("wrote %s (%d bytes)" % (path, len(body)))
+`;
+
 const SHELL = process.env.SWE_SHELL ?? "bash";
 
 function prompt(cwd: string, task: string, survey: string): string {
 
+  const win = process.platform === "win32"
+    ? "\nWindows: use forward slashes; swe-replace handles CRLF; prefer `cmd //c npm` if npm shims break.\n"
+    : "";
+
   return [
-
-    "You are the reasoning half of an automated coding agent. A program running on the user's machine executes the commands you write and sends you their real output. You are not being asked to imagine, describe, or simulate any of this.",
+    "You are a coding agent. Bash you write is executed on the user's machine; stdout/stderr come back. Do not simulate or refuse shell access.",
     "",
-    `Working directory: ${cwd}`,
-    `Shell: ${SHELL} (platform ${process.platform})`,
+    `Cwd: ${cwd}`,
+    `Shell: ${SHELL} (${process.platform})`,
     "",
-    "How the loop works:",
-    "- You reply with exactly ONE bash code block, and no other code blocks.",
-    "- The program writes that block to a script and runs it with `" + SHELL + "` in the working directory above, then replies with the genuine exit code and stdout/stderr from the machine. There is no size limit on the block.",
-    "- So you do have shell access — through this loop. Never reply that you lack command-line access, that you cannot run commands, or that the user should run them instead. Doing so stalls the run.",
-    "- Never answer with file attachments, artifacts, download links, or JSON file objects. None of those reach the machine. The bash block is the only thing that does anything.",
-    "- Every reply must contain a bash block, including when you are unsure: investigate with `ls`, `cat`, or `git status` rather than asking a question.",
-    "- The working directory carries over between blocks: if you `cd`, the next block starts there. Nothing else survives — exported vars, venv activation and shell functions all die with the block, so re-establish those in the block that needs them.",
-    "- Keep prose to one or two sentences before the block. No plans, no numbered outlines, no summaries of what you are about to do.",
-    `- When the task is done, run: echo "${FINISHED}: <one line summary>"`,
+    "Every reply is EXACTLY this shape (machine-parsed, streamed live):",
     "",
-    "One block is one round trip, so make each one count:",
-    "- Batch cheap reads into a single block instead of spending a turn on each: `ls -la && git status --short && cat package.json`.",
-    "- Loop when reading several files: `for f in a.ts b.ts; do echo \"== $f\"; cat \"$f\"; done`.",
-    "- End every editing block with its own verification — typecheck, build, or tests. Both usually take a couple of seconds, far less than another round trip: `bun run typecheck 2>&1 | tail -5 && bun run build 2>&1 | tail -8`.",
-    "- A green exit code is not proof of a correct artifact. When a build produces files, assert on their contents (`grep` the built output for what must be there), not just on the status.",
-    `- Output is capped at ${MAX_OBSERVATION} characters and the middle is cut, with a loud notice where it happened. Filter at the source (\`grep -nE 'error|FAIL'\`, \`tail -40\`) rather than dumping everything.`,
+    "desc: <≤8 word label>",
+    "```bash",
+    "<single focused command>",
+    "```",
     "",
-    "Editing files:",
-    "- New file, or one under roughly 2 KB: write it whole with a quoted heredoc, so nothing is expanded by the shell. Do not indent a heredoc body — every space becomes part of the file:",
+    "Output order is mandatory (the UI shows the step as soon as desc arrives):",
+    "- Token 1 of the reply must start the line `desc: …` — never a preamble, plan, or monologue first.",
+    "- The very next line must open ```bash. Put the command in the fence as soon as you know it.",
+    "- No essays before the fence. Prefer zero notes; if needed, one short line after `desc:` only.",
+    "- Nothing after the closing fence. Only the key `desc:` is a valid label.",
     "",
-    "cat > 'path/to/file.ts' <<'EOF'",
-    "...entire file contents...",
-    "EOF",
-    "",
-    "  The quotes around EOF are required — without them, dollar signs, backticks and backslashes in the file get expanded by the shell.",
-    "  If the body contains a line that is exactly EOF, use another delimiter such as SWEEOF.",
-    "- Existing large file: do NOT re-emit it from memory — that is how imports get dropped and earlier edits silently reverted. Make a surgical replacement instead:",
-    "",
-    "python - <<'PY'",
-    "from pathlib import Path",
-    "p = Path('path/to/file.ts')",
-    "s = p.read_text(encoding='utf-8')",
-    "old = \"\"\"exact text to replace\"\"\"",
-    "assert s.count(old) == 1, s.count(old)",
-    "p.write_text(s.replace(old, \"\"\"new text\"\"\"), encoding='utf-8')",
-    "PY",
-    "",
-    "  The assert is the point: it fails loudly instead of corrupting the file.",
-    "- Read before you edit, quote every path, and verify afterwards — `git --no-pager diff --stat`, or run the build or tests.",
-    "- After writing a large file, check its length, not just the exit code: `wc -c 'file' && tail -3 'file'`.",
-    "- Before finishing, review your own work with `git --no-pager diff` (or `git status --short` when the repo is not initialised).",
-    "",
-    "Commands that break this loop — avoid them:",
-    "- Interactive tools: vim, nano, less, top, or anything that opens an editor or pager. There is no stdin: prompts get EOF, so an interactive command fails instead of waiting.",
-    "- Watchers and servers that never exit: `npm run dev`, `--watch`, `tail -f`. Build or test instead. Commands are killed after two minutes.",
-    "- Scaffolders that ask questions: pass `-y`/`--yes`. CI=1 and npm's yes/no-audit flags are already set for you.",
-    "- Never `cd` into a build output directory such as dist. The working directory persists, and on Windows a shell sitting inside a folder prevents it being deleted, so the next build fails with a confusing error naming the folder. Use a tool flag instead (`python -m http.server 8765 --directory dist`), or wrap a temporary move in a subshell: `(cd dist && ls)`.",
-    "- Some things cannot be checked from a shell at all — service worker registration, install prompts, browser runtime behaviour. Assert their preconditions statically and say plainly that confirming them is a manual step, rather than spending turns chasing them.",
-    ...(process.platform === "win32"
-      ? [
-
-          "",
-          "This is Windows running bash, which has sharp edges:",
-          "- Use forward slashes everywhere; a backslash is an escape character in bash.",
-          "- Heredocs write LF. If a tool needs CRLF, or a file already has it, handle it explicitly rather than assuming.",
-          "- npm/npx are .cmd shims; if one misbehaves under bash, run it via `cmd //c npm ...`.",
-          "- The filesystem is case-insensitive, so wrong import casing will work here and break on Linux CI. Copy filenames from `ls` output rather than typing them from memory.",
-          "- Tools may print absolute paths with backslashes; anything parsing those paths has to handle both separators.",
-
-        ]
-      : []),
-    "",
-    survey ? `Current state of the working directory:\n\n${survey}\n` : "",
+    "Behaviour:",
+    "- One action per turn: read OR edit OR write. Batch cheap recon (`ls && git status -sb`).",
+    "- Prefer swe-replace / swe-write (unique SEARCH assert; CRLF-safe). Quote paths. Do not rewrite large files from memory.",
+    "  swe-replace 'f.ts' <<'EOF'",
+    "  <<<<<<< SEARCH",
+    "  old",
+    "  =======",
+    "  new",
+    "  >>>>>>> REPLACE",
+    "  EOF",
+    "- No verify parades: at most one build/test after real edits; never re-check the same fact; when done, finish immediately.",
+    `- Done: echo "${FINISHED}: <one-line summary>"`,
+    `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with rg/grep/tail.`,
+    "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y. `cd` persists; env does not.",
+    "- Never `cd` into dist/build output dirs.",
+    win,
+    survey ? `Snapshot (already gathered):\n${survey}\n` : "",
     `Task: ${task}`,
-
   ].join("\n");
 
 }
 
-// ponytail: heuristic denylist — it catches the obvious footguns, not a determined agent. Approval mode is the real gate.
+// heuristic denylist catches the obvious footguns, but is not a determined agent.
 const RISKY: [RegExp, string][] = [
 
   [/\brm\s+(-[a-z]*\s+)*-?[a-z]*[rf]/i, "recursive or forced delete"],
   [/\b(rmdir|del|rd)\s+\/s/i, "recursive delete"],
   [/\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s|push\s+.*--force)/i, "discards or force-pushes work"],
-  [/\b(sudo|runas)\b/i, "elevated privileges"],
-  [/\b(mkfs|fdisk|diskpart|format)\b/i, "disk formatting"],
-  [/\bdd\s+.*\bof=/i, "raw disk write"],
+  [/\b(sudo|runas)\b/i, "needs elevated privileges"],
+  [/\b(mkfs|fdisk|diskpart|format)\b/i, "involves disk formatting"],
+  [/\bdd\s+.*\bof=/i, "is a raw disk write"],
   [/(curl|wget|iwr)\b[^|]*\|\s*(ba)?sh/i, "pipes a download straight into a shell"],
   [/>\s*\/dev\/(sd|nvme|disk)/i, "writes to a raw device"],
-  [/\b(shutdown|reboot|halt)\b/i, "shuts the machine down"],
+  [/\b(shutdown|reboot|halt)\b/i, "could shut the machine down"],
   [/\btaskkill\s+.*\/f/i, "force-kills processes"],
   [/\bchmod\s+(-R\s+)?777\b/i, "world-writable permissions"],
   [/\b(npm|yarn|pnpm)\s+publish\b/i, "publishes a package"],
   [/\bgit\s+push\b/i, "pushes to a remote"],
-  [/:\(\)\s*\{.*\|.*&.*\}/, "fork bomb"],
+  [/:\(\)\s*\{.*\|.*&.*\}/, "is a fork bomb"],
 
 ];
 
@@ -154,82 +189,6 @@ export function riskReason(command: string): string | null {
   }
 
   return null;
-
-}
-
-/**
- * Reports an unterminated here-document, which is what a cut-off block looks like from here.
- * Running one anyway writes a half a file and reports success.
- */
-export function incompleteReason(command: string): string | null {
-
-  const pending: string[] = [];
-
-  for (const line of command.split("\n")) {
-
-    if (pending.length) {
-
-      if (line.trim() === pending[pending.length - 1]) {
-
-        pending.pop();
-
-      }
-
-      continue; // nothing inside a here-document body is parsed as shell
-
-    }
-
-    const opener = /<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
-
-    if (opener) {
-
-      pending.push(opener[2]);
-
-    }
-
-  }
-
-  return pending.length ? `the here-document <<${pending[pending.length - 1]} is never closed` : null;
-
-}
-
-/** Pulls the fenced block out of a reply; mini-swe-agent's whole tool surface is one bash command. */
-export function extractCommand(reply: string): string | null {
-
-  const opening = /```(?:bash|sh|shell)?\r?\n/.exec(reply);
-
-  if (!opening) {
-
-    return null;
-
-  }
-
-  const body = reply.slice(opening.index + opening[0].length);
-  const first = body.indexOf("```");
-
-  if (first === -1) {
-
-    return null;
-
-  }
-
-  const command = body.slice(0, first).trim();
-
-  // a heredoc body containing its own fence closes the block early; the last fence is then the real one
-  if (incompleteReason(command)) {
-
-    const last = body.lastIndexOf("```");
-    const extended = body.slice(0, last).trim();
-
-    if (last !== first && !incompleteReason(extended)) {
-
-      return extended || null;
-
-    }
-
-  }
-
-  return command || null;
 
 }
 
@@ -251,17 +210,22 @@ function truncate(text: string): string {
 
 }
 
-/**
- * Runs the command, then reports the shell's final directory so the next block starts where this one ended.
- * A persistent shell would also carry env and shell functions, but it brings process lifetime and deadlock
- * problems that this one marker avoids.
- */
-export function wrapCommand(command: string): string {
+/** Runs the command, then reports the shell's final directory so the next block starts where this one ended.*/
+export function wrapCommand(command: string, helpersDir?: string | null): string {
 
   // $PWD under Git Bash is an MSYS path (/tmp, /c/...) that Windows cannot spawn into; pwd -W gives the native one
   const pwd = process.platform === "win32" ? '"$(pwd -W 2>/dev/null || pwd)"' : '"$PWD"';
+  const py = process.platform === "win32" ? "python" : "python3";
 
-  return `${command}\n__swe_status=$?\nprintf '\\n${CWD_MARKER}%s\\n' ${pwd}\nexit $__swe_status\n`;
+  // functions beat PATH wrappers: no execute bit required, works under Git Bash on Windows
+  const prefix = helpersDir ? [
+    `export SWE_HELPERS="${helpersDir.replaceAll("\\", "/")}"`,
+    `swe-replace() { ${py} "$SWE_HELPERS/swe_replace.py" "$@"; }`,
+    `swe-write() { ${py} "$SWE_HELPERS/swe_write.py" "$@"; }`,
+    "",
+  ].join("\n") : "";
+
+  return `${prefix}${command}\n__swe_status=$?\nprintf '\\n${CWD_MARKER}%s\\n' ${pwd}\nexit $__swe_status\n`;
 
 }
 
@@ -304,7 +268,13 @@ export function parseRun(raw: string): { output: string; cwd: string | null } {
 
 }
 
-// child.kill() only reaches the shell; installers and builds keep running underneath it
+// conventional timeout exit (GNU timeout / CI tools)
+const EXIT_TIMEOUT = 124;
+
+// grace period after kill before we force-resolve even if the shell never exits
+const KILL_GRACE_MS = 2_500;
+
+// child.kill() only reaches the shell; installers and servers keep running underneath it
 function killTree(child: ChildProcess) {
 
   if (child.pid == null) {
@@ -315,22 +285,40 @@ function killTree(child: ChildProcess) {
 
   if (process.platform === "win32") {
 
-    spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+    // /t = whole tree; /f = force — needed for bun/node grandchildren of bash
+    spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+
+      windowsHide: true,
+      stdio: "ignore",
+
+    });
 
     return;
 
   }
 
-  child.kill("SIGKILL");
+  // process group (spawned detached below) — wipes bash + bun run dev + anything it forked
+  try {
+
+    process.kill(-child.pid, "SIGKILL");
+
+  } catch {
+
+    try {
+
+      child.kill("SIGKILL");
+
+    } catch {
+
+      // already gone
+    }
+
+  }
 
 }
 
-/**
- * Commands go through a temp script rather than `bash -c`.
- * The argument form is capped by the OS — on Windows anything past ~8 KB is silently truncated
- * mid-byte (a heredoc then swallows the rest of the script) and past ~32 KB spawn throws outright.
- */
-export function runCommand(command: string, cwd: string, timeoutMs: number, onSpawn?: (child: ChildProcess) => void): Promise<{ output: string; exitCode: number }> {
+/** Commands go through a temp script rather than `bash -c`. */
+export function runCommand(command: string, cwd: string, timeoutMs: number, onSpawn?: (child: ChildProcess) => void, extraEnv?: Record<string, string>, ): Promise<{ output: string; exitCode: number }> {
 
   return new Promise((resolve) => {
 
@@ -338,7 +326,26 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
     writeFileSync(script, command.replaceAll("\r\n", "\n"), "utf8");
 
+    let settled = false;
+    let timedOut = false;
+    let forceTimer: ReturnType<typeof setTimeout> | null = null;
+
     const done = (result: { output: string; exitCode: number }) => {
+
+      if (settled) {
+
+        return;
+
+      }
+
+      settled = true;
+
+      if (forceTimer) {
+
+        clearTimeout(forceTimer);
+        forceTimer = null;
+
+      }
 
       try {
 
@@ -353,17 +360,20 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
     };
 
+    // detached on Unix so bash is a process-group leader and killTree can SIGKILL the whole tree
     const child = spawn(SHELL, [script.replaceAll("\\", "/")], {
 
       cwd,
       windowsHide: true,
+      detached: process.platform !== "win32",
 
-      // no stdin: anything that prompts gets EOF and fails fast instead of hanging until the timeout
+      // anything that prompts gets EOF and fails fast instead of hanging until the timeout. good UX
       stdio: ["ignore", "pipe", "pipe"],
 
       env: {
 
         ...process.env,
+        ...extraEnv,
 
         CI: "1",
         GIT_PAGER: "cat",
@@ -385,8 +395,16 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
     const timer = setTimeout(() => {
 
+      timedOut = true;
       killTree(child);
-      output += `\n<command killed after ${timeoutMs}ms>`;
+      output += `\n<command killed after ${timeoutMs}ms (timeout)>`;
+
+      // never leave the agent parked if the shell ignores SIGKILL / taskkill races
+      forceTimer = setTimeout(() => {
+
+        done({ output, exitCode: EXIT_TIMEOUT });
+
+      }, KILL_GRACE_MS);
 
     }, timeoutMs);
 
@@ -414,7 +432,17 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
       clearTimeout(timer);
 
-      setTimeout(() => done({ output, exitCode: code ?? -1 }), 150);
+      // small drain so a last stderr flush from taskkill lands in output
+      setTimeout(() => {
+
+        done({
+
+          output,
+          exitCode: timedOut ? EXIT_TIMEOUT : (code ?? -1),
+
+        });
+
+      }, 150);
 
     });
 
@@ -431,6 +459,10 @@ export class MiniAgent {
   private stopped = false;
 
   private cwd = "";
+  private helpersDir: string | null = null;
+
+  /** Cumulative estimated tokens of everything sent + received this run (server keeps full history). */
+  private tokensUsed = 0;
 
   constructor(options: AgentOptions) {
 
@@ -449,7 +481,7 @@ export class MiniAgent {
 
     this.stopped = true;
 
-    this.options.onEvent({ type: "status", text: "Stopping…" });
+    this.options.onEvent({ type: "status", text: "Stopping..." });
 
     if (this.child) {
 
@@ -462,7 +494,38 @@ export class MiniAgent {
 
   }
 
-  /** Turn one is otherwise always reconnaissance, so the first message already carries it. */
+  private installHelpers(): string {
+
+    const dir = mkdtempSync(join(tmpdir(), "swe-helpers-"));
+
+    writeFileSync(join(dir, "swe_replace.py"), REPLACE_HELPER.trim() + "\n", "utf8");
+    writeFileSync(join(dir, "swe_write.py"), WRITE_HELPER.trim() + "\n", "utf8");
+
+    this.helpersDir = dir;
+
+    return dir;
+
+  }
+
+  private shellEnv(): Record<string, string> {
+
+    // do not rewrite PATH here — on Windows that breaks spawn(bash). wrapCommand exports PATH inside the script.
+    return {
+
+      SWE_HELPERS: this.helpersDir?.replaceAll("\\", "/") ?? "",
+
+    };
+
+  }
+
+  private noteTokens(text: string, step: number) {
+
+    this.tokensUsed += estimateTokens(text);
+    this.options.onEvent({ type: "usage", used: this.tokensUsed, step });
+
+  }
+
+  /** Turn one is almost always reconnaissance, so the first message already carries it. */
   private async survey(): Promise<string> {
 
     const { output } = await runCommand(
@@ -473,18 +536,21 @@ export class MiniAgent {
         "echo",
         "if git rev-parse --git-dir >/dev/null 2>&1; then",
         "  git --no-pager status --short --branch 2>&1 | head -30",
+        "  # key manifests if present — saves a later turn",
+        "  for f in package.json pyproject.toml go.mod Cargo.toml README.md; do",
+        '    [ -f "$f" ] && { echo; echo "== $f (head)"; head -40 "$f"; }',
+        "  done",
         "else",
+
         // without a repo there is no diff to review and no way back from a bad rewrite
-        '  echo "NOT A GIT REPOSITORY — there is no diff to review and no undo. If this task touches more than a couple of files, make your first block: git init && git add -A && git commit -qm baseline"',
+        '  echo "NOT A GIT REPOSITORY — there is no diff to review and no undo."',
         "fi",
 
-      ].join("\n"),
-      this.cwd,
-      15_000,
+      ].join("\n"), this.cwd, 15_000, undefined, this.shellEnv(),
 
     );
 
-    return output.trim().slice(0, 4000);
+    return output.trim().slice(0, 6000);
 
   }
 
@@ -497,17 +563,32 @@ export class MiniAgent {
 
     // forward slashes, because a backslash path in a bash prompt is a trap
     this.cwd = this.options.cwd.replaceAll("\\", "/");
+    this.tokensUsed = 0;
 
     try {
 
-      onEvent({ type: "status", text: "Looking around…" });
+      this.installHelpers();
 
-      const survey = await this.survey();
+      onEvent({ type: "status", text: "Thinking" });
 
-      onEvent({ type: "status", text: "Opening chat…" });
+      // survey is local; chat open is network — overlap them
+      const surveyPromise = this.survey();
+      const sessionPromise = ChatSession.create(client, {
 
-      // the agent only reads the streamed turn, so skip the full chat refetch the SDK does after every send
-      this.session = await ChatSession.create(client, { assistantId: this.options.assistantId, refreshOnComplete: false });
+        assistantId: this.options.assistantId,
+        // agent only reads the streamed turn; skip the full chat refetch after every send
+        refreshOnComplete: false,
+
+      });
+
+      const [survey, session] = await Promise.all([surveyPromise, sessionPromise]);
+
+      this.session = session;
+
+      // let Boodle title the chat; we only track the id for the sidebar
+      const seedTitle = session.state.chat?.name?.trim() || "New chat";
+
+      onEvent({ type: "session", chatId: session.chatId, title: seedTitle });
 
       // history lives on the server, so each step only sends the new observation
       this.session.on((event) => {
@@ -522,34 +603,61 @@ export class MiniAgent {
 
       let message = prompt(this.cwd, task, survey);
       let misses = 0;
+      let lastProse = "";
 
       for (let step = 1; step <= maxSteps; step += 1) {
 
         if (this.stopped) {
 
-          onEvent({ type: "status", text: "Stopped." });
+          onEvent({ type: "status", text: "Stopped" });
 
           return;
 
         }
 
+        // Thinking | Drafting | Running — default working state is Thinking
         const phase = (text: string) => onEvent({ type: "status", text: `Step ${step} · ${text}` });
 
-        phase("Thinking…");
+        phase("Thinking");
+        this.noteTokens(message, step);
+
+        let drafting = false;
+
+        const unsubDraft = this.session.on((event) => {
+
+          if (event.type === "stream" && event.change.kind === "delta" && !drafting) {
+
+            drafting = true;
+            phase("Drafting");
+
+          }
+
+        });
 
         const turn = await this.session.send(message);
 
+        unsubDraft();
+
         if (this.stopped) {
 
-          onEvent({ type: "status", text: "Stopped." });
+          onEvent({ type: "status", text: "Stopped" });
 
           return;
 
         }
 
+        this.noteTokens(turn.text, step);
         onEvent({ type: "assistant", text: turn.text });
+        phase("Thinking");
 
+        const parsed = parseReply(turn.text);
         const command = extractCommand(turn.text);
+
+        if (parsed.desc) {
+
+          lastProse = parsed.desc;
+
+        }
 
         const truncated = command ? incompleteReason(command) : null;
 
@@ -570,7 +678,7 @@ export class MiniAgent {
           message = [
 
             `Your block was not run: ${truncated}. It reached me cut off at ${command.length} characters, so the rest never arrived.`,
-            "Do not resend the same block. Split the write into parts: `cat > 'file' <<'EOF'` for the first chunk, then `cat >> 'file' <<'EOF'` for each of the rest, one block per turn.",
+            "Do not resend the same block. Prefer `swe-replace` for surgical edits, or split a large write: `swe-write`/`cat >` for the first chunk, then `cat >> 'file' <<'EOF'` for the rest, one block per turn.",
             "After the final chunk, verify with `wc -c 'file'` and `tail -3 'file'` — exit 0 alone does not prove the file is whole.",
 
           ].join("\n");
@@ -582,6 +690,17 @@ export class MiniAgent {
         if (!command) {
 
           misses += 1;
+
+          // model sometimes finishes with prose + FINISHED echo request already satisfied in prior turn
+          const finishedInProse = extractFinishedSummary(turn.text);
+
+          if (finishedInProse && finishedInProse !== "Task complete.") {
+
+            onEvent({ type: "done", summary: finishedInProse });
+
+            return;
+
+          }
 
           if (misses >= MAX_MISSES) {
 
@@ -602,7 +721,7 @@ export class MiniAgent {
 
             "That reply contained no bash code block, so nothing ran and the task did not advance.",
             "Your commands are really executed on the user's machine and the output comes back to you — do not answer with prose, files, or artifacts.",
-            "Reply now with exactly one ```bash block containing the single next command. If you are unsure where to start, list the working directory.",
+            "Reply now — first line MUST be desc:, second line MUST open ```bash:\n\ndesc: <≤8 word label>\n```bash\n<one command>\n```",
 
           ].join("\n");
 
@@ -614,22 +733,27 @@ export class MiniAgent {
 
         onEvent({ type: "command", command });
 
-        phase("Waiting for approval…");
+        // approve() resolves immediately in auto/smart-safe modes; stay on Thinking while parked on a prompt
+        const approval = approve(command);
+        const waiting = setTimeout(() => phase("Thinking"), 40);
+        const ok = await approval;
 
-        if (!(await approve(command))) {
+        clearTimeout(waiting);
+
+        if (!ok) {
 
           message = "The user declined to run that command. Propose a different one.";
           continue;
 
         }
 
-        phase("Running command…");
+        phase("Running");
 
-        const run = await runCommand(wrapCommand(command), this.cwd, timeoutMs, (child) => {
+        const run = await runCommand(wrapCommand(command, this.helpersDir), this.cwd, timeoutMs, (child) => {
 
           this.child = child;
 
-        });
+        }, this.shellEnv());
 
         this.child = null;
 
@@ -646,7 +770,7 @@ export class MiniAgent {
         if (this.stopped) {
 
           onEvent({ type: "observation", text: output, exitCode });
-          onEvent({ type: "status", text: "Stopped." });
+          onEvent({ type: "status", text: "Stopped" });
 
           return;
 
@@ -654,17 +778,33 @@ export class MiniAgent {
 
         onEvent({ type: "observation", text: output, exitCode });
 
-        if (output.includes(FINISHED)) {
+        const summary = extractFinishedSummary(output);
 
-          const summary = output.slice(output.indexOf(FINISHED) + FINISHED.length).replace(/^[:\s]+/, "").trim();
+        if (summary) {
 
-          onEvent({ type: "done", summary: summary || "Task complete." });
+          // prefer the model's own one-liner when FINISHED was bare
+          const finalSummary = summary === "Task complete." && lastProse ? lastProse.split(/\r?\n/)[0].trim() : summary;
+
+          onEvent({ type: "done", summary: finalSummary });
 
           return;
 
         }
 
-        message = `Exit code: ${exitCode}\n\n${truncate(output) || "<no output>"}`;
+        // failed unique-replace: nudge toward re-read instead of a blind rewrite
+        const replaceMiss = exitCode !== 0 && /expected exactly 1 match/i.test(output);
+
+        message = replaceMiss
+          ? [
+
+              `Exit code: ${exitCode}`,
+              "",
+              truncate(output) || "<no output>",
+              "",
+              "swe-replace needs a unique SEARCH span. Re-cat the file (or the relevant lines), copy an exact unique span, and retry swe-replace — do not rewrite the whole file from memory.",
+
+            ].join("\n")
+          : `Exit code: ${exitCode}\n\n${truncate(output) || "<no output>"}`;
 
       }
 
@@ -676,7 +816,7 @@ export class MiniAgent {
       // a stop tears the session down, so the resulting rejection is expected rather than a failure
       if (this.stopped) {
 
-        onEvent({ type: "status", text: "Stopped." });
+        onEvent({ type: "status", text: "Stopped" });
 
       } else {
 
@@ -690,6 +830,21 @@ export class MiniAgent {
 
       this.session = null;
       this.child = null;
+
+      if (this.helpersDir) {
+
+        try {
+
+          rmSync(this.helpersDir, { recursive: true, force: true });
+
+        } catch {
+
+          // temp cleanup is best-effort
+        }
+
+        this.helpersDir = null;
+
+      }
 
     }
 

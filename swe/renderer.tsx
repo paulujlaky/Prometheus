@@ -1,16 +1,18 @@
 import { Component } from "react";
 import { createRoot } from "react-dom/client";
-import { ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldIcon, SquareIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 
 import { Composer } from "@/comps/composer";
 import { Button } from "@/comps/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown-menu";
 import { Spinner } from "@/comps/ui/spinner";
 
-import { displayName } from "@/lib/models";
+import { contextLimitOf } from "@/lib/models";
+import { usageOf } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 
-import { splitReply, streamStep, Transcript, type Entry } from "./transcript";
+import { Sidebar, type SweChat } from "./sidebar";
+import { cleanSummary, parseReply, streamStep, Transcript, type Entry } from "./transcript";
 
 import type { AgentEvent } from "./agent";
 import type { AssistantSummary } from "../sdk/types";
@@ -22,6 +24,11 @@ interface SweBridge {
   models: () => Promise<AssistantSummary[]>;
   pickDir: () => Promise<string | null>;
   lastCwd: () => Promise<string | null>;
+
+  listChats: () => Promise<SweChat[]>;
+  deleteChat: (chatId: string) => Promise<void>;
+  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; entries: Entry[] }>;
+  rememberChat: (chatId: string) => Promise<void>;
 
   start: (options: { task: string; cwd: string; assistantId?: string; mode: ApprovalMode }) => Promise<void>;
   stop: () => Promise<void>;
@@ -90,6 +97,13 @@ interface AppState {
 
   approval: Approval | null;
 
+  /** Estimated cumulative tokens for this run (local; Boodlebox does not report usage). */
+  tokensUsed: number;
+
+  chats: SweChat[];
+  chatsLoading: boolean;
+  activeChatId: string | null;
+
 }
 
 export class App extends Component<{}, AppState> {
@@ -114,9 +128,18 @@ export class App extends Component<{}, AppState> {
 
     approval: null,
 
+    tokensUsed: 0,
+
+    chats: [],
+    chatsLoading: true,
+    activeChatId: null,
+
   };
 
   private seq = 0;
+
+  /** Wall-clock start of the current model stream (for "Thought for Ns"). */
+  private streamStartedAt: number | null = null;
 
   componentDidMount() {
 
@@ -140,7 +163,27 @@ export class App extends Component<{}, AppState> {
 
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
+    void this.refreshChats();
+
   }
+
+  private refreshChats = async () => {
+
+    this.setState({ chatsLoading: true });
+
+    try {
+
+      const chats = await window.swe.listChats();
+
+      this.setState({ chats, chatsLoading: false });
+
+    } catch {
+
+      this.setState({ chatsLoading: false });
+
+    }
+
+  };
 
   private push(entry: NewEntry) {
 
@@ -185,9 +228,53 @@ export class App extends Component<{}, AppState> {
 
     }
 
+    if (event.type === "usage") {
+
+      this.setState({ tokensUsed: event.used });
+
+      return;
+
+    }
+
+    if (event.type === "session") {
+
+      const chat: SweChat = {
+
+        id: event.chatId,
+        name: event.title,
+        title: event.title,
+        modified: Date.now(),
+
+      };
+
+      this.setState((prev) => ({
+
+        activeChatId: event.chatId,
+        chats: [chat, ...prev.chats.filter((c) => c.id !== event.chatId)],
+
+      }));
+
+      // Boodle often titles after the first exchange — refresh a few times
+      window.setTimeout(() => void this.refreshChats(), 1_500);
+      window.setTimeout(() => void this.refreshChats(), 6_000);
+
+      return;
+
+    }
+
     if (event.type === "delta") {
 
-      this.setState((prev) => ({ stream: (prev.stream ?? "") + event.text }));
+      this.setState((prev) => {
+
+        if (prev.stream === null) {
+
+          this.streamStartedAt = Date.now();
+
+        }
+
+        return { stream: (prev.stream ?? "") + event.text };
+
+      });
 
       return;
 
@@ -196,14 +283,21 @@ export class App extends Component<{}, AppState> {
     if (event.type === "assistant") {
 
       // settle the streamed step into a real entry in one update, so nothing flickers between the two
-      const { prose, command } = splitReply(event.text);
+      const { desc, thinking, command } = parseReply(event.text);
+      const thoughtMs = this.streamStartedAt != null
+        ? Math.max(0, Date.now() - this.streamStartedAt)
+        : thinking.trim()
+          ? Math.max(1000, Math.round(thinking.length / 50) * 1000)
+          : null;
+
+      this.streamStartedAt = null;
 
       this.setState((prev) => {
 
         const id = `e${(this.seq += 1)}`;
+        // preserve every open step; only remap the live "stream" id if it was expanded
         const toggled = new Set(prev.toggled);
 
-        // an opened live step keeps its id changing underneath it; carry the choice over so it does not snap shut
         if (toggled.delete("stream")) {
 
           toggled.add(id);
@@ -212,7 +306,17 @@ export class App extends Component<{}, AppState> {
 
         return {
 
-          entries: [...prev.entries, { id, kind: "step", prose, command, output: null, exitCode: null, streaming: false }],
+          entries: [...prev.entries, {
+            id,
+            kind: "step",
+            desc,
+            thinking,
+            thoughtMs,
+            command,
+            output: null,
+            exitCode: null,
+            streaming: false,
+          }],
           stream: null,
 
           toggled,
@@ -244,7 +348,7 @@ export class App extends Component<{}, AppState> {
 
         }
 
-        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", prose: "", command: event.command, output: null, exitCode: null, streaming: false }] };
+        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", desc: "", thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
 
       });
 
@@ -264,7 +368,7 @@ export class App extends Component<{}, AppState> {
 
         }
 
-        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", prose: "", command: null, output: event.text, exitCode: event.exitCode, streaming: false }] };
+        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", desc: "", thinking: "", command: null, output: event.text, exitCode: event.exitCode, streaming: false }] };
 
       });
 
@@ -274,8 +378,9 @@ export class App extends Component<{}, AppState> {
 
     if (event.type === "done") {
 
-      this.push({ kind: "done", text: event.summary });
+      this.push({ kind: "done", text: cleanSummary(event.summary) });
       this.setState({ status: "Done" });
+      void this.refreshChats();
 
       return;
 
@@ -313,6 +418,102 @@ export class App extends Component<{}, AppState> {
 
   }
 
+  private newSession = () => {
+
+    if (this.state.running) {
+
+      return;
+
+    }
+
+    this.seq = 0;
+    this.setState({
+
+      entries: [],
+      stream: null,
+      toggled: new Set(),
+      approval: null,
+      tokensUsed: 0,
+      activeChatId: null,
+      status: "Idle",
+
+    });
+
+  };
+
+  private selectChat = async (chat: SweChat) => {
+
+    if (this.state.running) {
+
+      return;
+
+    }
+
+    this.setState({
+
+      activeChatId: chat.id,
+      status: "Loading...",
+      stream: null,
+      toggled: new Set(),
+      approval: null,
+      tokensUsed: 0,
+
+    });
+
+    try {
+
+      const detail = await window.swe.getChat(chat.id);
+      const entries = (detail.entries ?? []) as Entry[];
+
+      // keep seq ahead of loaded ids so live steps don't collide
+      this.seq = entries.length + 100;
+
+      this.setState({
+
+        activeChatId: detail.id,
+        entries,
+        status: "Idle",
+
+      });
+
+    } catch (err) {
+
+      this.setState({
+
+        entries: [],
+        status: "Idle",
+
+      });
+
+      this.push({ kind: "error", text: `Could not load session: ${err instanceof Error ? err.message : String(err)}` });
+
+    }
+
+  };
+
+  private deleteChat = async (chat: SweChat) => {
+
+    try {
+
+      await window.swe.deleteChat(chat.id);
+
+      this.setState((prev) => ({
+
+        chats: prev.chats.filter((c) => c.id !== chat.id),
+        activeChatId: prev.activeChatId === chat.id ? null : prev.activeChatId,
+        entries: prev.activeChatId === chat.id ? [] : prev.entries,
+        status: prev.activeChatId === chat.id ? "Idle" : prev.status,
+
+      }));
+
+    } catch (err) {
+
+      this.push({ kind: "error", text: `Could not delete session: ${err instanceof Error ? err.message : String(err)}` });
+
+    }
+
+  };
+
   private start = async (task: string) => {
 
     const { cwd, assistantId, mode } = this.state;
@@ -323,8 +524,20 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    this.push({ kind: "task", text: task });
-    this.setState({ running: true, status: "Starting…", toggled: new Set<string>() });
+    // each MiniAgent run opens a new Boodle chat — never append onto a browsed history
+    this.seq = 1;
+    this.setState({
+
+      entries: [{ id: "e1", kind: "task", text: task }],
+      running: true,
+      status: "Starting...",
+      toggled: new Set<string>(),
+      tokensUsed: 0,
+      stream: null,
+      approval: null,
+      activeChatId: null,
+
+    });
 
     try {
 
@@ -337,6 +550,7 @@ export class App extends Component<{}, AppState> {
     } finally {
 
       this.setState({ running: false, approval: null, stream: null });
+      void this.refreshChats();
 
     }
 
@@ -344,176 +558,199 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const { entries, assistants, assistantId, cwd, mode, running, status, stream, approval } = this.state;
+    const {
+      entries,
+      assistants,
+      assistantId,
+      cwd,
+      mode,
+      running,
+      status,
+      stream,
+      approval,
+      tokensUsed,
+      chats,
+      chatsLoading,
+      activeChatId,
+    } = this.state;
 
     const model = assistants.find((a) => a.id === assistantId);
     const rows = stream === null ? entries : [...entries, streamStep(stream)];
     const activeMode = MODES.find((m) => m.value === mode) ?? MODES[1];
     const ModeIcon = activeMode.icon;
 
+    const folderName = cwd ? cwd.replaceAll("\\", "/").split("/").filter((x) => x).pop() ?? cwd : null;
+
+    const limit = contextLimitOf(model ?? assistantId);
+    const usage = usageOf(tokensUsed, limit);
+
     return (
 
-      <div className="flex h-full flex-col">
+      <div className="flex h-full">
 
-        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3 text-sm">
+        <Sidebar
+          chats={chats}
+          activeId={activeChatId}
+          loading={chatsLoading}
+          onSelect={(chat) => void this.selectChat(chat)}
+          onDelete={(chat) => void this.deleteChat(chat)}
+          onNew={this.newSession}
+        />
 
-          <Button variant="ghost" size="default" className="gap-1.5 text-sm" onClick={() => void this.pickFolder()}>
+        <div className="flex min-w-0 flex-1 flex-col">
 
-            <FolderOpenIcon className="size-4" />
-            {cwd ? "Change folder" : "Choose folder"}
+          <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3 text-sm">
 
-          </Button>
+            <Button variant="ghost" size="default" className="gap-1.5 text-sm" onClick={() => void this.pickFolder()}>
 
-          <div className="min-w-0 flex-1" />
-
-          <DropdownMenu>
-
-            <DropdownMenuTrigger asChild>
-
-              <Button variant="ghost" size="default" className="gap-1.5 bg-secondary/50 text-sm font-normal text-foreground hover:bg-secondary">
-
-                <ModeIcon className="size-4 text-muted-foreground" />
-                {activeMode.label}
-                <ChevronDownIcon className="size-4 opacity-50" />
-
-              </Button>
-
-            </DropdownMenuTrigger>
-
-            <DropdownMenuContent align="end" className="w-80 text-sm">
-
-              <DropdownMenuLabel className="text-sm">Command approval</DropdownMenuLabel>
-
-              <DropdownMenuSeparator />
-
-              <DropdownMenuRadioGroup
-                value={mode}
-                onValueChange={(value) => {
-
-                  localStorage.setItem(MODE_KEY, value);
-                  this.setState({ mode: value as ApprovalMode });
-
-                }}
-              >
-
-                {MODES.map((option) => (
-
-                  <DropdownMenuRadioItem key={option.value} value={option.value} className="items-start gap-2 py-2.5 text-sm">
-
-                    <div className="flex flex-col gap-0.5">
-
-                      <span className="text-sm">{option.label}</span>
-                      <span className="text-xs text-muted-foreground">{option.hint}</span>
-
-                    </div>
-
-                  </DropdownMenuRadioItem>
-
-                ))}
-
-              </DropdownMenuRadioGroup>
-
-            </DropdownMenuContent>
-
-          </DropdownMenu>
-
-          {running && (
-
-            <Button variant="secondary" size="default" className="gap-1.5 text-sm" onClick={() => void window.swe.stop()}>
-
-              <SquareIcon className="size-3.5 fill-current" />
-              Stop
+              <FolderOpenIcon className="size-4" />
+              {cwd ? folderName : "Choose folder"}
 
             </Button>
 
-          )}
+            <div className="min-w-0 flex-1" />
 
-        </header>
+            <DropdownMenu>
 
-        <Transcript
-          entries={rows}
-          modelName={model ? displayName(model.name) : undefined}
-          empty={cwd ? "Describe a task below to start." : "Choose a working folder to start."}
-          isOpen={this.isOpen}
-          onToggle={this.toggle}
-        />
+              <DropdownMenuTrigger asChild>
 
-        {approval && (
+                <Button variant="ghost" size="default" className="gap-1.5 bg-secondary/50 text-sm font-normal text-foreground hover:bg-secondary focus:ring-0 border-none">
 
-          <div className="mx-auto w-full max-w-3xl px-4">
+                  <ModeIcon className="size-4 text-muted-foreground" />
+                  {activeMode.label}
+                  <ChevronDownIcon className="size-4 opacity-50" />
 
-            <div className={cn(
+                </Button>
 
-              "flex items-center gap-2 rounded-xl border p-2",
-              approval.reason ? "border-destructive/50 bg-destructive/10" : "border-primary/40 bg-primary/5",
+              </DropdownMenuTrigger>
 
-            )}>
+              <DropdownMenuContent align="end" className="w-80 text-sm">
 
-              <div className="min-w-0 flex-1">
+                <DropdownMenuLabel className="text-sm">Command approval</DropdownMenuLabel>
 
-                {approval.reason && (
+                <DropdownMenuSeparator />
 
-                  <div className="mb-1 flex items-center gap-1.5 px-1 text-xs font-medium text-destructive">
+                <DropdownMenuRadioGroup
+                  value={mode}
+                  onValueChange={(value) => {
 
-                    <TriangleAlertIcon className="size-3.5" />
-                    Looks destructive — {approval.reason}
+                    localStorage.setItem(MODE_KEY, value);
+                    this.setState({ mode: value as ApprovalMode });
 
-                  </div>
+                  }}
+                >
 
-                )}
+                  {MODES.map((option) => (
 
-                <code className="block max-h-24 overflow-y-auto px-1 font-mono text-xs whitespace-pre-wrap">{approval.command}</code>
+                    <DropdownMenuRadioItem key={option.value} value={option.value} className="items-start gap-2 py-2.5 text-sm">
+
+                      <div className="flex flex-col gap-0.5">
+
+                        <span className="text-sm">{option.label}</span>
+                        <span className="text-xs text-muted-foreground">{option.hint}</span>
+
+                      </div>
+
+                    </DropdownMenuRadioItem>
+
+                  ))}
+
+                </DropdownMenuRadioGroup>
+
+              </DropdownMenuContent>
+
+            </DropdownMenu>
+
+          </header>
+
+          <Transcript
+            entries={rows}
+            empty={cwd ? "Describe a task below to start." : "Choose a working folder to start."}
+            isOpen={this.isOpen}
+            onToggle={this.toggle}
+          />
+
+          {approval && (
+
+            <div className="mx-auto w-full max-w-3xl px-4">
+
+              <div className={cn(
+
+                "flex items-center gap-2 rounded-xl border p-2",
+                approval.reason ? "border-destructive/50 bg-destructive/10" : "border-primary/40 bg-primary/5",
+
+              )}>
+
+                <div className="min-w-0 flex-1">
+
+                  {approval.reason && (
+
+                    <div className="mb-1 flex items-center gap-1.5 px-1 text-xs font-medium text-destructive">
+
+                      <TriangleAlertIcon className="size-3.5" />
+                      Looks destructive — {approval.reason}
+
+                    </div>
+
+                  )}
+
+                  <code className="block max-h-24 overflow-y-auto px-1 font-mono text-xs whitespace-pre-wrap">{approval.command}</code>
+
+                </div>
+
+                <Button variant="ghost" size="sm" className="gap-1.5" onClick={() => this.resolveApproval(false)}>
+
+                  <XIcon className="size-3.5" />
+                  Skip
+
+                </Button>
+
+                <Button size="sm" variant={approval.reason ? "destructive" : "default"} className="gap-1.5" onClick={() => this.resolveApproval(true)}>
+
+                  <PlayIcon className="size-3.5" />
+                  Run
+
+                </Button>
 
               </div>
 
-              <Button variant="ghost" size="sm" className="gap-1.5" onClick={() => this.resolveApproval(false)}>
+            </div>
 
-                <XIcon className="size-3.5" />
-                Skip
+          )}
 
-              </Button>
+          <div className="flex justify-center pb-3">
 
-              <Button size="sm" variant={approval.reason ? "destructive" : "default"} className="gap-1.5" onClick={() => this.resolveApproval(true)}>
+            <div className="flex w-fit items-center justify-center gap-2 rounded-full bg-muted px-3 py-1.5 text-sm text-muted-foreground">
 
-                <PlayIcon className="size-3.5" />
-                Run
+              {running && <Spinner className="size-3.5" />}
 
-              </Button>
+              <span>{status}</span>
 
             </div>
 
           </div>
 
-        )}
+          <Composer
+            assistants={assistants}
+            assistantId={assistantId}
+            busy={running}
+            disabled={!cwd}
+            contextRatio={usage.ratio}
+            contextUsed={usage.used}
+            contextLimit={usage.limit}
+            placeholder="Describe the task..."
+            disabledPlaceholder="Choose a working folder first..."
+            onModelChange={(id) => {
 
-        <div className="flex justify-center pb-3">
+              localStorage.setItem(MODEL_KEY, id);
+              this.setState({ assistantId: id });
 
-          <div className="flex w-fit items-center justify-center gap-2 rounded-full bg-muted px-3 py-1.5 text-sm text-muted-foreground">
-
-            {running && <Spinner className="size-3.5" />}
-
-            <span>{status}</span>
-
-          </div>
+            }}
+            onSend={(task) => void this.start(task)}
+            onStop={() => void window.swe.stop()}
+          />
 
         </div>
-
-        <Composer
-          assistants={assistants}
-          assistantId={assistantId}
-          busy={running}
-          disabled={!cwd}
-          placeholder="Describe the task..."
-          disabledPlaceholder="Choose a working folder first..."
-          onModelChange={(id) => {
-
-            localStorage.setItem(MODEL_KEY, id);
-            this.setState({ assistantId: id });
-
-          }}
-          onSend={(task) => void this.start(task)}
-          onStop={() => void window.swe.stop()}
-        />
 
       </div>
 

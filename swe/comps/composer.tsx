@@ -1,4 +1,4 @@
-import { Component, type FormEvent, type KeyboardEvent } from "react";
+import { Component, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ChevronDownIcon, SendIcon, SquareIcon } from "lucide-react";
 
 import { Button } from "@/comps/ui/button";
@@ -6,6 +6,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadio
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea, } from "@/comps/ui/input-group";
 
 import { displayName, groupAssistants, providerOf } from "@/lib/models";
+import { formatTokens } from "@/lib/tokens";
+import { cn } from "@/lib/utils";
 
 import type { AssistantSummary } from "../../sdk/types";
 
@@ -20,6 +22,11 @@ interface ComposerProps {
   placeholder: string;
   disabledPlaceholder: string;
 
+  /** 0–1 estimated context fill; drawn as a ring around Stop while busy. */
+  contextRatio?: number;
+  contextUsed?: number;
+  contextLimit?: number;
+
   onModelChange: (id: string) => void;
   onSend: (task: string) => void;
   onStop: () => void;
@@ -29,6 +36,87 @@ interface ComposerProps {
 interface ComposerState {
 
   text: string;
+
+}
+
+/** Circular progress around the Stop control — track is always visible; arc fills with context use. */
+function ContextRing({
+  ratio,
+  used,
+  limit,
+  children,
+}: {
+  ratio: number;
+  used?: number;
+  limit?: number;
+  children: ReactNode;
+}) {
+
+  const size = 40;
+  const stroke = 2.5;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const pct = Math.min(1, Math.max(0, ratio));
+  const offset = c * (1 - pct);
+  const hot = pct >= 0.85;
+  const warm = pct >= 0.6;
+
+  const title =
+    used != null && limit != null
+      ? `Context ~${formatTokens(used)} / ${formatTokens(limit)} (local estimate)`
+      : "Context usage (local estimate)";
+
+  return (
+
+    <div
+      className="relative inline-flex items-center justify-center"
+      style={{ width: size, height: size }}
+      title={title}
+    >
+
+      <svg
+        className="pointer-events-none absolute inset-0 -rotate-90"
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        aria-hidden
+      >
+
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          className="stroke-border"
+          strokeWidth={stroke}
+        />
+
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={c}
+          strokeDashoffset={offset}
+          className={cn(
+            "transition-[stroke-dashoffset] duration-300",
+            hot ? "stroke-destructive" : warm ? "stroke-amber-500" : "stroke-primary",
+          )}
+        />
+
+      </svg>
+
+      <div className="relative z-[1] flex items-center justify-center">
+
+        {children}
+
+      </div>
+
+    </div>
+
+  );
 
 }
 
@@ -73,6 +161,9 @@ export class Composer extends Component<ComposerProps, ComposerState> {
       disabled,
       placeholder,
       disabledPlaceholder,
+      contextRatio = 0,
+      contextUsed,
+      contextLimit,
       onModelChange,
       onStop,
     } = this.props;
@@ -184,18 +275,22 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
             {busy ? (
 
-              <InputGroupButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="gap-1.5"
-                onClick={onStop}
-              >
+              <ContextRing ratio={contextRatio} used={contextUsed} limit={contextLimit}>
 
-                <SquareIcon className="size-3 fill-current" />
-                Stop
+                <InputGroupButton
+                  type="button"
+                  variant="secondary"
+                  size="icon-sm"
+                  className="size-8 rounded-full"
+                  onClick={onStop}
+                  aria-label="Stop"
+                >
 
-              </InputGroupButton>
+                  <SquareIcon className="size-3 fill-current" />
+
+                </InputGroupButton>
+
+              </ContextRing>
 
             ) : (
 

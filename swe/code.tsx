@@ -82,13 +82,13 @@ export class Code extends Component<CodeProps, CodeState> {
 
     if (!lines || source !== code) {
 
-      return <code className="font-mono text-xs whitespace-pre-wrap">{code}</code>;
+      return <pre className="m-0 w-full font-mono text-xs leading-relaxed whitespace-pre-wrap">{code}</pre>;
 
     }
 
     return (
 
-      <code className="font-mono text-xs whitespace-pre-wrap">
+      <pre className="m-0 w-full font-mono text-xs leading-relaxed whitespace-pre-wrap">
 
         {lines.map((line, index) => (
 
@@ -106,7 +106,7 @@ export class Code extends Component<CodeProps, CodeState> {
 
         ))}
 
-      </code>
+      </pre>
 
     );
 

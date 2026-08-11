@@ -12,6 +12,9 @@ export interface Settings {
   /** Last folder the agent worked in. */
   cwd?: string | null;
 
+  /** Boodle chat ids created by mini-swe (sidebar list; titles come from Boodle). */
+  chatIds?: string[];
+
 }
 
 function ensureDir() {
@@ -66,5 +69,35 @@ export function loadLastCwd(): string | null {
   }
 
   return existsSync(cwd) ? cwd : null;
+
+}
+
+/** Remember a mini-swe chat so the sidebar can list it after Boodle titles it. */
+export function rememberChatId(chatId: string): void {
+
+  const ids = loadSettings().chatIds ?? [];
+
+  if (ids.includes(chatId)) {
+
+    return;
+
+  }
+
+  // newest first, cap so the file stays small
+  saveSettings({ chatIds: [chatId, ...ids].slice(0, 100) });
+
+}
+
+export function forgetChatId(chatId: string): void {
+
+  const ids = loadSettings().chatIds ?? [];
+
+  saveSettings({ chatIds: ids.filter((id) => id !== chatId) });
+
+}
+
+export function loadChatIds(): string[] {
+
+  return loadSettings().chatIds ?? [];
 
 }
