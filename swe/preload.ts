@@ -11,6 +11,9 @@ export interface SweChatSummary {
   title: string;
   modified: number;
 
+  /** Normalized project root, or null when unassigned / pre-project. */
+  project?: string | null;
+
 }
 
 contextBridge.exposeInMainWorld("swe", {
@@ -19,13 +22,28 @@ contextBridge.exposeInMainWorld("swe", {
 
   pickDir: (): Promise<string | null> => ipcRenderer.invoke("pick-dir"),
   lastCwd: (): Promise<string | null> => ipcRenderer.invoke("settings:last-cwd"),
+  setCwd: (cwd: string): Promise<string | null> => ipcRenderer.invoke("settings:set-cwd", cwd),
 
   usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
 
-  listChats: (): Promise<SweChatSummary[]> => ipcRenderer.invoke("chats:list"),
+  listChats: (projectDir?: string | null): Promise<SweChatSummary[]> =>
+    ipcRenderer.invoke("chats:list", projectDir ?? null),
+
   deleteChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:delete", chatId),
-  getChat: (chatId: string): Promise<{ id: string; name: string; title: string; entries: unknown[] }> => ipcRenderer.invoke("chats:get", chatId),
-  rememberChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:remember", chatId),
+
+  getChat: (chatId: string): Promise<{
+    id: string;
+    name: string;
+    title: string;
+    project?: string | null;
+    entries: unknown[];
+  }> => ipcRenderer.invoke("chats:get", chatId),
+
+  rememberChat: (chatId: string, projectDir?: string | null): Promise<void> =>
+    ipcRenderer.invoke("chats:remember", chatId, projectDir ?? null),
+
+  claimChat: (chatId: string, projectDir: string): Promise<void> =>
+    ipcRenderer.invoke("chats:claim", chatId, projectDir),
 
   pickImages: (): Promise<string[]> => ipcRenderer.invoke("pick-images"),
 
@@ -59,7 +77,7 @@ contextBridge.exposeInMainWorld("swe", {
 
   onApproval: (handler: (request: { id: number; command: string; reason: string | null }) => void) => {
 
-    ipcRenderer.on("approval", (_e, request: { id: number; command: string; reason: string | null }) => handler(request));
+    ipcRenderer.on("approval", (_e, request) => handler(request));
 
   },
 

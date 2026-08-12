@@ -11,6 +11,7 @@ import { usageOf } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 
 import { Sidebar, type SweChat } from "./sidebar";
+import { fileEdits } from "./parse";
 import { cleanSummary, parseReply, streamStep, Transcript, type Entry } from "./transcript";
 
 import type { AgentEvent } from "./agent";
@@ -23,13 +24,15 @@ interface SweBridge {
   models: () => Promise<AssistantSummary[]>;
   pickDir: () => Promise<string | null>;
   lastCwd: () => Promise<string | null>;
+  setCwd: (cwd: string) => Promise<string | null>;
 
   usage: () => Promise<UsageFile>;
 
-  listChats: () => Promise<SweChat[]>;
+  listChats: (projectDir?: string | null) => Promise<SweChat[]>;
   deleteChat: (chatId: string) => Promise<void>;
-  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; entries: Entry[] }>;
-  rememberChat: (chatId: string) => Promise<void>;
+  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; project?: string | null; entries: Entry[] }>;
+  rememberChat: (chatId: string, projectDir?: string | null) => Promise<void>;
+  claimChat: (chatId: string, projectDir: string) => Promise<void>;
 
   pickImages: () => Promise<string[]>;
 
@@ -96,6 +99,24 @@ type WithoutId<T> = T extends unknown ? Omit<T, "id"> : never;
 
 type NewEntry = WithoutId<Entry>;
 
+/** Format run duration: whole seconds under 1m, then `m:ss min`. */
+function formatElapsed(ms: number): string {
+
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+
+  if (totalSec < 60) {
+
+    return `${totalSec}s`;
+
+  }
+
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+
+  return `${min}:${String(sec).padStart(2, "0")} min`;
+
+}
+
 /** Owns its own interval so a 10Hz clock never re-renders the transcript. */
 class Elapsed extends Component<{ since: number }, { now: number }> {
 
@@ -105,7 +126,7 @@ class Elapsed extends Component<{ since: number }, { now: number }> {
 
   componentDidMount() {
 
-    this.timer = setInterval(() => this.setState({ now: Date.now() }), 100);
+    this.timer = setInterval(() => this.setState({ now: Date.now() }), 250);
 
   }
 
@@ -125,13 +146,40 @@ class Elapsed extends Component<{ since: number }, { now: number }> {
 
       <span className="font-mono text-[13px] text-ink-3 tabular-nums">
 
-        {((this.state.now - this.props.since) / 1000).toFixed(1)}s
+        {formatElapsed(this.state.now - this.props.since)}
 
       </span>
 
     );
 
   }
+
+}
+
+/** Cumulative +/- from apply_patch / write commands in the transcript (and live stream). */
+function lineStatsFromEntries(entries: Entry[]): { added: number; removed: number } {
+
+  let added = 0;
+  let removed = 0;
+
+  for (const entry of entries) {
+
+    if (entry.kind !== "step" || !entry.command) {
+
+      continue;
+
+    }
+
+    for (const edit of fileEdits(entry.command)) {
+
+      added += edit.added;
+      removed += edit.removed;
+
+    }
+
+  }
+
+  return { added, removed };
 
 }
 
@@ -243,7 +291,15 @@ export class App extends Component<{}, AppState> {
 
       if (cwd) {
 
-        this.setState({ cwd });
+        this.setState({ cwd }, () => {
+
+          void this.refreshChats();
+
+        });
+
+      } else {
+
+        void this.refreshChats();
 
       }
 
@@ -256,7 +312,6 @@ export class App extends Component<{}, AppState> {
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
     void this.refreshUsage();
-    void this.refreshChats();
 
   }
 
@@ -282,7 +337,8 @@ export class App extends Component<{}, AppState> {
 
     try {
 
-      const chats = await window.swe.listChats();
+      // list is global (all projects); cwd is only used for grouping / "New session"
+      const chats = await window.swe.listChats(this.state.cwd);
 
       this.setState({ chats, chatsLoading: false });
 
@@ -354,12 +410,15 @@ export class App extends Component<{}, AppState> {
 
     if (event.type === "session") {
 
+      const project = this.state.cwd;
+
       const chat: SweChat = {
 
         id: event.chatId,
         name: event.title,
         title: event.title,
         modified: Date.now(),
+        project: project ?? null,
 
       };
 
@@ -533,11 +592,35 @@ export class App extends Component<{}, AppState> {
 
     const picked = await window.swe.pickDir();
 
-    if (picked) {
+    if (!picked) {
 
-      this.setState({ cwd: picked });
+      return;
 
     }
+
+    // switching projects clears the open transcript — sessions are per-folder
+    this.seq = 0;
+    this.streamEntryId = null;
+    this.streamReasoning = "";
+
+    this.setState({
+
+      cwd: picked,
+      chats: [],
+      chatsLoading: true,
+      activeChatId: null,
+      entries: [],
+      stream: null,
+      toggled: new Set(),
+      approval: null,
+      tokensUsed: 0,
+      status: this.state.running ? this.state.status : "Idle",
+
+    }, () => {
+
+      void this.refreshChats();
+
+    });
 
   };
 
@@ -604,20 +687,50 @@ export class App extends Component<{}, AppState> {
 
     try {
 
+      // opening a session from another project switches the working folder
+      let cwd = this.state.cwd;
+      const chatProject = chat.project?.trim() || null;
+
+      if (chatProject) {
+
+        const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+        const same = cwd && norm(cwd).toLowerCase() === norm(chatProject).toLowerCase();
+
+        if (!same) {
+
+          await window.swe.setCwd(chatProject);
+          cwd = chatProject;
+          this.setState({ cwd: chatProject });
+
+        }
+
+      } else if (this.state.cwd) {
+
+        // unassigned → claim into the active project
+        await window.swe.claimChat(chat.id, this.state.cwd);
+
+      }
+
       const detail = await window.swe.getChat(chat.id);
       const entries = (detail.entries ?? []) as Entry[];
+      const project = detail.project ?? chat.project ?? cwd ?? null;
 
       // keep seq ahead of loaded ids so live steps don't collide
       this.seq = entries.length + 100;
       this.streamEntryId = null;
 
-      this.setState({
+      this.setState((prev) => ({
 
         activeChatId: detail.id,
         entries,
         status: "Idle",
+        chats: prev.chats.map((c) => (
+          c.id === detail.id
+            ? { ...c, title: detail.title || c.title, project, name: detail.name || c.name }
+            : c
+        )),
 
-      });
+      }));
 
     } catch (err) {
 
@@ -834,6 +947,9 @@ export class App extends Component<{}, AppState> {
     const limit = contextLimitOf(model ?? assistantId);
     const usage = usageOf(tokensUsed, limit);
 
+    const diff = lineStatsFromEntries(rows);
+    const hasDiff = diff.added > 0 || diff.removed > 0;
+
     return (
 
       <div className="flex h-full bg-page">
@@ -844,6 +960,8 @@ export class App extends Component<{}, AppState> {
           activeId={activeChatId}
 
           loading={chatsLoading}
+
+          projectDir={cwd}
 
           onSelect={(chat) => void this.selectChat(chat)}
           onDelete={(chat) => void this.deleteChat(chat)}
@@ -1016,7 +1134,20 @@ export class App extends Component<{}, AppState> {
 
               ))}
 
-              {running && startedAt != null ? <Elapsed since={startedAt} /> : null}
+              {running && hasDiff ? (
+
+                <span className="flex shrink-0 items-center gap-1.5 font-mono text-[12.5px] tabular-nums">
+
+                  {diff.added > 0 ? <span className="text-green">+{diff.added}</span> : null}
+                  {diff.removed > 0 ? <span className="text-red">−{diff.removed}</span> : null}
+
+                </span>
+
+              ) : running && startedAt != null ? (
+
+                <Elapsed since={startedAt} />
+
+              ) : null}
 
             </div>
 
@@ -1034,7 +1165,7 @@ export class App extends Component<{}, AppState> {
             contextUsed={usage.used}
             contextLimit={usage.limit}
 
-            placeholder={running ? "Send a note while it works..." : activeChatId ? "Follow up on this session..." : "Describe the task..."}
+            placeholder={running ? "Interject while working..." : activeChatId ? "Follow up on this session..." : "Describe what to build..."}
             disabledPlaceholder="Choose a working folder first..."
 
             onModelChange={(id) => {

@@ -267,6 +267,16 @@ function main() {
     }
 
     const before = readFileSync(abs, "utf8");
+    const hasEdits = op.body.some((l) => l.startsWith("+") || l.startsWith("-"));
+
+    if (!hasEdits) {
+
+      die(
+        `apply_patch: Update File ${rel} has no + or - lines (malformed empty patch — not a context mismatch). Include real -old and +new hunks.`,
+      );
+
+    }
+
     let after: string;
 
     try {
@@ -281,7 +291,9 @@ function main() {
 
     if (after === before) {
 
-      die(`apply_patch: no changes produced for ${rel} (context mismatch?)`);
+      die(
+        `apply_patch: no changes produced for ${rel} (hunks applied but file identical — already applied, or +/- lines matched existing content)`,
+      );
 
     }
 

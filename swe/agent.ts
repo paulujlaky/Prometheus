@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { ChatSession } from "../sdk/index";
 
 import { estimateTokens } from "./lib/tokens";
-import { extractCommand, extractFinishedSummary, FINISHED, incompleteReason, parseReply, } from "./parse";
+import { extractCommand, extractFinishedSummary, FINISHED, incompleteReason, parseReply, wrongFinishHint, } from "./parse";
 import { recordUsage } from "./usage";
 
 import type { BoodleClient } from "../sdk/client";
@@ -15,6 +15,8 @@ export { extractCommand, extractFinishedSummary, incompleteReason, FINISHED } fr
 
 const MAX_OBSERVATION = Number(process.env.SWE_MAX_OUTPUT ?? 16000);
 const DEFAULT_MAX_STEPS = Number(process.env.SWE_MAX_STEPS ?? 100);
+/** Per-command wall clock (default 10 min). Override with SWE_CMD_TIMEOUT_MS. */
+const DEFAULT_CMD_TIMEOUT_MS = Number(process.env.SWE_CMD_TIMEOUT_MS ?? 600_000);
 
 const CWD_MARKER = "__SWE_CWD__";
 
@@ -123,74 +125,168 @@ function toBashPath(p: string): string {
 
 }
 
+/** Clip a task for sticky re-anchors without blowing the context window. */
+function clipTask(task: string, max = 700): string {
+
+  const one = task.replace(/\s+/g, " ").trim();
+
+  if (one.length <= max) {
+
+    return one;
+
+  }
+
+  return `${one.slice(0, max - 1).trimEnd()}…`;
+
+}
+
+/**
+ * Compact protocol sticky — re-anchored on every observation so the seed does not
+ * drift out of attention. Always includes the Task: line; multi-part goals die when
+ * only the protocol is sticky and the original task is buried in chat history.
+ */
+function stickyProtocol(task: string): string {
+
+  return [
+    "Protocol (every reply, including the last):",
+    "  <tool>: <≤8 word label>",
+    "  ```bash",
+    "  <command — bulk-read with &&; multi-file apply_patch OK; never ad-hoc editors>",
+    "  ```",
+    "tool ∈ read|search|write|edit|run|test|fix|think|done — label is token 1; fence next; nothing after the closing fence.",
+    "Edits: apply_patch only for create/update/delete (multi-file in one call) — never python/node/sed/awk one-shot editors.",
+    // Keep FINISHED mid-line (after "echo \"") so extractFinishedSummary never treats sticky as real stdout.
+    // Naming the token every turn stops models inventing TASK_COMPLETE / DONE late in the session.
+    `Finish ONLY: label done: then a fence with exactly: echo "${FINISHED}: <one-line summary>" — not TASK_COMPLETE/DONE/FINISHED. Free-text "done" does not stop the runner.`,
+    "Before done: every requirement in Task below must be shipped. Partial wins are not done.",
+    `Task (still open): ${clipTask(task)}`,
+  ].join("\n");
+
+}
+
 /** Seed prompt: command-generator framing (avoids Sonnet 5 "no shell" refusals). */
 function prompt(cwd: string, task: string): string {
 
-  const win = process.platform === "win32" ? "- Runner is on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n" : "";
+  const win = process.platform === "win32"
+    ? "- Runner is on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n"
+    : "";
 
   return [
     "You generate the next shell command for an automated runner.",
-    "The runner executes your bash on the user's machine and returns Exit code + stdout/stderr in the next message.",
+    "The runner executes your bash on the user's machine and returns Exit code, cwd, and stdout/stderr in the next message.",
     "You do not execute anything yourself — only emit the next command in the schema below. Never invent command output.",
     "",
     `Working directory for the runner: ${cwd}`,
     `Shell: ${SHELL} (${process.platform})`,
+    "Toolchain on PATH: apply_patch, sg (ast-grep when installed), git, node/npm when present, grep/find/sed/head/tail/wc. `rg` may be missing — fall back to `grep -rn` without retrying rg.",
+    "Every observation header includes `Exit code:` and `cwd:` — trust that cwd; do not burn turns on `pwd`. `cd` persists across steps; env vars do not.",
     "",
-    "Every reply must be EXACTLY this shape (machine-parsed, streamed live):",
+    "Every reply must be EXACTLY this shape (machine-parsed, streamed live) — including the final turn:",
     "",
     "<tool>: <≤8 word label>",
     "```bash",
-    "<single focused command>",
+    "<command>",
     "```",
     "",
     `<tool> is ONE word, chosen from this list only — it is parsed as the step's tool type and drives the UI:`,
     "  read    inspecting files or directories (cat, ls, head, wc)",
     "  search  locating things (rg, grep, find)",
     "  write   creating a new file",
-    "  edit    changing an existing file (apply_patch, git apply, sg)",
+    "  edit    apply_patch (multi-file OK), git apply, or sg",
     "  run     builds, installs, scaffolds, git, anything else",
     "  test    running tests, type-checks or lints",
     "  fix     a retry after the previous step failed",
     "  think   planning with a read-only probe",
-    "  done    the final FINISHED echo",
+    "  done    the final FINISHED echo (required to end the session)",
     "",
-    "Output order is mandatory (the step renders as soon as the label arrives):",
-    "- Token 1 of the reply starts the label line. Nothing may precede it.",
-    "- Open ```bash on the next line so the command streams early.",
-    "- Thinking out loud belongs only between the label and the fence (the UI folds it under Thought for Ns). Never before the label, never after the closing fence.",
+    "Important: output order is mandatory (the step is shown as soon as the label arrives):",
+    "- Token 1 of the reply must start the label line (`read: …`, `edit: …`, `done: …`, …) — never a preamble, plan, or monologue first.",
+    "- Prefer the next line to open ```bash immediately so the command streams early.",
+    "- Thinking out loud: only between the label and the ```bash fence (the UI folds it under Thought for Ns).",
+    "- Again, never put thinking before the label or after the closing fence. Only a key from the tool list is a valid step label.",
+    "- No essays or capability discussion outside that shape.",
     "",
-    "Editing — use the bundled tools (already on the runner PATH). Do NOT invent ad-hoc Python/sed editors.",
+    "Throughput — fewer turns, same quality:",
+    "- One step per reply. Prefer packing work into that step when it is safe.",
+    "- Bulk reads (required early): chain independent read-only probes with `&&` / `;` and clear separators",
+    "  (e.g. `echo '=== package.json ===' && cat package.json && echo '=== src/App.tsx ===' && cat src/App.tsx && grep -rn pattern --include='*.tsx' src`).",
+    "  Do not spend a turn per file. Gather the files you will edit in one or two read steps, then edit.",
+    "- Bulk edits via apply_patch only: when several files need changes and you already have current contents",
+    "  for each of them, ship one multi-file apply_patch (multiple *** Update/Add/Delete File blocks) instead of N edit turns.",
+    "- Quality gates (never skip for speed):",
+    "  · Only patch files you have actually read (or that are brand-new Add File). Never invent file bodies from memory.",
+    "  · Context lines must match the observation exactly. If unsure, re-read those files in one bulk step, then patch.",
+    "  · If any hunk fails, re-read the failing file(s) and fix the patch — do not switch to python/sed/node rewrites.",
+    "  · Keep patches focused: related changes for this Task in one apply_patch is good; unrelated drive-by edits are not.",
+    "- Separate steps when the next action truly depends on prior output (search → then targeted read → then patch).",
     "",
-    "1) apply_patch — preferred for create/update/delete, multi-file in one call:",
+    "Editing — apply_patch is the only safe write path. Do NOT invent ad-hoc editors.",
+    "Forbidden for file create/update/delete: python, python3, node -e, perl, ruby, sed -i, awk rewrites, printf loops, or any hand-rolled replace script.",
+    "Allowed edit tools only:",
+    "",
+    "1) apply_patch (required for create/update/delete) — Codex-style; multi-file in one call is preferred when ready:",
     "  apply_patch <<'PATCH'",
     "  *** Begin Patch",
-    "  *** Update File: path/to/file.ts",
+    "  *** Update File: path/to/a.ts",
     "  @@",
     "   unchanged context line",
     "  -old line",
     "  +new line",
+    "  *** Update File: path/to/b.ts",
+    "  @@",
+    "  -old",
+    "  +new",
     "  *** Add File: path/to/new.ts",
     "  +export const x = 1",
     "  *** Delete File: path/to/gone.ts",
     "  *** End Patch",
     "  PATCH",
-    "  Relative paths. Context lines start with a space; removals `-`; additions `+`.",
-    "  If it fails, re-read the file and fix the context — never fall back to rewriting the whole file from memory.",
+    "  Paths must be relative. Context lines start with a space; removals `-`; additions `+`.",
+    "  Every Update File must include real +/- hunks — a header with no hunks is a malformed empty patch.",
+    "  Prefer one multi-file apply_patch over several single-file turns once context is known.",
+    "  If apply_patch fails, re-read the file(s) and fix the context — do not fall back to rewriting whole files from memory.",
     "",
-    "2) git apply --whitespace=nowarn -p0 <<'DIFF' … DIFF — only for standard unified diffs.",
-    "3) sg -p '<pattern>' -r '<replacement>' -l ts --update-all — structural rewrites; preview without --update-all when unsure.",
-    "4) cat > 'path' <<'EOF' … EOF — new files only, when apply_patch is awkward.",
+    "2) git apply — only for standard unified diffs (git format-patch / diff -u):",
+    "  git apply --whitespace=nowarn -p0 <<'DIFF'",
+    "  --- a/file.ts",
+    "  +++ b/file.ts",
+    "  @@ -1,3 +1,3 @@",
+    "  ...",
+    "  DIFF",
+    "",
+    "3) sg (ast-grep, on PATH) — structural search/replace when an AST pattern is clearer than a line patch:",
+    "  sg -p 'console.log($A)' -r 'logger.info($A)' -l ts --update-all",
+    "  Preview first without --update-all when unsure.",
+    "",
+    "4) New file only if apply_patch is awkward — quoted heredoc (no inventing replace scripts):",
+    "  cat > 'path/to/file.ts' <<'EOF'",
+    "  ...entire file...",
+    "  EOF",
+    "",
+    "Task discipline (critical — do not invent a smaller goal):",
+    "- The Task: line below is authoritative. Execute it; do not reverse-engineer a plausible task from the repo.",
+    "- If Task lists multiple deliverables (and/also/plus, numbered items, bullets), complete ALL of them before done:.",
+    "- When multiple files implement those deliverables, one multi-file apply_patch is better than finishing after the first file.",
+    "- A green build/typecheck only proves syntax — it does not prove the Task is done.",
+    "",
+    "Finishing (critical — the session stays open until this runs):",
+    "- Do not announce completion in free text. Prose summaries, checklists, or \"all done\" do not stop the runner.",
+    `- The ONLY accepted finish token is the exact string ${FINISHED} (not TASK_COMPLETE, DONE, COMPLETE, FINISHED, or any other invention).`,
+    "- Only when every Task requirement is shipped — after at most one verify step — emit EXACTLY:",
+    "  done: <≤8 word label>",
+    "  ```bash",
+    `  echo "${FINISHED}: <one-line summary that names each deliverable>"`,
+    "  ```",
+    `- The shell stdout must contain a line that starts with ${FINISHED}. Wrong markers leave the session running.`,
+    "- Prefer finishing over optional polish — never over unfinished requirements. Do not done: after a partial win.",
     "",
     "Behaviour Notes:",
-    "- One action per turn: read OR edit OR write. Inspect the tree when needed (`ls`, `git status -sb`, `rg`).",
     "- Quote paths. Prefer apply_patch over whole-file rewrites.",
-    "- No verify parades: at most one build/test after real edits; never re-check the same fact; when done, finish immediately.",
-    `- Done: echo "${FINISHED}: <one-line summary>" with the label \`done:\``,
-    `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with rg/grep/tail.`,
-    "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y. `cd` persists; env does not.",
+    "- No verify parades: at most one build/test after real edits; never re-check the same fact.",
+    `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with grep/tail; for large files, prefer grep -n for symbols over blind line windows.`,
+    "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y.",
     "- Images/files attached to this chat are already in context — reference them; do not ask the user to re-upload.",
     win,
-
     `\nTask: ${task}`,
 
   ].join("\n");
@@ -199,23 +295,46 @@ function prompt(cwd: string, task: string): string {
 
 /**
  * Follow-up on an existing chat: server already has the system protocol + history.
- * Keep this short so we don't re-burn the full seed prompt every turn.
+ * Keep this short so we don't re-burn the full seed prompt every turn — but restate the
+ * bits models forget late (format, task, forced finish marker).
  */
 function followUpPrompt(cwd: string, task: string): string {
 
   return [
-    "Continue the same runner session. Protocol unchanged:",
-    "  <tool>: <≤8 word label>",
-    "  ```bash",
-    "  <one focused command>",
-    "  ```",
-    `tool ∈ read|search|write|edit|run|test|fix|think|done — first token is the label line; open the fence next.`,
-    `cwd: ${cwd} · shell still ${SHELL}. Prefer apply_patch. Done: echo "${FINISHED}: <summary>" with label done:`,
-    "Do not restate prior work. Emit only the next action.",
+    "Continue the same runner session.",
+    stickyProtocol(task),
+    `cwd: ${cwd} · shell still ${SHELL}.`,
+    "Do not restate prior work. Emit only the next action (or done: + FINISHED echo if every requirement is already complete).",
     "",
-    `Follow-up: ${task}`,
+    `Follow-up (new requirements — treat as part of Task): ${task}`,
 
   ].join("\n");
+
+}
+
+/** Observation → next user message: exit, cwd, output, protocol+task sticky, optional hint. */
+function observationMessage(
+  exitCode: number,
+  output: string,
+  opts: { cwd: string; task: string; hint?: string },
+): string {
+
+  const parts = [
+    `Exit code: ${exitCode}`,
+    `cwd: ${opts.cwd}`,
+    "",
+    truncate(output) || "<no output>",
+    "",
+    stickyProtocol(opts.task),
+  ];
+
+  if (opts.hint) {
+
+    parts.push("", opts.hint);
+
+  }
+
+  return parts.join("\n");
 
 }
 
@@ -293,7 +412,14 @@ function truncate(text: string): string {
   const cut = text.length - MAX_OBSERVATION;
 
   // loud, because a silently clipped middle is where the real error usually is
-  const notice = `\n\n===== ${cut} CHARACTERS CUT FROM THE MIDDLE OF THIS OUTPUT =====\nRe-run with grep/tail if the part you need was in here.\n\n`;
+  const notice = [
+    "",
+    "",
+    `===== ${cut} CHARACTERS CUT FROM THE MIDDLE OF THIS OUTPUT =====`,
+    "Re-run with a narrower filter (grep -n pattern file, sed -n 'A,Bp', tail) — do not re-page the same window hoping for different lines.",
+    "",
+    "",
+  ].join("\n");
 
   return `${text.slice(0, half)}${notice}${text.slice(-half)}`;
 
@@ -584,6 +710,9 @@ export class MiniAgent {
   private cwd = "";
   private toolPath = "";
 
+  /** Active user task — re-anchored into every observation so multi-part goals do not drift. */
+  private task = "";
+
   /** Cumulative estimated tokens of everything sent + received this run (server keeps full history). */
   private tokensUsed = 0;
 
@@ -606,9 +735,7 @@ export class MiniAgent {
   }
 
   /**
-   * Queue a user message into the active loop. Applied on the next model turn
-   * (after the current stream / command finishes) — the session cannot accept
-   * a second send while a response is in flight.
+   * Queue a user message into the active loop. 
    */
   interject(text: string, imagePaths: string[] = []) {
 
@@ -697,11 +824,14 @@ export class MiniAgent {
 
     }
 
+    // fold mid-run notes into the sticky Task so done: cannot ignore them
+    this.task = [this.task, ...notes].filter(Boolean).join("\n");
+
     return [
 
       message,
       "",
-      "The user sent a message while you were working. Read it carefully and adjust your next action. Address it before continuing prior work if it conflicts.",
+      "The user sent a message while you were working. Read it carefully and adjust your next action. Address it before continuing prior work if it conflicts. It is now part of Task.",
       "",
       ...notes.flatMap((note, i) => (i === 0 ? [note] : ["", note])),
 
@@ -724,10 +854,11 @@ export class MiniAgent {
     const { client, onEvent, approve } = this.options;
 
     const maxSteps = this.options.maxSteps ?? DEFAULT_MAX_STEPS;
-    const timeoutMs = this.options.commandTimeoutMs ?? 120_000;
+    const timeoutMs = this.options.commandTimeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
 
     // forward slashes, because a backslash path in a bash prompt is a trap
     this.cwd = this.options.cwd.replaceAll("\\", "/");
+    this.task = task;
     this.tokensUsed = 0;
 
     const followUp = Boolean(runOptions.chatId);
@@ -951,7 +1082,10 @@ export class MiniAgent {
 
           if (turn.text.includes("```")) {
 
-            message = "Your reply opened a bash block but never closed it, so nothing could be run. Resend a smaller block, closing the fence.";
+            message = [
+              "Your reply opened a bash block but never closed it, so nothing could be run. Resend a smaller block, closing the fence.",
+              stickyProtocol(this.task),
+            ].join("\n\n");
             continue;
 
           }
@@ -959,8 +1093,9 @@ export class MiniAgent {
           message = [
 
             "That reply contained no bash code block, so the runner executed nothing and the task did not advance.",
-            "Emit only the next command in the schema — no prose, no capability discussion:",
-            "read|search|write|edit|run|test|fix|think|done: <≤8 word label>\n```bash\n<one command>\n```",
+            "Do not answer in free prose — including to say you are finished. Emit only the schema.",
+            stickyProtocol(this.task),
+            "If every Task requirement is already complete, emit label done: and a bash fence that echoes the finish marker (see seed) plus a one-line summary.",
 
           ].join("\n");
 
@@ -1017,7 +1152,8 @@ export class MiniAgent {
 
         onEvent({ type: "observation", text: output, exitCode });
 
-        const summary = extractFinishedSummary(output);
+        // accept finish from stdout, or from a pure done-echo command (stdout may be truncated)
+        const summary = extractFinishedSummary(output) ?? (command ? extractFinishedSummary(command) : null);
 
         if (summary) {
 
@@ -1027,15 +1163,11 @@ export class MiniAgent {
           // a note arrived while the finish command ran — keep the loop open for it
           if (this.pending.length) {
 
-            message = await this.applyInterjections([
-
-              `Exit code: ${exitCode}`,
-              "",
-              truncate(output) || "<no output>",
-              "",
-              `You were about to finish ("${finalSummary}"). The user sent a new message — address it before finishing again.`,
-
-            ].join("\n"));
+            message = await this.applyInterjections(observationMessage(exitCode, output, {
+              cwd: this.cwd,
+              task: this.task,
+              hint: `You were about to finish ("${finalSummary}"). The user sent a new message — address it before finishing again with: echo "${FINISHED}: <summary>".`,
+            }));
 
             continue;
 
@@ -1047,20 +1179,32 @@ export class MiniAgent {
 
         }
 
-        // failed patch: nudge toward re-read instead of a blind whole-file rewrite
+        // failed patch: distinguish empty/malformed patches from real context mismatches
+        const emptyPatch = exitCode !== 0 && /no \+|empty patch|malformed empty|no file operations/i.test(output);
         const patchMiss = exitCode !== 0 && /apply_patch:|Invalid Context|failed to update|git apply/i.test(output);
 
-        message = patchMiss ? [
+        let stepHint: string | undefined;
 
-            `Exit code: ${exitCode}`,
-            "",
-            truncate(output) || "<no output>",
-            "",
-            "Patch context did not match. Re-cat the file, fix the @@ context lines, and retry apply_patch (or git apply) — do not rewrite the whole file from memory.",
+        if (emptyPatch) {
 
-          ].join("\n")
+          stepHint = "That patch was empty or had no +/- hunks (not a context mismatch). Resend apply_patch with real -old and +new lines under *** Update File.";
 
-        : `Exit code: ${exitCode}\n\n${truncate(output) || "<no output>"}`;
+        } else if (patchMiss) {
+
+          stepHint = "Patch context did not match. Re-cat the file, fix the @@ context lines, and retry apply_patch (or git apply) — do not rewrite the whole file from memory, and do not invent a python/sed editor.";
+
+        } else {
+
+          // model invented TASK_COMPLETE / DONE / etc. — correct it immediately
+          stepHint = wrongFinishHint(command, output, parsed.tool) ?? undefined;
+
+        }
+
+        message = observationMessage(exitCode, output, {
+          cwd: this.cwd,
+          task: this.task,
+          hint: stepHint,
+        });
 
       }
 

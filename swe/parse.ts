@@ -443,19 +443,73 @@ export function fileEdits(command: string): FileEdit[] {
 
 }
 
+/**
+ * Detect a real session-end signal — not prose/docs that merely mention the marker.
+ *
+ * Accepts:
+ *  1) Shell stdout: a line that *begins* with MINI_SWE_FINISHED (what `echo` prints)
+ *  2) A done-step command: `echo "MINI_SWE_FINISHED: …"` (any summary length)
+ *
+ * Rejects mid-line mentions in sticky protocol / seed examples, which used to end
+ * sessions early and paint a false "done" when replaying chats.
+ */
 export function extractFinishedSummary(output: string): string | null {
 
-  const index = output.indexOf(FINISHED);
-
-  if (index === -1) {
+  if (!output || !output.includes(FINISHED)) {
 
     return null;
 
   }
 
-  const line = (output.slice(index + FINISHED.length).split(/\r?\n/, 1)[0] ?? "").replace(/^[:\s|-]+/, "").trim();
+  // 1) Real echo output — marker must start the line (may be multi-line summary; take rest of line)
+  const lineRe = new RegExp(`(?:^|\\r?\\n)[ \\t]*${FINISHED}\\s*:?\\s*([^\\r\\n]*)`);
+  const lineMatch = lineRe.exec(output);
 
-  return line || "Task complete.";
+  if (lineMatch) {
+
+    const summary = (lineMatch[1] ?? "").replace(/^["']|["']$/g, "").trim();
+
+    return summary || "Task complete.";
+
+  }
+
+  // 2) Done-step command: whole string is `echo …FINISHED…` (history + empty-stdout recovery).
+  // No length cap — real finish summaries are often long. Sticky/docs never start with `echo`.
+  const cmd = output.trim();
+
+  if (!/^echo\b/i.test(cmd) || /^Exit code:/m.test(cmd) || /\bProtocol\b/.test(cmd)) {
+
+    return null;
+
+  }
+
+  // echo "MINI_SWE_FINISHED: …" | echo '…' | echo MINI_SWE_FINISHED: …
+  // Allow any summary length; strip a single matching trailing quote if present.
+  const echoHead = new RegExp(`^echo\\s+(["']?)${FINISHED}\\s*:\\s*`, "i");
+  const head = echoHead.exec(cmd);
+
+  if (!head) {
+
+    return null;
+
+  }
+
+  const quote = head[1] ?? "";
+  let rest = cmd.slice(head[0].length);
+
+  if (quote && rest.endsWith(quote)) {
+
+    rest = rest.slice(0, -1);
+
+  } else {
+
+    rest = rest.replace(/["']\s*;?\s*$/, "");
+
+  }
+
+  const summary = rest.replace(/\s*;\s*$/, "").trim();
+
+  return summary || "Task complete.";
 
 }
 
@@ -470,6 +524,69 @@ export function cleanSummary(text: string): string {
   s.endsWith('"') && (s = s.slice(0, -1).trim()); // replace trailing quote from `echo "Task complete."` in a finished bash block
 
   return s || "Task complete.";
+
+}
+
+/**
+ * When the model tries to finish with the wrong marker (TASK_COMPLETE, DONE, …)
+ * or label done: without the real echo — return a short resend instruction.
+ * null when this does not look like a botched finish attempt.
+ */
+export function wrongFinishHint(command: string | null, output: string, tool: Tool | null): string | null {
+
+  if (extractFinishedSummary(output) || (command && extractFinishedSummary(command))) {
+
+    return null;
+
+  }
+
+  const cmd = (command ?? "").trim();
+  const out = (output ?? "").trim();
+  const isDoneLabel = tool === "done";
+
+  // echo SOME_OTHER_TOKEN: summary  (or quoted)
+  const echoToken = /^\s*echo\s+["']?([A-Za-z][A-Za-z0-9_]{2,})\s*:/.exec(cmd);
+  const outToken = /(?:^|\n)\s*([A-Za-z][A-Za-z0-9_]{2,})\s*:/.exec(out);
+
+  const bogus = echoToken?.[1] && echoToken[1] !== FINISHED
+    ? echoToken[1]
+    : outToken?.[1] && outToken[1] !== FINISHED && isDoneLabel
+      ? outToken[1]
+      : null;
+
+  if (!bogus && !isDoneLabel) {
+
+    return null;
+
+  }
+
+  if (!bogus && isDoneLabel && !/^echo\b/i.test(cmd)) {
+
+    return [
+      `Label done: was used, but the shell must print the exact marker ${FINISHED}.`,
+      "Resend EXACTLY (nothing else in the fence):",
+      `done: task complete`,
+      "```bash",
+      `echo "${FINISHED}: <one-line summary>"`,
+      "```",
+    ].join("\n");
+
+  }
+
+  if (!bogus) {
+
+    return null;
+
+  }
+
+  return [
+    `Wrong finish marker "${bogus}". The runner only stops when stdout contains a line that starts with ${FINISHED}.`,
+    "Do not invent TASK_COMPLETE, DONE, or similar. Resend EXACTLY:",
+    `done: task complete`,
+    "```bash",
+    `echo "${FINISHED}: <one-line summary>"`,
+    "```",
+  ].join("\n");
 
 }
 

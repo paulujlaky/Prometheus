@@ -4,8 +4,19 @@ import { dirname, join, resolve } from "node:path";
 
 import { MiniAgent, riskReason, type AgentEvent } from "./agent";
 import { entriesFromChatDetail } from "./history";
-import { forgetChatId, loadChatIds, loadLastCwd, loadSettings, rememberChatId, saveSettings } from "./settings";
+import {
+  ensureProjectChats,
+  forgetChatId,
+  loadLastCwd,
+  loadSettings,
+  normalizeProjectPath,
+  rememberChatId,
+  saveSettings,
+  UNASSIGNED_PROJECT,
+} from "./settings";
 import { loadUsage } from "./usage";
+
+import type { ChatDetail } from "../sdk/types";
 
 export type ApprovalMode = "ask" | "smart" | "auto";
 import { BoodleClient } from "../sdk/index";
@@ -152,55 +163,195 @@ ipcMain.handle("settings:get", () => loadSettings());
 
 ipcMain.handle("settings:last-cwd", () => loadLastCwd());
 
-ipcMain.handle("usage:get", () => loadUsage());
+/** Persist the active project folder without a picker (e.g. opening a chat from another project). */
+ipcMain.handle("settings:set-cwd", (_event, cwd: string) => {
 
-ipcMain.handle("chats:list", async () => {
+  if (typeof cwd !== "string" || !cwd.trim()) {
 
-  const known = new Set(loadChatIds());
-
-  if (!known.size) {
-
-    return [];
+    return null;
 
   }
 
-  // pull a wide recent page and keep only chats we created (titles stay whatever Boodle assigned)
-  const list = await getClient().listChats(100, 0);
-  const found = new Set<string>();
+  const next = cwd.trim();
+  saveSettings({ cwd: next });
 
-  const rows = (list.entries ?? []).filter((chat) => known.has(chat.id) || (typeof chat.name === "string" && chat.name.startsWith("[SWE] "))).map((chat) => {
+  return next;
 
-      found.add(chat.id);
-      rememberChatId(chat.id);
+});
 
-      const raw = (chat.name ?? "").trim();
+ipcMain.handle("usage:get", () => loadUsage());
 
-      // we should migrate old local titles; new chats use Boodle's name as-is
-      const title = raw.startsWith("[SWE] ") ? raw.slice(6).trim() || raw : raw || "Untitled";
+/** Pull project root from the harness seed / sticky lines in a chat's history. */
+function extractProjectFromDetail(detail: ChatDetail): string | null {
 
-      return {
+  for (const message of detail.messages ?? []) {
 
-        id: chat.id,
-        name: chat.name,
-        title,
-        modified: chat.modified ?? chat.lastMessage ?? chat.created ?? 0,
+    const text = message.type === "User"
+      ? message.submission ?? ""
+      : message.submission ?? "";
 
-      };
+    if (!text) {
 
-    }).sort((a, b) => b.modified - a.modified);
+      continue;
 
-  // drop ids Boodle no longer returns (deleted elsewhere)
-  for (const id of known) {
+    }
 
-    if (!found.has(id)) {
+    const seed = /Working directory for the runner:\s*(\S+)/.exec(text);
 
-      forgetChatId(id);
+    if (seed?.[1]) {
+
+      return normalizeProjectPath(seed[1]);
+
+    }
+
+    const sticky = /(?:^|\n)cwd:\s*(\S+)/.exec(text);
+
+    if (sticky?.[1]) {
+
+      return normalizeProjectPath(sticky[1]);
 
     }
 
   }
 
-  return rows;
+  return null;
+
+}
+
+/** One in-flight triage so listChats does not stampede getChat. */
+let triagePromise: Promise<void> | null = null;
+
+/** Orphans already inspected this process — avoid re-fetching every sidebar refresh. */
+const triagedOrphans = new Set<string>();
+
+/**
+ * Assign unassigned / legacy chat ids to a project by reading the seed prompt cwd.
+ * Caps how many we fetch per list call so the sidebar stays snappy.
+ */
+async function triageUnassignedChats(limit = 12): Promise<void> {
+
+  if (triagePromise) {
+
+    return triagePromise;
+
+  }
+
+  triagePromise = (async () => {
+
+    const map = ensureProjectChats();
+    const orphans = (map[UNASSIGNED_PROJECT] ?? [])
+      .filter((id) => !triagedOrphans.has(id))
+      .slice(0, limit);
+
+    if (!orphans.length) {
+
+      return;
+
+    }
+
+    const client = getClient();
+
+    for (const id of orphans) {
+
+      triagedOrphans.add(id);
+
+      try {
+
+        const detail = await client.getChat(id);
+        const project = extractProjectFromDetail(detail);
+
+        if (project) {
+
+          rememberChatId(id, project);
+
+        }
+
+      } catch {
+
+        // deleted remotely or unreachable — drop the id
+        forgetChatId(id);
+
+      }
+
+    }
+
+  })().finally(() => {
+
+    triagePromise = null;
+
+  });
+
+  return triagePromise;
+
+}
+
+function chatTitle(name: string | null | undefined): string {
+
+  const raw = (name ?? "").trim();
+
+  if (raw.startsWith("[SWE] ")) {
+
+    return raw.slice(6).trim() || raw;
+
+  }
+
+  return raw || "Untitled";
+
+}
+
+ipcMain.handle("chats:list", async (_event, _projectDir?: string | null) => {
+
+  // fold legacy chatIds; best-effort bind orphans from history
+  // Always return every project — filtering to the active folder made other
+  // projects look "deleted" when the user switched cwd (storage was fine).
+  ensureProjectChats();
+  await triageUnassignedChats();
+  const projects = ensureProjectChats();
+
+  const orderedIds: { id: string; project: string | null }[] = [];
+
+  for (const [proj, ids] of Object.entries(projects)) {
+
+    const project = proj === UNASSIGNED_PROJECT ? null : proj;
+
+    for (const id of ids) {
+
+      orderedIds.push({ id, project });
+
+    }
+
+  }
+
+  if (!orderedIds.length) {
+
+    return [];
+
+  }
+
+  const knownIds = new Set(orderedIds.map((r) => r.id));
+  const list = await getClient().listChats(100, 0);
+  const remote = new Map((list.entries ?? []).filter((c) => knownIds.has(c.id)).map((c) => [c.id, c]));
+
+  const rows = orderedIds.map(({ id, project }) => {
+
+    const chat = remote.get(id);
+
+    return {
+
+      id,
+      name: chat?.name ?? "",
+      title: chat ? chatTitle(chat.name) : "Untitled",
+      modified: chat
+        ? (chat.modified ?? chat.lastMessage ?? chat.created ?? 0)
+        : 0,
+      project,
+
+    };
+
+  });
+
+  // newest first within the flat list; the sidebar re-groups by project
+  return rows.sort((a, b) => b.modified - a.modified);
 
 });
 
@@ -215,20 +366,43 @@ ipcMain.handle("chats:get", async (_event, chatId: string) => {
 
   const detail = await getClient().getChat(chatId);
 
+  // opportunistic bind if still unassigned
+  const project = extractProjectFromDetail(detail);
+
+  if (project) {
+
+    rememberChatId(chatId, project);
+
+  }
+
   return {
 
     id: detail.chat.id,
     name: detail.chat.name,
-    title: (detail.chat.name ?? "").trim() || "Untitled",
+    title: chatTitle(detail.chat.name),
+    project,
     entries: entriesFromChatDetail(detail),
 
   };
 
 });
 
-ipcMain.handle("chats:remember", (_event, chatId: string) => {
+ipcMain.handle("chats:remember", (_event, chatId: string, projectDir?: string | null) => {
 
-  rememberChatId(chatId);
+  rememberChatId(chatId, projectDir);
+
+});
+
+/** Claim an unassigned session into the active project (user opened it there). */
+ipcMain.handle("chats:claim", (_event, chatId: string, projectDir: string) => {
+
+  if (!chatId || !projectDir) {
+
+    return;
+
+  }
+
+  rememberChatId(chatId, projectDir);
 
 });
 
@@ -316,7 +490,7 @@ ipcMain.handle("start", async (_event, options: {
 
       if (event.type === "session") {
 
-        rememberChatId(event.chatId);
+        rememberChatId(event.chatId, options.cwd);
 
       }
 

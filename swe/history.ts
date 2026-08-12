@@ -1,4 +1,4 @@
-import { extractCommand, extractFinishedSummary, extractTaskText, parseReply, type Tool } from "./parse";
+import { extractCommand, extractFinishedSummary, extractTaskText, FINISHED, parseReply, type Tool } from "./parse";
 
 import { isAssistantMessage, isUserMessage } from "../sdk/messages";
 import { ResponseStream } from "../sdk/stream";
@@ -127,11 +127,16 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
     }
 
+    const command = openStep.command;
     openStep.output = output;
     openStep.exitCode = exitCode;
-    openStep = null;
 
-    const summary = extractFinishedSummary(output);
+    // stdout may be empty (Windows/bash echo quirks) while the fence was a correct finish echo —
+    // recover the summary from the command so reloads still show the terminal done row.
+    const summary = extractFinishedSummary(output)
+      ?? (command ? extractFinishedSummary(command) : null);
+
+    openStep = null;
 
     if (summary) {
 
@@ -325,15 +330,28 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
   if (openStep && openStep.output === null) {
 
-    openStep.output = "";
+    const summary = openStep.command ? extractFinishedSummary(openStep.command) : null;
 
-    // last step was the FINISHED echo itself — that one really did succeed
-    if (openStep.command && extractFinishedSummary(openStep.command)) {
+    // last step was the FINISHED echo itself (no observation stored yet)
+    if (summary) {
 
+      openStep.output = openStep.command ?? "";
+      openStep.exitCode = 0;
+      openStep = null;
+      pushDone(summary);
+
+    } else if (openStep.tool === "done" && openStep.command && openStep.command.includes(FINISHED)) {
+
+      // tool done: + command mentions marker but extract was picky — still close as finished
+      const fallback = openStep.desc?.trim() || "Task complete.";
       openStep.output = openStep.command;
       openStep.exitCode = 0;
+      openStep = null;
+      pushDone(fallback);
 
-      pushDone(extractFinishedSummary(openStep.command) ?? "Task complete.");
+    } else {
+
+      openStep.output = "";
 
     }
 
