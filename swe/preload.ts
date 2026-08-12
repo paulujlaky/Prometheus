@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld("swe", {
   pickDir: (): Promise<string | null> => ipcRenderer.invoke("pick-dir"),
   lastCwd: (): Promise<string | null> => ipcRenderer.invoke("settings:last-cwd"),
   setCwd: (cwd: string): Promise<string | null> => ipcRenderer.invoke("settings:set-cwd", cwd),
+  recentProjects: (): Promise<{ dir: string; count: number }[]> => ipcRenderer.invoke("settings:recent-projects"),
+  openProject: (cwd: string): Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null> => ipcRenderer.invoke("settings:open-project", cwd),
 
   usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
 

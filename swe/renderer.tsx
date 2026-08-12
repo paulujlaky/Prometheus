@@ -4,7 +4,7 @@ import { CheckIcon, ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, 
 
 import { Composer } from "@/comps/composer";
 import type { UsageFile } from "@/comps/heatmap";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown";
 
 import { contextLimitOf, displayName } from "@/lib/models";
 import { usageOf } from "@/lib/tokens";
@@ -25,6 +25,8 @@ interface SweBridge {
   pickDir: () => Promise<string | null>;
   lastCwd: () => Promise<string | null>;
   setCwd: (cwd: string) => Promise<string | null>;
+  recentProjects: () => Promise<{ dir: string; count: number }[]>;
+  openProject: (cwd: string) => Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null>;
 
   usage: () => Promise<UsageFile>;
 
@@ -233,6 +235,7 @@ interface AppState {
   chats: SweChat[];
   chatsLoading: boolean;
   activeChatId: string | null;
+  recentProjects: { dir: string; count: number }[];
 
 }
 
@@ -266,6 +269,7 @@ export class App extends Component<{}, AppState> {
     chats: [],
     chatsLoading: true,
     activeChatId: null,
+    recentProjects: [],
 
   };
 
@@ -325,6 +329,7 @@ export class App extends Component<{}, AppState> {
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
     void this.refreshUsage();
+    void window.swe.recentProjects().then((recentProjects) => this.setState({ recentProjects }));
 
   }
 
@@ -622,6 +627,13 @@ export class App extends Component<{}, AppState> {
 
     }
 
+    await this.openProject(picked);
+  };
+
+  private openProject = async (dir: string) => {
+    const opened = await window.swe.openProject(dir);
+    if (!opened) return;
+
     // switching projects clears the open transcript — sessions are per-folder
     this.seq = 0;
     this.streamEntryId = null;
@@ -629,7 +641,8 @@ export class App extends Component<{}, AppState> {
 
     this.setState({
 
-      cwd: picked,
+      cwd: opened.dir,
+      recentProjects: opened.recentProjects,
       chats: [],
       chatsLoading: true,
       activeChatId: null,
@@ -1004,12 +1017,31 @@ export class App extends Component<{}, AppState> {
 
           <header className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
 
-            <button type="button" onClick={() => void this.pickFolder()} className="flex h-9 items-center gap-2 rounded-control border border-line bg-surface px-3 text-[13px] font-medium text-ink transition-colors duration-100 hover:bg-hover" >
-
-              <FolderOpenIcon className="size-4 text-ink-3" />
-              <span className="max-w-56 truncate">{cwd ? folderName : "Choose folder"}</span>
-
-            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button type="button" className="flex h-9 items-center gap-2 rounded-control border border-line bg-surface px-3 text-[13px] font-medium text-ink transition-colors duration-100 hover:bg-hover">
+                  <FolderOpenIcon className="size-4 text-ink-3" />
+                  <span className="max-w-56 truncate">{cwd ? folderName : "Choose folder"}</span>
+                  <ChevronDownIcon className="size-3.5 opacity-60" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent className="min-w-72">
+                <DropdownMenuLabel>Recent projects</DropdownMenuLabel>
+                {this.state.recentProjects.length === 0 ? (
+                  <div className="px-2 py-1.5 text-sm text-muted-foreground">No recent projects</div>
+                ) : this.state.recentProjects.map((project) => (
+                  <DropdownMenuItem key={project.dir} onSelect={() => void this.openProject(project.dir)} title={project.dir}>
+                    <span className="min-w-0 flex-1 truncate">{project.dir.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? project.dir}</span>
+                    <span className="ml-3 text-xs tabular-nums text-muted-foreground">{project.count}</span>
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => void this.pickFolder()}>
+                  <FolderOpenIcon className="size-4 text-ink-3" />
+                  Open new folder…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
             <div className="min-w-0 flex-1" />
 

@@ -12,6 +12,9 @@ export const UNASSIGNED_PROJECT = "";
 
 export interface Settings {
 
+  /** Frequently opened project roots, persisted in ~/.bbx/settings.json. */
+  recentProjects?: { dir: string; count: number }[];
+
   /** @deprecated Working directories now belong to individual chats. */
   cwd?: string | null;
 
@@ -30,6 +33,39 @@ export interface Settings {
    */
   projectChats?: Record<string, string[]>;
 
+}
+
+export interface RecentProject {
+  dir: string;
+  count: number;
+}
+
+/** Return up to ten projects, ordered by descending open count. */
+export function loadRecentProjects(): RecentProject[] {
+  const rows = loadSettings().recentProjects;
+  if (!Array.isArray(rows)) return [];
+
+  return rows
+    .filter((row): row is RecentProject => Boolean(row && typeof row.dir === "string" && row.dir.trim() && typeof row.count === "number"))
+    .map((row) => ({ dir: normalizeProjectPath(row.dir), count: Math.max(1, Math.floor(row.count)) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+}
+
+/** Count a project open, evicting the least popular entry when over capacity. */
+export function rememberRecentProject(rawDir: string): RecentProject[] {
+  const dir = normalizeProjectPath(rawDir);
+  if (!dir) return loadRecentProjects();
+
+  const projects = loadRecentProjects();
+  const existing = projects.find((project) => project.dir === dir);
+  if (existing) existing.count += 1;
+  else projects.push({ dir, count: 1 });
+
+  projects.sort((a, b) => b.count - a.count);
+  const next = projects.slice(0, 10);
+  saveSettings({ recentProjects: next });
+  return next;
 }
 
 function ensureDir() {

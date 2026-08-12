@@ -8,10 +8,12 @@ import {
   ensureProjectChats,
   forgetChatId,
   loadLastCwd,
+  loadRecentProjects,
   loadSettings,
   normalizeProjectPath,
   rememberChatId,
   rememberChatSettings,
+  rememberRecentProject,
   settingsForChat,
   UNASSIGNED_PROJECT,
 } from "./settings";
@@ -172,6 +174,12 @@ ipcMain.handle("models", async () => getClient().listAssistants());
 ipcMain.handle("settings:get", () => loadSettings());
 
 ipcMain.handle("settings:last-cwd", () => loadLastCwd());
+ipcMain.handle("settings:recent-projects", () => loadRecentProjects());
+ipcMain.handle("settings:open-project", (_event, cwd: string) => {
+  if (typeof cwd !== "string" || !cwd.trim()) return null;
+  const dir = normalizeProjectPath(cwd);
+  return { dir, recentProjects: rememberRecentProject(dir) };
+});
 
 /** Persist the active project folder without a picker (e.g. opening a chat from another project). */
 ipcMain.handle("settings:set-cwd", (_event, cwd: string) => {

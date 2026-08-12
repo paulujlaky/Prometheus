@@ -149,6 +149,7 @@ export function searchFiles(
   root = ".",
   glob?: string,
   max = 80,
+  context = 2,
 ): string {
 
   if (!pattern) {
@@ -169,7 +170,9 @@ export function searchFiles(
     "--exclude-dir=coverage",
   ].join(" ");
   const cap = Math.max(1, Math.min(max, 200));
-  const cmd = `grep -rn -I --color=never ${excludes} ${include}${q(pattern)} ${q(rel)} | head -n ${cap}`;
+  const ctx = Math.max(0, Math.min(context, 5));
+  const dashC = ctx > 0 ? `-C ${ctx} ` : "";
+  const cmd = `grep -rn -I ${dashC}--color=never ${excludes} ${include}${q(pattern)} ${q(rel)} | head -n ${cap}`;
 
   const result = spawnSync(shell, ["-lc", cmd], { cwd, encoding: "utf8", windowsHide: true });
   const text = (result.stdout ?? "").trim();

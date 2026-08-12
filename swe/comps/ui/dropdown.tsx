@@ -66,6 +66,10 @@ function DropdownMenuRadioGroup({ ...props }: React.ComponentProps<typeof Dropdo
 
 }
 
+function DropdownMenuItem({ className, inset, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.Item> & InsetProps) {
+  return <DropdownMenuPrimitive.Item data-slot="dropdown-menu-item" data-inset={inset} className={cn(ITEM, "px-2 py-1.5", className)} {...props} />;
+}
+
 function DropdownMenuRadioItem({ className, children, inset, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.RadioItem> & InsetProps) {
 
   return (
@@ -148,6 +152,7 @@ export {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuLabel,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,

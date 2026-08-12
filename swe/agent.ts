@@ -7,12 +7,14 @@ import { ChatSession } from "../sdk/index";
 import { parseToolCalls } from "../sdk/tools";
 
 import { estimateTokens } from "./lib/tokens";
-import { advertisedTools, prepareCall, VERB_HELP, VERBS } from "./tools/dispatch";
+import { prepareCall, VERB_HELP, VERBS } from "./tools/dispatch";
 import { recordUsage } from "./usage";
 
 import type { BoodleClient } from "../sdk/client";
 
 const MAX_OBSERVATION = Number(process.env.SWE_MAX_OUTPUT ?? 16000);
+/** Hard ceiling on a single command's captured output, so a runaway process cannot exhaust memory. */
+const MAX_RUN_BUFFER = Number(process.env.SWE_MAX_RUN_BUFFER ?? 2_000_000);
 const DEFAULT_MAX_STEPS = Number(process.env.SWE_MAX_STEPS ?? 100);
 /** Per-command wall clock (default 10 min). Override with SWE_CMD_TIMEOUT_MS. */
 const DEFAULT_CMD_TIMEOUT_MS = Number(process.env.SWE_CMD_TIMEOUT_MS ?? 600_000);
@@ -140,35 +142,19 @@ function clipTask(task: string, max = 700): string {
 
 }
 
-function schemaHint() {
-
-  return { tool: advertisedTools(), label: "≤8 words", args: {} };
-
-}
-
 function prompt(cwd: string, task: string): string {
 
-  const win = process.platform === "win32"
-    ? "Windows: forward slashes; `cmd //c npm` if shims break under bash.\n"
-    : "";
-
-  const tools = VERBS.map((verb) => `  ${verb.padEnd(7)} ${VERB_HELP[verb]}`).join("\n");
+  const tools = VERBS.map((verb) => `  ${verb} ${VERB_HELP[verb]}`).join("\n");
 
   return [
-    "You are a coding agent. Each reply is one JSON object (optional thinking prose before it, nothing after):",
-    `{"tool":"read","label":"≤8 words","args":{}}`,
+    "Coding agent. Think if needed, then emit one JSON object — that is the tool call:",
+    "{\"tool\":\"read\",\"label\":\"short title\",\"args\":{}}",
     "",
-    "tool / args:",
     tools,
     "",
-    "label is required and short — it is the UI title.",
-    "Prefer read/search/write/edit/delete over run. read returns the whole file. Use only advertised argument names; after an error, correct the call from its message instead of repeating it.",
-    "edit: copy old verbatim from a read (including spaces). Several files → args.files: [{path,old,new}].",
-    "Before builds/tests, inspect package scripts or project config; use existing tooling (Bun when preferred over npm), but do not waste time debating tool choice.",
-    "Follow applicable repository directives such as AGENTS.md or CLAUDE.md.",
-    "Do not invent command output. One tool per reply. Do not discuss the protocol — just emit the object.",
-    `cwd: ${cwd}  shell: ${SHELL}`,
-    win,
+    "Batch paths in one read. Prefer search/read/edit over run. edit.old is copied from a read.",
+    "Use echo often: short status for the user (plan, findings, what you are about to change). Do not stay silent between tool calls.",
+    `cwd: ${cwd}`,
     `Task: ${task}`,
 
   ].join("\n");
@@ -177,12 +163,7 @@ function prompt(cwd: string, task: string): string {
 
 function followUpPrompt(cwd: string, task: string): string {
 
-  return [
-    `Continue. JSON {\"tool\",\"label\",\"args\"} — tool=${advertisedTools()}.`,
-    `cwd: ${cwd}`,
-    `Follow-up: ${task}`,
-
-  ].join("\n");
+  return `Continue. One JSON tool call. cwd: ${cwd}\nTask: ${task}`;
 
 }
 
@@ -203,15 +184,9 @@ function observationMessage(opts: {
 
     ok: opts.ok,
     cwd: opts.cwd,
-    next: schemaHint(),
+    task: clipTask(opts.task ?? ""),
 
   };
-
-  if (opts.task) {
-
-    body.task = clipTask(opts.task);
-
-  }
 
   if (opts.tool) {
 
@@ -250,8 +225,7 @@ function observationMessage(opts: {
 /** Upload local files as Boodle knowledge items (images/docs). */
 async function uploadPaths(client: BoodleClient, paths: string[]): Promise<string[]> {
 
-  const ids: string[] = [];
-
+  // validate every path before any upload starts, so a bad attachment fails the batch cleanly
   for (const path of paths) {
 
     if (!existsSync(path)) {
@@ -260,15 +234,18 @@ async function uploadPaths(client: BoodleClient, paths: string[]): Promise<strin
 
     }
 
-    const data = readFileSync(path);
-    const name = basename(path);
-    const item = await client.uploadKnowledge({ name, data, context: "Chat" });
-
-    ids.push(item.id);
-
   }
 
-  return ids;
+  // uploads are independent — run them concurrently; Promise.all preserves input order
+  const items = await Promise.all(paths.map((path) => client.uploadKnowledge({
+
+    name: basename(path),
+    data: readFileSync(path),
+    context: "Chat",
+
+  })));
+
+  return items.map((item) => item.id);
 
 }
 
@@ -367,7 +344,7 @@ function truncate(text: string): string {
     "",
     "",
     `===== ${cut} CHARACTERS CUT FROM THE MIDDLE OF THIS OUTPUT =====`,
-    "Re-run with a narrower filter (grep -n pattern file, sed -n 'A,Bp', tail) — do not re-page the same window hoping for different lines.",
+    "Do not re-read the same window. Narrow it: read with start/end for a specific line range, or search for a pattern to locate the right lines first.",
     "",
     "",
   ].join("\n");
@@ -594,39 +571,72 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
     onSpawn?.(child);
 
-    let output = "";
+    // bounded: keep the head plus a rolling tail, dropping the middle. summarizeRun leans on the
+    // tail for failures, so a plain head-cap would throw away the part that matters.
+    const half = Math.floor(MAX_RUN_BUFFER / 2);
+
+    let head = "";
+    let tail = "";
+    let dropped = 0;
+    let notice = "";
+
+    const append = (chunk: unknown) => {
+
+      const text = String(chunk);
+
+      if (head.length < half) {
+
+        head += text;
+
+        return;
+
+      }
+
+      tail += text;
+
+      if (tail.length > half) {
+
+        const cut = tail.length - half;
+
+        tail = tail.slice(cut);
+        dropped += cut;
+
+      }
+
+    };
+
+    const collected = () => {
+
+      const middle = dropped
+        ? `\n<${dropped} characters dropped from the middle of this output>\n`
+        : "";
+
+      return `${head}${middle}${tail}${notice}`;
+
+    };
 
     const timer = setTimeout(() => {
 
       timedOut = true;
       killTree(child);
-      output += `\n<command killed after ${timeoutMs}ms (timeout)>`;
+      notice += `\n<command killed after ${timeoutMs}ms (timeout)>`;
 
       // never leave the agent parked if the shell ignores SIGKILL / taskkill races
       forceTimer = setTimeout(() => {
 
-        done({ output, exitCode: EXIT_TIMEOUT });
+        done({ output: collected(), exitCode: EXIT_TIMEOUT });
 
       }, KILL_GRACE_MS);
 
     }, timeoutMs);
 
-    child.stdout.on("data", (chunk) => {
-
-      output += String(chunk);
-
-    });
-
-    child.stderr.on("data", (chunk) => {
-
-      output += String(chunk);
-
-    });
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
 
     child.on("error", (err) => {
 
       clearTimeout(timer);
-      done({ output: `failed to run ${SHELL} in ${cwd}: ${err.message}`, exitCode: -1 });
+      done({ output: `${collected()}\nfailed to run ${SHELL} in ${cwd}: ${err.message}`.trim(), exitCode: -1 });
 
     });
 
@@ -640,7 +650,7 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
         done({
 
-          output,
+          output: collected(),
           exitCode: timedOut ? EXIT_TIMEOUT : (code ?? -1),
 
         });
@@ -664,7 +674,7 @@ export class MiniAgent {
   private cwd = "";
   private toolPath = "";
 
-  /** Active user task — re-anchored into every observation so multi-part goals do not drift. */
+  /** Active user task — included on every observation. */
   private task = "";
 
   /** Cumulative estimated tokens of everything sent + received this run (server keeps full history). */
@@ -787,7 +797,6 @@ export class MiniAgent {
 
       raw.note = note;
       raw.task = clipTask(this.task);
-      raw.next = schemaHint();
 
       return JSON.stringify(raw);
 
@@ -1005,7 +1014,7 @@ export class MiniAgent {
             ok: false,
             cwd: this.cwd,
             task: this.task,
-            error: `Need one JSON object: {\"tool\",\"label\",\"args\"}. tool=${advertisedTools()}`,
+            error: "Need one JSON object: {\"tool\",\"label\",\"args\"}.",
 
           });
 
@@ -1021,11 +1030,18 @@ export class MiniAgent {
 
         } catch (err) {
 
+          const reason = err instanceof Error ? err.message : String(err);
+
           misses += 1;
+
+          // prepareCall runs the side effect (write/delete/edit) inline, so a throw here lands
+          // after the reply parse already opened a step row. Only an observation closes that row
+          // (renderer fills output+exitCode); without one it renders a label with a blank status.
+          onEvent({ type: "observation", text: reason, exitCode: 1 });
 
           if (misses >= MAX_MISSES) {
 
-            onEvent({ type: "error", message: err instanceof Error ? err.message : String(err) });
+            onEvent({ type: "error", message: reason });
 
             return;
 
@@ -1036,7 +1052,7 @@ export class MiniAgent {
             ok: false,
             cwd: this.cwd,
             task: this.task,
-            error: err instanceof Error ? err.message : String(err),
+            error: reason,
 
           });
 
@@ -1077,7 +1093,7 @@ export class MiniAgent {
         if (exec.kind === "echo") {
 
           onEvent({ type: "echo", text: exec.output ?? exec.label });
-          message = observationMessage({ ok: true, tool: exec.tool, cwd: this.cwd, task: this.task, output: "Message shown to user.", exit: 0 });
+          message = observationMessage({ ok: true, tool: exec.tool, cwd: this.cwd, task: this.task, output: "ok", exit: 0 });
           continue;
 
         }

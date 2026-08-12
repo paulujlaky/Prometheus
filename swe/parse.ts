@@ -898,7 +898,7 @@ export function extractTaskText(text: string): string | null {
 
   }
 
-  if (trimmed.length < 2000 && !trimmed.includes("You are a coding agent") && !trimmed.includes("\"next\"")) {
+  if (trimmed.length < 2000 && !trimmed.includes("You are a coding agent") && !trimmed.includes("\"tool_result\"") && !trimmed.includes("\"emit\"")) {
 
     return trimmed;
 

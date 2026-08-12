@@ -11,14 +11,14 @@ export type Verb = (typeof VERBS)[number];
 /** Must stay in lockstep with VERBS — missing keys fail the typecheck. */
 export const VERB_HELP: { [K in Verb]: string } = {
 
-  read: "{\"paths\":[\"file\"]}  — whole file. Optional start/end only for huge files.",
-  search: "{\"pattern\":\"...\",\"path\":\"src\",\"glob\":\"*.ts\",\"max\":80}",
-  write: "{\"files\":[{\"path\":\"a.ts\",\"content\":\"...\"}]}",
-  edit: "{\"path\":\"a.ts\",\"old\":\"exact text from read\",\"new\":\"replacement\"}",
-  delete: "{\"paths\":[\"gone.ts\"]}",
-  run: "{\"command\":\"bash\"}  — builds, git, tests. Not for editing files.",
-  echo: "{\"text\":\"message\"}  — rare status note for the user.",
-  done: "{\"summary\":\"what shipped\"}  — only when every Task item is done.",
+  read: "{paths:[file, …]}",
+  search: "{pattern, path?}",
+  write: "{path, content} or {files:[{path,content}]}",
+  edit: "{path, old, new}",
+  delete: "{paths:[file, …]}",
+  run: "{command}  — shell: build/test/git only",
+  echo: "{text}  — tell the user what you found or will do",
+  done: "{summary}",
 
 };
 
@@ -108,8 +108,9 @@ export function prepareCall(call: ToolCall, cwd: string): ToolExec {
     const path = firstString(args, "path") ?? firstString(args, "root") ?? ".";
     const glob = firstString(args, "glob") ?? undefined;
     const max = numberOf(args, "max") ?? 80;
+    const context = numberOf(args, "context") ?? 2;
 
-    return { tool, label, kind: "local", output: searchFiles(cwd, pattern, path, glob, max) };
+    return { tool, label, kind: "local", output: searchFiles(cwd, pattern, path, glob, max, context) };
 
   }
 
