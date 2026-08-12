@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
-import { existsSync } from "node:fs";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification } from "electron";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { MiniAgent, riskReason, type AgentEvent } from "./agent";
@@ -11,7 +11,8 @@ import {
   loadSettings,
   normalizeProjectPath,
   rememberChatId,
-  saveSettings,
+  rememberChatSettings,
+  settingsForChat,
   UNASSIGNED_PROJECT,
 } from "./settings";
 import { loadUsage } from "./usage";
@@ -54,10 +55,10 @@ function resolveIcon(): string | undefined {
 const appIcon = resolveIcon();
 
 let window: BrowserWindow | null = null;
-let agent: MiniAgent | null = null;
+const agents = new Map<string, MiniAgent>();
 let client: BoodleClient | null = null;
 
-const approvals = new Map<number, (ok: boolean) => void>();
+const approvals = new Map<number, { runId: string; resolve: (ok: boolean) => void }>();
 
 let approvalSeq = 0;
 
@@ -90,43 +91,52 @@ function getClient(): BoodleClient {
 
 }
 
-// one IPC message per token is the bulk of the streaming cost, so deltas are coalesced
-let deltaBuffer = "";
-let deltaTimer: ReturnType<typeof setTimeout> | null = null;
+// one IPC message per token is the bulk of the streaming cost, so deltas are coalesced per run
+const deltaBuffers = new Map<string, string>();
+const deltaTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function flushDeltas() {
+function flushDeltas(runId: string) {
 
-  if (deltaTimer) {
+  const timer = deltaTimers.get(runId);
+  if (timer) {
 
-    clearTimeout(deltaTimer);
-    deltaTimer = null;
+    clearTimeout(timer);
+    deltaTimers.delete(runId);
 
   }
 
-  if (deltaBuffer) {
+  const text = deltaBuffers.get(runId);
+  if (text) {
 
-    window?.webContents.send("agent-event", { type: "delta", text: deltaBuffer });
-    deltaBuffer = "";
+    window?.webContents.send("agent-event", { runId, event: { type: "delta", text } });
+    deltaBuffers.delete(runId);
 
   }
 
 }
 
-function send(event: AgentEvent) {
+function send(runId: string, event: AgentEvent) {
 
   if (event.type === "delta") {
 
-    deltaBuffer += event.text;
-
-    deltaTimer ??= setTimeout(flushDeltas, 60);
+    deltaBuffers.set(runId, (deltaBuffers.get(runId) ?? "") + event.text);
+    if (!deltaTimers.has(runId)) deltaTimers.set(runId, setTimeout(() => flushDeltas(runId), 60));
 
     return;
 
   }
 
-  flushDeltas();
+  flushDeltas(runId);
 
-  window?.webContents.send("agent-event", event);
+  window?.webContents.send("agent-event", { runId, event });
+
+}
+
+function alertUser(title: string, body: string) {
+
+  if (window?.isFocused()) return;
+  if (Notification.isSupported()) new Notification({ title, body, icon: appIcon }).show();
+  window?.flashFrame(true);
 
 }
 
@@ -172,10 +182,7 @@ ipcMain.handle("settings:set-cwd", (_event, cwd: string) => {
 
   }
 
-  const next = cwd.trim();
-  saveSettings({ cwd: next });
-
-  return next;
+  return cwd.trim();
 
 });
 
@@ -335,6 +342,7 @@ ipcMain.handle("chats:list", async (_event, _projectDir?: string | null) => {
   const rows = orderedIds.map(({ id, project }) => {
 
     const chat = remote.get(id);
+    const saved = settingsForChat(id);
 
     return {
 
@@ -344,7 +352,8 @@ ipcMain.handle("chats:list", async (_event, _projectDir?: string | null) => {
       modified: chat
         ? (chat.modified ?? chat.lastMessage ?? chat.created ?? 0)
         : 0,
-      project,
+      project: saved.dir ?? project,
+      modelId: saved.modelId,
 
     };
 
@@ -365,9 +374,10 @@ ipcMain.handle("chats:delete", async (_event, chatId: string) => {
 ipcMain.handle("chats:get", async (_event, chatId: string) => {
 
   const detail = await getClient().getChat(chatId);
+  const saved = settingsForChat(chatId);
 
   // opportunistic bind if still unassigned
-  const project = extractProjectFromDetail(detail);
+  const project = saved.dir ?? extractProjectFromDetail(detail);
 
   if (project) {
 
@@ -381,6 +391,7 @@ ipcMain.handle("chats:get", async (_event, chatId: string) => {
     name: detail.chat.name,
     title: chatTitle(detail.chat.name),
     project,
+    modelId: saved.modelId,
     entries: entriesFromChatDetail(detail),
 
   };
@@ -421,11 +432,7 @@ ipcMain.handle("pick-dir", async () => {
 
   }
 
-  const cwd = result.filePaths[0];
-
-  saveSettings({ cwd });
-
-  return cwd;
+  return result.filePaths[0];
 
 });
 
@@ -454,8 +461,26 @@ ipcMain.handle("pick-images", async () => {
 
 });
 
+ipcMain.handle("import-images", (_event, files: Array<{ path: string; name: string; bytes: number[] }>) => {
+
+  const dir = join(app.getPath("temp"), "boombox-images");
+  mkdirSync(dir, { recursive: true });
+
+  return files.map((file, index) => {
+
+    if (file.path && existsSync(file.path)) return file.path;
+    const safe = (file.name || `pasted-${index}.png`).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const path = join(dir, `${Date.now()}-${index}-${safe}`);
+    writeFileSync(path, Buffer.from(file.bytes));
+    return path;
+
+  });
+
+});
+
 ipcMain.handle("start", async (_event, options: {
 
+  runId: string;
   task: string;
   cwd: string;
 
@@ -472,13 +497,11 @@ ipcMain.handle("start", async (_event, options: {
 
 }) => {
 
-  if (agent) {
-
-    throw new Error("A run is already in progress");
-
+  if (!options.runId || agents.has(options.runId)) {
+    throw new Error("This session is already running");
   }
 
-  agent = new MiniAgent({
+  const agent = new MiniAgent({
 
     client: getClient(),
     cwd: options.cwd,
@@ -491,10 +514,12 @@ ipcMain.handle("start", async (_event, options: {
       if (event.type === "session") {
 
         rememberChatId(event.chatId, options.cwd);
+        rememberChatSettings(event.chatId, options.cwd, options.assistantId ?? null);
 
       }
 
-      send(event);
+      send(options.runId, event);
+      if (event.type === "done") alertUser("Agent finished", "Your agent is done.");
 
     },
 
@@ -512,10 +537,11 @@ ipcMain.handle("start", async (_event, options: {
 
       return new Promise<boolean>((resolve) => {
 
-        approvals.set(id, resolve);
+        approvals.set(id, { runId: options.runId, resolve });
 
-        flushDeltas();
-        window?.webContents.send("approval", { id, command, reason });
+        flushDeltas(options.runId);
+        window?.webContents.send("approval", { runId: options.runId, id, command, reason });
+        alertUser("Agent needs approval", reason ?? command);
 
       });
 
@@ -523,7 +549,16 @@ ipcMain.handle("start", async (_event, options: {
 
   });
 
+  agents.set(options.runId, agent);
+
   try {
+
+    if (options.chatId) {
+
+      rememberChatId(options.chatId, options.cwd);
+      rememberChatSettings(options.chatId, options.cwd, options.assistantId ?? null);
+
+    }
 
     await agent.run(options.task, {
 
@@ -534,15 +569,16 @@ ipcMain.handle("start", async (_event, options: {
 
   } finally {
 
-    agent = null;
+    agents.delete(options.runId);
 
-    for (const resolve of approvals.values()) {
-
-      resolve(false);
-
+    for (const [id, pending] of approvals) {
+      if (pending.runId !== options.runId) continue;
+      pending.resolve(false);
+      approvals.delete(id);
     }
 
-    approvals.clear();
+    flushDeltas(options.runId);
+    window?.webContents.send("run-ended", { runId: options.runId });
 
   }
 
@@ -550,31 +586,30 @@ ipcMain.handle("start", async (_event, options: {
 
 ipcMain.handle("approve", (_event, { id, ok }: { id: number; ok: boolean }) => {
 
-  const resolve = approvals.get(id);
+  const pending = approvals.get(id);
 
   approvals.delete(id);
-  resolve?.(ok);
+  pending?.resolve(ok);
 
 });
 
-ipcMain.handle("stop", () => {
+ipcMain.handle("stop", (_event, runId: string) => {
 
   // a run parked on an approval prompt would otherwise never see the stop
-  for (const resolve of approvals.values()) {
-
-    resolve(false);
-
+  for (const [id, pending] of approvals) {
+    if (pending.runId !== runId) continue;
+    pending.resolve(false);
+    approvals.delete(id);
   }
 
-  approvals.clear();
-
-  agent?.stop();
+  agents.get(runId)?.stop();
 
 });
 
 /** Queue a user note into the active agent loop (applied on the next model turn). */
-ipcMain.handle("interject", (_event, options: { text: string; imagePaths?: string[] }) => {
+ipcMain.handle("interject", (_event, options: { runId: string; text: string; imagePaths?: string[] }) => {
 
+  const agent = agents.get(options.runId);
   if (!agent) {
 
     throw new Error("No run in progress");

@@ -12,8 +12,11 @@ export const UNASSIGNED_PROJECT = "";
 
 export interface Settings {
 
-  /** Last folder the agent worked in. */
+  /** @deprecated Working directories now belong to individual chats. */
   cwd?: string | null;
+
+  /** Per-chat working directory and selected model. */
+  chats?: Record<string, { dir?: string | null; modelId?: string | null }>;
 
   /**
    * @deprecated Flat list from pre-project builds. Migrated into `projectChats`
@@ -110,6 +113,9 @@ export function saveSettings(patch: Partial<Settings>): Settings {
   ensureDir();
 
   const next: Settings = { ...loadSettings(), ...patch };
+
+  // Do not retain the old global working directory.
+  delete next.cwd;
 
   writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 
@@ -295,6 +301,36 @@ export function rememberChatId(chatId: string, projectDir?: string | null): void
 
 }
 
+/** Persist metadata that must be restored with a specific chat. */
+export function rememberChatSettings(chatId: string, dir?: string | null, modelId?: string | null): void {
+
+  if (!chatId) return;
+
+  const settings = loadSettings();
+  const chats = { ...(settings.chats ?? {}) };
+  const previous = chats[chatId] ?? {};
+
+  chats[chatId] = {
+    ...previous,
+    ...(dir !== undefined ? { dir: dir ? normalizeProjectPath(dir) : null } : {}),
+    ...(modelId !== undefined ? { modelId: modelId || null } : {}),
+  };
+
+  saveSettings({ chats });
+
+}
+
+export function settingsForChat(chatId: string): { dir: string | null; modelId: string | null } {
+
+  const value = loadSettings().chats?.[chatId];
+
+  return {
+    dir: typeof value?.dir === "string" && value.dir ? value.dir : projectForChat(chatId),
+    modelId: typeof value?.modelId === "string" && value.modelId ? value.modelId : null,
+  };
+
+}
+
 export function forgetChatId(chatId: string): void {
 
   const map = ensureProjectChats();
@@ -319,9 +355,14 @@ export function forgetChatId(chatId: string): void {
 
   }
 
-  if (dirty) {
+  const settings = loadSettings();
+  const chats = { ...(settings.chats ?? {}) };
+  const hadSettings = Object.prototype.hasOwnProperty.call(chats, chatId);
+  delete chats[chatId];
 
-    saveSettings({ projectChats: map, chatIds: [] });
+  if (dirty || hadSettings) {
+
+    saveSettings({ projectChats: map, chatIds: [], chats });
 
   }
 
@@ -346,17 +387,8 @@ export function projectForChat(chatId: string): string | null {
 
 }
 
-/** Restored cwd only if the path still exists on disk. */
+/** @deprecated There is no global cwd; directories are restored per chat. */
 export function loadLastCwd(): string | null {
-
-  const { cwd } = loadSettings();
-
-  if (typeof cwd !== "string" || !cwd) {
-
-    return null;
-
-  }
-
-  return existsSync(cwd) ? cwd : null;
+  return null;
 
 }

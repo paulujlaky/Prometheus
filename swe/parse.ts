@@ -1,39 +1,148 @@
-// Single protocol parser for mini-swe replies.
+// JSON-first protocol parser. Legacy bash-fence replies still parse for old chats.
+
+import { parseToolCalls } from "../sdk/tools";
 
 export const FINISHED = "MINI_SWE_FINISHED";
 
-/** Closed vocabulary: the label key doubles as the tool type the UI renders. */
-export const TOOLS = ["read", "search", "write", "edit", "run", "test", "fix", "think", "done"] as const;
+export const TOOLS = ["read", "search", "write", "edit", "delete", "run", "echo", "test", "fix", "think", "done"] as const;
 
 export type Tool = (typeof TOOLS)[number];
 
+const TOOL_SET = new Set<string>(TOOLS);
+
 const TOOL_LINE = new RegExp(`^(${TOOLS.join("|")})\\s*:\\s*(.+)$`, "i");
-
-// pre-classifier protocol; still parsed so archived chats keep replaying
 const DESC_LINE = /^desc\s*:\s*(.+)$/i;
-
-// opening fence with optional shell language
-const FENCE_OPEN = /```[ \t]*(?:bash|sh|shell)?[ \t]*\r?\n/i;
-const FENCE_OPENING_PARTIAL = /```[ \t]*(?:bash|sh|shell)?[ \t]*$/im;
-const PARTIAL_FENCE = /(^|\n)[ \t]*`{1,3}[a-zA-Z]*$/;
+const FENCE_OPEN = /```[ \t]*(?:bash|sh|shell|json)?[ \t]*\r?\n/i;
 
 export interface ParsedReply {
 
-  /** Preset classifier from the label line; null until it arrives (or on legacy `desc:`). */
   tool: Tool | null;
-
   desc: string;
   thinking: string;
 
   command: string | null;
-  hasFence: boolean; // indicates whether the reply contains a fenced code block (even if incomplete)
+  hasFence: boolean;
 
 }
 
-/** Label + optional thinking from text before the bash fence. */
+export function asTool(name: string | null | undefined): Tool | null {
+
+  if (!name) {
+
+    return null;
+
+  }
+
+  const lower = name.toLowerCase();
+
+  return TOOL_SET.has(lower) ? (lower as Tool) : null;
+
+}
+
+/** Live + settled parse: JSON call, or mid-stream "tool"/"label" keys, or legacy fence. */
+export function parseReply(text: string): ParsedReply {
+
+  const start = indexOfJson(text);
+  const thinkingHead = start === -1 ? text : text.slice(0, start);
+  const calls = parseToolCalls(text);
+
+  if (calls[0]) {
+
+    const call = calls[0];
+    const tool = asTool(call.tool);
+
+    return {
+
+      tool,
+      desc: (call.label ?? "").replace(/\s+/g, " ").trim(),
+      thinking: stripPartialJson(thinkingHead),
+      command: JSON.stringify({ tool: call.tool, label: call.label, args: call.args }),
+      hasFence: true,
+
+    };
+
+  }
+
+  if (start !== -1) {
+
+    const partial = parsePartialJson(text.slice(start));
+
+    return {
+
+      tool: partial.tool,
+      desc: partial.desc,
+      thinking: stripPartialJson(thinkingHead),
+      command: null,
+      hasFence: true,
+
+    };
+
+  }
+
+  return parseLegacy(text);
+
+}
+
+function parsePartialJson(chunk: string): { tool: Tool | null; desc: string } {
+
+  const tool = /"tool"\s*:\s*"([^"]+)"/.exec(chunk);
+  const label = /"label"\s*:\s*"([^"]*)"/.exec(chunk);
+
+  return {
+
+    tool: asTool(tool?.[1]),
+    desc: (label?.[1] ?? "").replace(/\s+/g, " ").trim(),
+
+  };
+
+}
+
+function indexOfJson(text: string): number {
+
+  const fenced = /```(?:json)?\s*[\r\n]+/.exec(text);
+
+  if (fenced) {
+
+    return fenced.index;
+
+  }
+
+  const toolKey = text.search(/\{\s*"(?:tool|calls)"\s*:/);
+
+  return toolKey;
+
+}
+
+function stripPartialJson(text: string): string {
+
+  return text.replace(/```(?:json)?\s*$/i, "").trim();
+
+}
+
+function parseLegacy(text: string): ParsedReply {
+
+  const open = FENCE_OPEN.exec(text);
+
+  if (!open) {
+
+    const { tool, desc, thinking } = parseLeading(text);
+
+    return { tool, desc, thinking, command: null, hasFence: false };
+
+  }
+
+  const body = text.slice(open.index + open[0].length);
+  const close = body.indexOf("```");
+  const command = (close === -1 ? body : body.slice(0, close)).trim();
+  const { tool, desc, thinking } = parseLeading(text.slice(0, open.index));
+
+  return { tool, desc, thinking, command: command || null, hasFence: true };
+
+}
+
 export function parseLeading(leading: string): { tool: Tool | null; desc: string; thinking: string } {
 
-  const raw = leading.replace(PARTIAL_FENCE, "").trim();
+  const raw = leading.trim();
 
   if (!raw) {
 
@@ -42,7 +151,6 @@ export function parseLeading(leading: string): { tool: Tool | null; desc: string
   }
 
   const think: string[] = [];
-
   let tool: Tool | null = null;
   let desc = "";
 
@@ -53,9 +161,8 @@ export function parseLeading(leading: string): { tool: Tool | null; desc: string
 
     if (classified) {
 
-      tool = classified[1].toLowerCase() as Tool;
+      tool = asTool(classified[1]);
       desc = classified[2].replace(/\s+/g, " ").trim();
-
       continue;
 
     }
@@ -73,175 +180,22 @@ export function parseLeading(leading: string): { tool: Tool | null; desc: string
 
   }
 
-  const thinking = think.join("\n").trim();
-
   if (desc) {
 
-    return { tool, desc, thinking };
+    return { tool, desc, thinking: think.join("\n").trim() };
 
   }
 
-  // no label yet — do not promote monologue into the title (UI shows Working… until it arrives)
   return { tool: null, desc: "", thinking: raw };
 
 }
 
-/**
- * Parses a full model reply into desc / thinking / command.
-*/
-export function parseReply(text: string): ParsedReply {
-
-  const open = FENCE_OPEN.exec(text);
-
-  if (open) {
-
-    return finishFence(text, open.index, open[0].length);
-
-  }
-
-  // mid-stream: ```bash with no body newline yet
-  const partial = FENCE_OPENING_PARTIAL.exec(text);
-
-  if (partial) {
-
-    const { tool, desc, thinking } = parseLeading(text.slice(0, partial.index));
-
-    return { tool, desc, thinking, command: "", hasFence: true };
-
-  }
-
-  const { tool, desc, thinking } = parseLeading(text);
-
-  return { tool, desc, thinking, command: null, hasFence: false };
-
-}
-
-function finishFence(text: string, fenceIndex: number, openLen: number): ParsedReply {
-
-  const bodyStart = fenceIndex + openLen;
-  const rest = text.slice(bodyStart);
-  const close = rest.indexOf("```");
-
-  let body = close === -1 ? rest : rest.slice(0, close);
-  const trailing = close === -1 ? "" : rest.slice(close + 3).trim();
-
-  // if a heredoc embeds ```, grow to the last fence that closes all heredocs
-  if (close !== -1 && incompleteReason(body.trim())) {
-
-    const last = rest.lastIndexOf("```");
-
-    if (last > close) {
-
-      const extended = rest.slice(0, last).trim();
-
-      if (!incompleteReason(extended)) {
-
-        body = rest.slice(0, last);
-
-      }
-
-    }
-
-  }
-
-  const { tool, desc, thinking } = parseLeading(text.slice(0, fenceIndex));
-  const command = body.trim();
-
-  return {
-
-    tool,
-    desc,
-    thinking: [thinking, trailing].filter(Boolean).join("\n\n").trim(),
-    command: command || null,
-    hasFence: true,
-
-  };
-
-}
-
-/** Unterminated here-document → block was cut off. */
-export function incompleteReason(command: string): string | null {
-
-  const pending: string[] = [];
-
-  for (const line of command.split(/\r?\n/)) {
-
-    if (pending.length) {
-
-      if (line.trim() === pending[pending.length - 1]) {
-
-        pending.pop();
-
-      }
-
-      continue;
-
-    }
-
-    const opener = /<<-?\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))/.exec(line);
-
-    if (opener) {
-
-      pending.push(opener[1] ?? opener[2] ?? opener[3]);
-
-    }
-
-  }
-
-  return pending.length ? `the here-document <<${pending[pending.length - 1]} is never closed` : null;
-
-}
-
-/** Bash body only — null when no usable fence. */
 export function extractCommand(reply: string): string | null {
 
-  const { command, hasFence } = parseReply(reply);
-
-  if (!hasFence || command == null || !command) {
-
-    // unclosed fence: still return body so incompleteReason can flag it
-    const open = FENCE_OPEN.exec(reply);
-
-    if (open) {
-
-      const body = reply.slice(open.index + open[0].length);
-      const close = body.indexOf("```");
-      const raw = (close === -1 ? body : body.slice(0, close)).trim();
-
-      return raw || null;
-
-    }
-
-    return null;
-
-  }
-
-  if (!incompleteReason(command)) {
-
-    return command;
-
-  }
-
-  // heredoc with embedded fences; re-scan if needed
-  return command;
+  return parseReply(reply).command;
 
 }
 
-const REDIRECT = /(?:^|[|;&]\s*)(?:cat|tee)\s*>>?\s*['"]?([^\s'"|;&<]+)/m;
-
-// first match wins, so order matters: `git apply` is an edit before it is a run
-const INFERRED: [RegExp, Tool][] = [
-
-  [new RegExp(FINISHED), "done"],
-  [/^\s*(apply_patch|sg\b|git\s+apply)/m, "edit"],
-  [/^\s*cat\s*>/m, "write"],
-  [/^\s*(rg|grep|find|ag|ack)\b/m, "search"],
-  [/^\s*(cat|head|tail|less|ls|wc|stat|file)\b/m, "read"],
-  [/\b(test|jest|vitest|pytest|tsc|eslint|lint)\b/, "test"],
-
-];
-
-/** Icon type for a step whose reply skipped the classifier (or replays from a legacy `desc:` chat). */
 export function inferTool(command: string | null): Tool {
 
   if (!command) {
@@ -250,13 +204,23 @@ export function inferTool(command: string | null): Tool {
 
   }
 
-  for (const [pattern, tool] of INFERRED) {
+  const parsed = parseReply(command);
 
-    if (pattern.test(command)) {
+  if (parsed.tool) {
 
-      return tool;
+    return parsed.tool;
 
-    }
+  }
+
+  if (/apply_patch|git\s+apply/m.test(command)) {
+
+    return "edit";
+
+  }
+
+  if (/^\s*(rg|grep|find)\b/m.test(command)) {
+
+    return "search";
 
   }
 
@@ -281,7 +245,6 @@ export interface FileWrite {
   added: number;
   removed: number;
 
-  /** Full content for an add, the patch hunks for an update. */
   lines: WriteLine[];
 
 }
@@ -289,7 +252,6 @@ export interface FileWrite {
 export interface FileEdit {
 
   file: string;
-
   added: number;
   removed: number;
 
@@ -297,15 +259,262 @@ export interface FileEdit {
 
 const PATCH_SECTION = /^\*\*\*\s*(Add|Update|Delete)\s+File:\s*(.+)$/;
 const DIFF_HEADER = /^\+\+\+\s+(?:b\/)?(.+)$/;
-const HEREDOC_OPEN = /<<-?\s*['"]?(\w+)['"]?/;
 
-/**
- * The code the agent actually wrote, parsed from the command itself.
-*/
 export function parseWrites(command: string): FileWrite[] {
 
+  if (!command) {
+
+    return [];
+
+  }
+
+  const fromJson = writesFromJson(command);
+
+  if (fromJson) {
+
+    return fromJson;
+
+  }
+
+  return writesFromPatch(command);
+
+}
+
+function writesFromJson(command: string): FileWrite[] | null {
+
+  let raw: unknown;
+
+  try {
+
+    raw = JSON.parse(command);
+
+  } catch {
+
+    return null;
+
+  }
+
+  if (!raw || typeof raw !== "object") {
+
+    return null;
+
+  }
+
+  const obj = raw as { tool?: string; args?: unknown };
+  const tool = String(obj.tool ?? "");
+  const args = obj.args;
+
+  if (tool === "write") {
+
+    return filesOf(args).map((file) => linesOf(file.path, file.content, "add"));
+
+  }
+
+  if (tool === "delete") {
+
+    return pathsOf(args).map((file) => ({ file, kind: "delete" as const, added: 0, removed: 0, lines: [] }));
+
+  }
+
+  if (tool === "edit") {
+
+    const patch = firstString(args, "patch") ?? (typeof args === "string" ? args : "");
+
+    if (patch) {
+
+      return writesFromPatch(patch);
+
+    }
+
+    return editViewsOf(args);
+
+  }
+
+  return [];
+
+}
+
+function editViewsOf(args: unknown): FileWrite[] {
+
+  if (Array.isArray(args)) {
+
+    return args.flatMap(editViewsOf);
+
+  }
+
+  if (!args || typeof args !== "object") {
+
+    return [];
+
+  }
+
+  const obj = args as Record<string, unknown>;
+
+  if (Array.isArray(obj.files)) {
+
+    return obj.files.flatMap(editViewsOf);
+
+  }
+
+  if (typeof obj.path !== "string") {
+
+    return [];
+
+  }
+
+  if (obj.delete === true) {
+
+    return [{ file: obj.path, kind: "delete", added: 0, removed: 0, lines: [] }];
+
+  }
+
+  const next = typeof obj.new === "string" ? obj.new : typeof obj.content === "string" ? obj.content : "";
+  const old = typeof obj.old === "string" ? obj.old : "";
+
+  if (!old && next) {
+
+    return [linesOf(obj.path, next, "add")];
+
+  }
+
+  const lines: FileWrite["lines"] = [];
+  let added = 0;
+  let removed = 0;
+
+  if (old) {
+
+    for (const line of old.split("\n")) {
+
+      lines.push({ text: line, kind: "remove" });
+      removed += 1;
+
+    }
+
+  }
+
+  if (next) {
+
+    for (const line of next.split("\n")) {
+
+      lines.push({ text: line, kind: "add" });
+      added += 1;
+
+    }
+
+  }
+
+  return old || next ? [{ file: obj.path, kind: "update", added, removed, lines }] : [];
+
+}
+
+export function filesOf(args: unknown): { path: string; content: string }[] {
+
+  if (Array.isArray(args)) {
+
+    return args.flatMap(filesOf);
+
+  }
+
+  if (!args || typeof args !== "object") {
+
+    return [];
+
+  }
+
+  const obj = args as Record<string, unknown>;
+
+  if (Array.isArray(obj.files)) {
+
+    return obj.files.flatMap(filesOf);
+
+  }
+
+  if (typeof obj.path === "string" && typeof obj.content === "string") {
+
+    return [{ path: obj.path, content: obj.content }];
+
+  }
+
+  return [];
+
+}
+
+export function pathsOf(args: unknown): string[] {
+
+  if (typeof args === "string") {
+
+    return [args];
+
+  }
+
+  if (Array.isArray(args)) {
+
+    return args.flatMap(pathsOf);
+
+  }
+
+  if (!args || typeof args !== "object") {
+
+    return [];
+
+  }
+
+  const obj = args as Record<string, unknown>;
+
+  if (typeof obj.path === "string") {
+
+    return [obj.path];
+
+  }
+
+  if (Array.isArray(obj.paths)) {
+
+    return obj.paths.flatMap(pathsOf);
+
+  }
+
+  return [];
+
+}
+
+export function firstString(args: unknown, key: string): string | null {
+
+  if (typeof args === "string") {
+
+    return args;
+
+  }
+
+  if (Array.isArray(args)) {
+
+    return typeof args[0] === "string" ? args[0] : args[0] ? firstString(args[0], key) : null;
+
+  }
+
+  if (args && typeof args === "object") {
+
+    const value = (args as Record<string, unknown>)[key];
+
+    return typeof value === "string" ? value : null;
+
+  }
+
+  return null;
+
+}
+
+function linesOf(file: string, content: string, kind: WriteKind): FileWrite {
+
+  const lines = content.split(/\r?\n/).map((text) => ({ text, kind: "add" as const }));
+
+  return { file, kind, added: lines.length, removed: 0, lines };
+
+}
+
+function writesFromPatch(command: string): FileWrite[] {
+
   const writes: FileWrite[] = [];
-  const lines = command.split(/\r?\n/);
+  let current: FileWrite | null = null;
 
   const open = (file: string, kind: WriteKind): FileWrite => {
 
@@ -325,44 +534,13 @@ export function parseWrites(command: string): FileWrite[] {
 
   };
 
-  // `cat > 'file' <<'EOF'` — the heredoc body is the file's new content verbatim
-  const redirect = REDIRECT.exec(lines[0] ?? "");
-  const heredoc = HEREDOC_OPEN.exec(lines[0] ?? "");
-
-  if (redirect && heredoc) {
-
-    const write = open(redirect[1], "add");
-
-    for (const line of lines.slice(1)) {
-
-      if (line.trim() === heredoc[1]) {
-
-        break;
-
-      }
-
-      write.lines.push({ text: line, kind: "add" });
-      write.added += 1;
-
-    }
-
-    return writes;
-
-  }
-
-  let current: FileWrite | null = null;
-
-  for (const line of lines) {
+  for (const line of command.split(/\r?\n/)) {
 
     const section = PATCH_SECTION.exec(line);
 
     if (section) {
 
-      const kind = section[1].toLowerCase() as WriteKind;
-
-      current = open(section[2], kind);
-      current.kind = kind;
-
+      current = open(section[2], section[1].toLowerCase() as WriteKind);
       continue;
 
     }
@@ -382,7 +560,6 @@ export function parseWrites(command: string): FileWrite[] {
 
     }
 
-    // hunk boundary: a visual break, not content
     if (line.startsWith("@@")) {
 
       if (current.lines.length) {
@@ -399,7 +576,6 @@ export function parseWrites(command: string): FileWrite[] {
 
       current.lines.push({ text: line.slice(1), kind: "add" });
       current.added += 1;
-
       continue;
 
     }
@@ -408,7 +584,6 @@ export function parseWrites(command: string): FileWrite[] {
 
       current.lines.push({ text: line.slice(1), kind: "remove" });
       current.removed += 1;
-
       continue;
 
     }
@@ -421,7 +596,6 @@ export function parseWrites(command: string): FileWrite[] {
 
   }
 
-  // a trailing gap is the End Patch marker, not a break between hunks
   for (const write of writes) {
 
     while (write.lines[write.lines.length - 1]?.kind === "gap") {
@@ -436,80 +610,240 @@ export function parseWrites(command: string): FileWrite[] {
 
 }
 
-/** Per-file line counts, for the run summary chips. */
 export function fileEdits(command: string): FileEdit[] {
 
   return parseWrites(command).map(({ file, added, removed }) => ({ file, added, removed }));
 
 }
 
-/**
- * Detect a real session-end signal — not prose/docs that merely mention the marker.
- *
- * Accepts:
- *  1) Shell stdout: a line that *begins* with MINI_SWE_FINISHED (what `echo` prints)
- *  2) A done-step command: `echo "MINI_SWE_FINISHED: …"` (any summary length)
- *
- * Rejects mid-line mentions in sticky protocol / seed examples, which used to end
- * sessions early and paint a false "done" when replaying chats.
- */
-export function extractFinishedSummary(output: string): string | null {
+function baseName(path: string): string {
 
-  if (!output || !output.includes(FINISHED)) {
+  const parts = path.replaceAll("\\", "/").split("/");
+
+  return parts[parts.length - 1] || path;
+
+}
+
+function lineSpan(args: unknown): string {
+
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+
+    return "";
+
+  }
+
+  const obj = args as Record<string, unknown>;
+  const start = asInt(obj.start ?? obj.from ?? obj.offset);
+  const end = asInt(obj.end ?? obj.to);
+  const limit = asInt(obj.limit);
+
+  if (start == null && end == null) {
+
+    return "";
+
+  }
+
+  if (start != null && end != null) {
+
+    return `L${start}–${end}`;
+
+  }
+
+  if (start != null && limit != null) {
+
+    return `L${start}–${start + limit - 1}`;
+
+  }
+
+  if (start != null) {
+
+    return `L${start}+`;
+
+  }
+
+  return `–L${end}`;
+
+}
+
+function asInt(value: unknown): number | null {
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+
+    return Math.trunc(value);
+
+  }
+
+  if (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value))) {
+
+    return Math.trunc(Number(value));
+
+  }
+
+  return null;
+
+}
+
+/** One-line `read: a.ts` style summary for the tool-row body. */
+export function summarizeCall(command: string | null, tool: Tool | null): string {
+
+  const name = tool ?? inferTool(command);
+
+  if (!command) {
+
+    return name;
+
+  }
+
+  try {
+
+    const raw = JSON.parse(command) as { args?: unknown };
+    const args = raw.args;
+    const pattern = firstString(args, "pattern");
+
+    if (name === "search" && pattern) {
+
+      const where = firstString(args, "path") ?? firstString(args, "root");
+
+      return where && where !== "." ? `${name}: ${pattern} in ${where}` : `${name}: ${pattern}`;
+
+    }
+
+    const files = [...new Set([
+      ...filesOf(args).map((file) => baseName(file.path)),
+      ...pathsOf(args).map(baseName).filter((file) => file && file !== "."),
+    ])];
+
+    if (files.length) {
+
+      const shown = files.slice(0, 3).join(", ");
+      const more = files.length > 3 ? ` +${files.length - 3}` : "";
+      const span = lineSpan(args);
+
+      return span ? `${name}: ${shown}${more} ${span}` : `${name}: ${shown}${more}`;
+
+    }
+
+    if (pattern) {
+
+      return `${name}: ${pattern}`;
+
+    }
+
+    const bash = firstString(args, "command");
+
+    if (bash) {
+
+      const one = bash.replace(/\s+/g, " ").trim();
+
+      return `${name}: ${one.length > 60 ? `${one.slice(0, 57)}…` : one}`;
+
+    }
+
+  } catch {
+
+    // legacy fence
+  }
+
+  return name;
+
+}
+
+/** Bash body for a `run` call; null for every other tool. */
+export function runCommandOf(command: string | null, tool: Tool | null): string | null {
+
+  if ((tool ?? inferTool(command)) !== "run" || !command) {
 
     return null;
 
   }
 
-  // 1) Real echo output — marker must start the line (may be multi-line summary; take rest of line)
+  try {
+
+    const raw = JSON.parse(command) as { args?: unknown };
+
+    return firstString(raw.args, "command");
+
+  } catch {
+
+    return command;
+
+  }
+
+}
+
+export function isDoneStep(step: { tool: Tool | null; command: string | null }): boolean {
+
+  return step.tool === "done" || inferTool(step.command) === "done";
+
+}
+
+export function extractFinishedSummary(output: string): string | null {
+
+  if (!output) {
+
+    return null;
+
+  }
+
+  const fromJson = summaryFromJson(output);
+
+  if (fromJson) {
+
+    return fromJson;
+
+  }
+
+  if (!output.includes(FINISHED)) {
+
+    return null;
+
+  }
+
   const lineRe = new RegExp(`(?:^|\\r?\\n)[ \\t]*${FINISHED}\\s*:?\\s*([^\\r\\n]*)`);
   const lineMatch = lineRe.exec(output);
 
   if (lineMatch) {
 
-    const summary = (lineMatch[1] ?? "").replace(/^["']|["']$/g, "").trim();
-
-    return summary || "Task complete.";
+    return (lineMatch[1] ?? "").replace(/^["']|["']$/g, "").trim() || "Task complete.";
 
   }
 
-  // 2) Done-step command: whole string is `echo …FINISHED…` (history + empty-stdout recovery).
-  // No length cap — real finish summaries are often long. Sticky/docs never start with `echo`.
-  const cmd = output.trim();
+  return null;
 
-  if (!/^echo\b/i.test(cmd) || /^Exit code:/m.test(cmd) || /\bProtocol\b/.test(cmd)) {
+}
 
-    return null;
+function summaryFromJson(text: string): string | null {
 
-  }
+  const calls = parseToolCalls(text);
 
-  // echo "MINI_SWE_FINISHED: …" | echo '…' | echo MINI_SWE_FINISHED: …
-  // Allow any summary length; strip a single matching trailing quote if present.
-  const echoHead = new RegExp(`^echo\\s+(["']?)${FINISHED}\\s*:\\s*`, "i");
-  const head = echoHead.exec(cmd);
+  if (asTool(calls[0]?.tool) === "done") {
 
-  if (!head) {
-
-    return null;
+    return firstString(calls[0].args, "summary") ?? pathsOf(calls[0].args)[0] ?? calls[0].label ?? "Task complete.";
 
   }
 
-  const quote = head[1] ?? "";
-  let rest = cmd.slice(head[0].length);
+  try {
 
-  if (quote && rest.endsWith(quote)) {
+    const raw = JSON.parse(text.trim()) as { tool?: string; summary?: string; args?: unknown };
 
-    rest = rest.slice(0, -1);
+    if (raw.tool === "done") {
 
-  } else {
+      return firstString(raw.args, "summary") ?? raw.summary ?? "Task complete.";
 
-    rest = rest.replace(/["']\s*;?\s*$/, "");
+    }
 
+    if (typeof raw.summary === "string" && raw.summary.trim()) {
+
+      return raw.summary.trim();
+
+    }
+
+  } catch {
+
+    // not json
   }
 
-  const summary = rest.replace(/\s*;\s*$/, "").trim();
-
-  return summary || "Task complete.";
+  return null;
 
 }
 
@@ -521,76 +855,10 @@ export function cleanSummary(text: string): string {
   s = s.replace(/```[\s\S]*$/g, "").trim();
   s = s.replace(/\s+/g, " ");
 
-  s.endsWith('"') && (s = s.slice(0, -1).trim()); // replace trailing quote from `echo "Task complete."` in a finished bash block
-
   return s || "Task complete.";
 
 }
 
-/**
- * When the model tries to finish with the wrong marker (TASK_COMPLETE, DONE, …)
- * or label done: without the real echo — return a short resend instruction.
- * null when this does not look like a botched finish attempt.
- */
-export function wrongFinishHint(command: string | null, output: string, tool: Tool | null): string | null {
-
-  if (extractFinishedSummary(output) || (command && extractFinishedSummary(command))) {
-
-    return null;
-
-  }
-
-  const cmd = (command ?? "").trim();
-  const out = (output ?? "").trim();
-  const isDoneLabel = tool === "done";
-
-  // echo SOME_OTHER_TOKEN: summary  (or quoted)
-  const echoToken = /^\s*echo\s+["']?([A-Za-z][A-Za-z0-9_]{2,})\s*:/.exec(cmd);
-  const outToken = /(?:^|\n)\s*([A-Za-z][A-Za-z0-9_]{2,})\s*:/.exec(out);
-
-  const bogus = echoToken?.[1] && echoToken[1] !== FINISHED
-    ? echoToken[1]
-    : outToken?.[1] && outToken[1] !== FINISHED && isDoneLabel
-      ? outToken[1]
-      : null;
-
-  if (!bogus && !isDoneLabel) {
-
-    return null;
-
-  }
-
-  if (!bogus && isDoneLabel && !/^echo\b/i.test(cmd)) {
-
-    return [
-      `Label done: was used, but the shell must print the exact marker ${FINISHED}.`,
-      "Resend EXACTLY (nothing else in the fence):",
-      `done: task complete`,
-      "```bash",
-      `echo "${FINISHED}: <one-line summary>"`,
-      "```",
-    ].join("\n");
-
-  }
-
-  if (!bogus) {
-
-    return null;
-
-  }
-
-  return [
-    `Wrong finish marker "${bogus}". The runner only stops when stdout contains a line that starts with ${FINISHED}.`,
-    "Do not invent TASK_COMPLETE, DONE, or similar. Resend EXACTLY:",
-    `done: task complete`,
-    "```bash",
-    `echo "${FINISHED}: <one-line summary>"`,
-    "```",
-  ].join("\n");
-
-}
-
-/** User task from the harness system prompt or a short plain message. */
 export function extractTaskText(text: string): string | null {
 
   const trimmed = text.trim();
@@ -599,6 +867,21 @@ export function extractTaskText(text: string): string | null {
 
     return null;
 
+  }
+
+  try {
+
+    const raw = JSON.parse(trimmed) as { task?: unknown };
+
+    if (typeof raw.task === "string" && raw.task.trim()) {
+
+      return raw.task.trim();
+
+    }
+
+  } catch {
+
+    // seed is prose
   }
 
   const taskLine = /\nTask:\s*([\s\S]+)$/m.exec(trimmed);
@@ -615,12 +898,47 @@ export function extractTaskText(text: string): string | null {
 
   }
 
-  if (trimmed.length < 2000 && !trimmed.includes("You are a coding agent")) {
+  if (trimmed.length < 2000 && !trimmed.includes("You are a coding agent") && !trimmed.includes("\"next\"")) {
 
     return trimmed;
 
   }
 
   return null;
+
+}
+
+/** Observation the harness posted — JSON or legacy `Exit code:` blob. */
+export function parseObservation(text: string): { exitCode: number; output: string } | null {
+
+  const trimmed = text.trim();
+
+  try {
+
+    const raw = JSON.parse(trimmed) as { ok?: unknown; output?: unknown; exit?: unknown; error?: unknown };
+
+    if (typeof raw.ok === "boolean" || typeof raw.output === "string") {
+
+      const output = typeof raw.output === "string" ? raw.output : typeof raw.error === "string" ? raw.error : "";
+      const exitCode = typeof raw.exit === "number" ? raw.exit : raw.ok === false ? 1 : 0;
+
+      return { exitCode, output };
+
+    }
+
+  } catch {
+
+    // legacy
+  }
+
+  const match = /^Exit code:\s*(-?\d+)\s*\n?([\s\S]*)$/.exec(trimmed);
+
+  if (!match) {
+
+    return null;
+
+  }
+
+  return { exitCode: Number(match[1]), output: (match[2] ?? "").replace(/^\n/, "") };
 
 }

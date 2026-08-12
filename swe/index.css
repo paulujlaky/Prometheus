@@ -229,6 +229,63 @@
 }
 
 /*
+ * Drag & drop — the composer answers the cursor before the file lands.
+ * Veil fades over the field, the border breathes, the caret nudges down,
+ * then each new chip drops into the tray.
+*/
+@keyframes drop-veil-in {
+
+  from { opacity: 0; transform: scale(0.99); }
+  to { opacity: 1; transform: scale(1); }
+
+}
+
+@keyframes drop-ring {
+
+  0%, 100% { box-shadow: 0 0 0 1px var(--brand), 0 0 0 5px var(--brand-tint); }
+  50% { box-shadow: 0 0 0 1px var(--brand), 0 0 0 11px transparent; }
+
+}
+
+@keyframes chip-land {
+
+  0% { opacity: 0; transform: translateY(-9px) scale(0.92); }
+  62% { opacity: 1; transform: translateY(2px) scale(1.02); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@utility animate-drop-veil {
+
+  animation: drop-veil-in 150ms var(--ease-glide) both;
+
+}
+
+@utility animate-drop-ring {
+
+  animation: drop-ring 1.6s ease-in-out infinite;
+
+}
+
+@utility animate-chip-land {
+
+  animation: chip-land 360ms var(--ease-glide) both;
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .animate-drop-veil,
+  .animate-drop-ring,
+  .animate-chip-land {
+
+    animation-duration: 1ms;
+    animation-iteration-count: 1;
+
+  }
+
+}
+
+/*
  * Label that reads as "still generating" without a spinner next to it.
  * Soft pass of light across muted ink — intentional, not flashy.
 */

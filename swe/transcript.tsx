@@ -1,5 +1,5 @@
 import { Component, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, TriangleAlertIcon, WrenchIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, MessageSquareIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, WrenchIcon } from "lucide-react";
 
 import { UsageHeatmap, type UsageFile } from "@/comps/heatmap";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/scroller";
@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 
 import { Code, FileWriteView } from "./code";
 import { Md } from "./md";
-import { cleanSummary, fileEdits, inferTool, parseReply, parseWrites, type FileEdit, type ParsedReply, type Tool } from "./parse";
+import { cleanSummary, fileEdits, inferTool, isDoneStep, parseReply, parseWrites, runCommandOf, summarizeCall, type FileEdit, type ParsedReply, type Tool } from "./parse";
 
 export { cleanSummary, parseReply };
 export type { ParsedReply };
@@ -43,6 +43,7 @@ export interface Step {
 export type Entry =
   | Step
   | { id: string; kind: "task"; text: string; attachments?: string[] }
+  | { id: string; kind: "echo"; text: string }
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
 
@@ -75,11 +76,23 @@ export function thoughtSeconds(step: Pick<Step, "thinking" | "thoughtMs" | "stre
 }
 
 /** Row title: the model's label, or a placeholder until it arrives. */
-export function stepLabel(step: Pick<Step, "desc" | "streaming" | "command">): string {
+export function stepLabel(step: Pick<Step, "desc" | "streaming" | "command" | "tool">): string {
 
   const desc = step.desc.replace(/\s+/g, " ").trim();
 
-  return desc || (step.streaming || !step.command ? "Working" : "Ran a command");
+  if (desc) {
+
+    return desc;
+
+  }
+
+  if (step.tool) {
+
+    return step.tool;
+
+  }
+
+  return step.streaming || !step.command ? "Working" : "Ran a command";
 
 }
 
@@ -89,11 +102,22 @@ export type StepStatus = "working" | "succeeded" | "failed" | "unknown";
  * Every settled step reports a status, so the trailing column never blinks in and out.
  * `unknown` is a replayed step whose observation was never stored.
 */
-export function stepStatus(step: Pick<Step, "streaming" | "output" | "exitCode">): StepStatus {
+export function stepStatus(
+  step: Pick<Step, "streaming" | "output" | "exitCode">,
+  opts: { pending?: boolean } = {},
+): StepStatus {
 
-  if (step.streaming || step.output === null) {
+  const pending = opts.pending ?? true;
+
+  if (step.streaming && pending) {
 
     return "working";
+
+  }
+
+  if (step.output === null) {
+
+    return pending ? "working" : "unknown";
 
   }
 
@@ -180,7 +204,9 @@ const TOOL_ICONS: Record<Tool, typeof FileTextIcon> = {
   search: SearchIcon,
   write: FilePlus2Icon,
   edit: PencilLineIcon,
+  delete: Trash2Icon,
   run: TerminalIcon,
+  echo: MessageSquareIcon,
   test: CheckIcon,
   fix: WrenchIcon,
   think: SparklesIcon,
@@ -263,6 +289,9 @@ interface StepRowProps {
   open: boolean;
   onToggle: () => void;
 
+  /** False once a later call exists (or the run ended) — kills a stuck shimmer. */
+  pending?: boolean;
+
 }
 
 interface StepRowState {
@@ -280,36 +309,27 @@ class StepRow extends Component<StepRowProps, StepRowState> {
 
   render() {
 
-    const { step, open, onToggle } = this.props;
+    const { step, open, onToggle, pending = true } = this.props;
     const { thinkOpen } = this.state;
 
     const thinking = step.thinking.trim();
     const seconds = thoughtSeconds(step);
 
-    const status = stepStatus(step);
+    const status = stepStatus(step, { pending });
     const working = status === "working";
     const failed = status === "failed";
 
-    // splitting needs a real label to split against; without one the monologue IS the step,
-    const showThinking = Boolean(thinking) && Boolean(step.desc);
+    const showThinking = Boolean(thinking) && Boolean(step.desc || step.tool);
+    const thinkLive = pending && step.streaming && seconds == null;
 
-    // a reply with no bash at all is a protocol miss; show the prose instead of an empty body
-    const proseOnly = !step.streaming && !step.command;
-
-    // no label/command yet — static Working, never a dropdown (body would be empty)
-    if (step.streaming && !step.desc && step.command == null) {
+    if (step.streaming && !step.desc && !step.tool && step.command == null) {
 
       return <Working />;
 
     }
 
-    // thinking already has its own row when shown; repeating it here is the same duplication
-    const prose = [step.desc, showThinking ? "" : thinking].filter(Boolean).join("\n\n");
-
-    // parsed as it streams: a partial patch yields the files it has reached so far, and grows
     const writes = step.command ? parseWrites(step.command) : [];
 
-    // line counts for write/edit steps — tick live as the patch streams, then replace Succeeded/Failed
     let linesAdded = 0;
     let linesRemoved = 0;
 
@@ -321,8 +341,12 @@ class StepRow extends Component<StepRowProps, StepRowState> {
     }
 
     const hasLineCounts = linesAdded > 0 || linesRemoved > 0;
+    const kind = step.tool ?? inferTool(step.command);
+    const bash = runCommandOf(step.command, step.tool);
+    const showDiff = kind === "edit" && writes.length > 0;
+    const overview = !bash && !showDiff ? summarizeCall(step.command, step.tool) : "";
+    const showOverview = Boolean(overview) && overview !== kind && !overview.endsWith(": .");
 
-    // while working the label carries the motion, so no caret is needed to signal streaming
     const label = working ? (
 
       <span className="shimmer-label min-w-0 truncate text-[14px] font-medium">{stepLabel(step)}</span>
@@ -365,9 +389,9 @@ class StepRow extends Component<StepRowProps, StepRowState> {
           <ToolRow
 
             icon={SparklesIcon}
-            working={seconds == null}
+            working={thinkLive}
 
-            label={ seconds == null ? <span className="shimmer-label min-w-0 truncate text-[14px] font-medium">Thinking</span> : <span className="min-w-0 truncate text-[14px] font-medium text-ink-2">Thought for {seconds}s</span> }
+            label={ thinkLive ? <span className="shimmer-label min-w-0 truncate text-[14px] font-medium">Thinking</span> : <span className="min-w-0 truncate text-[14px] font-medium text-ink-2">Thought for {seconds ?? 1}s</span> }
 
             open={thinkOpen}
             onToggle={() => this.setState((prev) => ({ thinkOpen: !prev.thinkOpen }))}
@@ -394,32 +418,35 @@ class StepRow extends Component<StepRowProps, StepRowState> {
 
         >
 
-          {proseOnly ? (
+          {showOverview ? (
 
-            <Md className="text-[13px] text-ink-2">{prose || stepLabel(step)}</Md>
-
-          ) : null}
-
-          {/* shows the code the agent produced */}
-          {writes.map((write, index) => <FileWriteView key={index} write={write} />)}
-
-          {step.command && !writes.length ? (
-
-            <div className="overflow-x-auto rounded-chip border border-line bg-inset p-2.5">
-
-              <Code code={step.command} streaming={step.streaming} />
-
-            </div>
+            <p className="font-mono text-[12.5px] text-ink-2">{overview}</p>
 
           ) : null}
 
-          {step.output !== null ? (
+          {showDiff ? writes.map((write, index) => <FileWriteView key={index} write={write} />) : null}
 
-            <pre className="max-h-72 overflow-auto rounded-chip border border-line bg-inset p-2.5 font-mono text-[12.5px] leading-[1.65] whitespace-pre-wrap text-ink-2">
+          {bash ? (
 
-              {step.output.trim() || "<no output>"}
+            <>
 
-            </pre>
+              <div className="overflow-x-auto rounded-chip border border-line bg-inset p-2.5">
+
+                <Code code={bash} streaming={step.streaming} />
+
+              </div>
+
+              {step.output !== null ? (
+
+                <pre className="max-h-72 overflow-auto rounded-chip border border-line bg-inset p-2.5 font-mono text-[12.5px] leading-[1.65] whitespace-pre-wrap text-ink-2">
+
+                  {step.output.trim() || "<no output>"}
+
+                </pre>
+
+              ) : null}
+
+            </>
 
           ) : null}
 
@@ -505,7 +532,8 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
     const { steps, finished, showWorking, isOpen, onToggle } = this.props;
     const { allEdits } = this.state;
 
-    const edits = finished ? editsOf(steps) : [];
+    const visible = steps.filter((step) => !isDoneStep(step));
+    const edits = finished ? editsOf(visible) : [];
     const shown = allEdits ? edits : edits.slice(0, EDIT_CHIPS);
 
     return (
@@ -514,11 +542,19 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
 
         <div className="flex flex-col gap-1">
 
-          {steps.map((step, index) => (
+          {visible.map((step, index) => (
 
             <div key={step.id} style={{ animation: `fade-up 300ms var(--ease-glide) ${Math.min(index, 8) * 45}ms both` }}>
 
-              <StepRow step={step} open={isOpen(step)} onToggle={() => onToggle(step)} />
+              <StepRow
+
+                step={step}
+                open={isOpen(step)}
+                onToggle={() => onToggle(step)}
+
+                pending={!finished && index === visible.length - 1 && !showWorking}
+
+              />
 
             </div>
 
@@ -659,6 +695,12 @@ function toBlocks(entries: Entry[]): Block[] {
 
   for (const entry of entries) {
 
+    if (entry.kind === "step" && isDoneStep(entry)) {
+
+      continue;
+
+    }
+
     if (entry.kind !== "step") {
 
       blocks.push({ key: entry.id, kind: "entry", entry });
@@ -688,7 +730,7 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
   const blocks = toBlocks(entries);
 
   // between steps nothing is streaming and no row is pending, so the transcript would look idle
-  const busy = entries.some((entry) => entry.kind === "step" && (entry.streaming || entry.output === null));
+  const busy = entries.some((entry) => entry.kind === "step" && !isDoneStep(entry) && (entry.streaming || entry.output === null));
 
   return (
 
@@ -720,7 +762,7 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
 
               return (
 
-                <MessageScrollerItem key={block.key} messageId={block.key} scrollAnchor={block.kind === "entry" && block.entry.kind === "task"} >
+                <MessageScrollerItem key={block.key} messageId={block.key}>
 
                   {block.kind === "run" ? (
 
@@ -729,6 +771,10 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
                   ) : block.entry.kind === "task" ? (
 
                     <TaskBubble text={block.entry.text} attachments={block.entry.attachments} />
+
+                  ) : block.entry.kind === "echo" ? (
+
+                    <div className="max-w-[42rem] animate-fade-up"><Md className="text-[14px] text-ink">{block.entry.text}</Md></div>
 
                   ) : block.entry.kind === "done" ? (
 

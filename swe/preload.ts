@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 import type { AgentEvent } from "./agent";
 import type { AssistantSummary } from "../sdk/types";
@@ -13,6 +13,7 @@ export interface SweChatSummary {
 
   /** Normalized project root, or null when unassigned / pre-project. */
   project?: string | null;
+  modelId?: string | null;
 
 }
 
@@ -36,6 +37,7 @@ contextBridge.exposeInMainWorld("swe", {
     name: string;
     title: string;
     project?: string | null;
+    modelId?: string | null;
     entries: unknown[];
   }> => ipcRenderer.invoke("chats:get", chatId),
 
@@ -46,9 +48,19 @@ contextBridge.exposeInMainWorld("swe", {
     ipcRenderer.invoke("chats:claim", chatId, projectDir),
 
   pickImages: (): Promise<string[]> => ipcRenderer.invoke("pick-images"),
+  filePaths: (files: File[]): string[] => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
+  importImages: async (files: File[]): Promise<string[]> => {
+    const imported = await Promise.all(files.map(async (file) => ({
+      path: webUtils.getPathForFile(file),
+      name: file.name,
+      bytes: Array.from(new Uint8Array(await file.arrayBuffer())),
+    })));
+    return ipcRenderer.invoke("import-images", imported);
+  },
 
   start: (options: {
 
+    runId: string;
     task: string;
     cwd: string;
 
@@ -63,22 +75,26 @@ contextBridge.exposeInMainWorld("swe", {
   }): Promise<void> => ipcRenderer.invoke("start", options),
 
   /** Inject a user message into the active run (queued until the next model turn). */
-  interject: (options: { text: string; imagePaths?: string[] }): Promise<void> => ipcRenderer.invoke("interject", options),
+  interject: (options: { runId: string; text: string; imagePaths?: string[] }): Promise<void> => ipcRenderer.invoke("interject", options),
 
-  stop: (): Promise<void> => ipcRenderer.invoke("stop"),
+  stop: (runId: string): Promise<void> => ipcRenderer.invoke("stop", runId),
 
   approve: (id: number, ok: boolean): Promise<void> => ipcRenderer.invoke("approve", { id, ok }),
 
-  onEvent: (handler: (event: AgentEvent) => void) => {
+  onEvent: (handler: (message: { runId: string; event: AgentEvent }) => void) => {
 
-    ipcRenderer.on("agent-event", (_e, event: AgentEvent) => handler(event));
+    ipcRenderer.on("agent-event", (_e, message) => handler(message));
 
   },
 
-  onApproval: (handler: (request: { id: number; command: string; reason: string | null }) => void) => {
+  onApproval: (handler: (request: { runId: string; id: number; command: string; reason: string | null }) => void) => {
 
     ipcRenderer.on("approval", (_e, request) => handler(request));
 
+  },
+
+  onRunEnded: (handler: (message: { runId: string }) => void) => {
+    ipcRenderer.on("run-ended", (_e, message) => handler(message));
   },
 
 });

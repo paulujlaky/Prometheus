@@ -4,14 +4,13 @@ import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { ChatSession } from "../sdk/index";
+import { parseToolCalls } from "../sdk/tools";
 
 import { estimateTokens } from "./lib/tokens";
-import { extractCommand, extractFinishedSummary, FINISHED, incompleteReason, parseReply, wrongFinishHint, } from "./parse";
+import { advertisedTools, prepareCall, VERB_HELP, VERBS } from "./tools/dispatch";
 import { recordUsage } from "./usage";
 
 import type { BoodleClient } from "../sdk/client";
-
-export { extractCommand, extractFinishedSummary, incompleteReason, FINISHED } from "./parse";
 
 const MAX_OBSERVATION = Number(process.env.SWE_MAX_OUTPUT ?? 16000);
 const DEFAULT_MAX_STEPS = Number(process.env.SWE_MAX_STEPS ?? 100);
@@ -35,6 +34,7 @@ export type AgentEvent =
   | { type: "session"; chatId: string; title: string }
   /** User message injected mid-loop (queued until the next model turn). */
   | { type: "interjection"; text: string }
+  | { type: "echo"; text: string }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };
 
@@ -140,201 +140,110 @@ function clipTask(task: string, max = 700): string {
 
 }
 
-/**
- * Compact protocol sticky — re-anchored on every observation so the seed does not
- * drift out of attention. Always includes the Task: line; multi-part goals die when
- * only the protocol is sticky and the original task is buried in chat history.
- */
-function stickyProtocol(task: string): string {
+function schemaHint() {
 
-  return [
-    "Protocol (every reply, including the last):",
-    "  <tool>: <≤8 word label>",
-    "  ```bash",
-    "  <command — bulk-read with &&; multi-file apply_patch OK; never ad-hoc editors>",
-    "  ```",
-    "tool ∈ read|search|write|edit|run|test|fix|think|done — label is token 1; fence next; nothing after the closing fence.",
-    "Edits: apply_patch only for create/update/delete (multi-file in one call) — never python/node/sed/awk one-shot editors.",
-    // Keep FINISHED mid-line (after "echo \"") so extractFinishedSummary never treats sticky as real stdout.
-    // Naming the token every turn stops models inventing TASK_COMPLETE / DONE late in the session.
-    `Finish ONLY: label done: then a fence with exactly: echo "${FINISHED}: <one-line summary>" — not TASK_COMPLETE/DONE/FINISHED. Free-text "done" does not stop the runner.`,
-    "Before done: every requirement in Task below must be shipped. Partial wins are not done.",
-    `Task (still open): ${clipTask(task)}`,
-  ].join("\n");
+  return { tool: advertisedTools(), label: "≤8 words", args: {} };
 
 }
 
-/** Seed prompt: command-generator framing (avoids Sonnet 5 "no shell" refusals). */
 function prompt(cwd: string, task: string): string {
 
   const win = process.platform === "win32"
-    ? "- Runner is on Windows. Use forward slashes only; prefer `cmd //c npm` if npm shims break under bash.\n"
+    ? "Windows: forward slashes; `cmd //c npm` if shims break under bash.\n"
     : "";
 
+  const tools = VERBS.map((verb) => `  ${verb.padEnd(7)} ${VERB_HELP[verb]}`).join("\n");
+
   return [
-    "You generate the next shell command for an automated runner.",
-    "The runner executes your bash on the user's machine and returns Exit code, cwd, and stdout/stderr in the next message.",
-    "You do not execute anything yourself — only emit the next command in the schema below. Never invent command output.",
+    "You are a coding agent. Each reply is one JSON object (optional thinking prose before it, nothing after):",
+    `{"tool":"read","label":"≤8 words","args":{}}`,
     "",
-    `Working directory for the runner: ${cwd}`,
-    `Shell: ${SHELL} (${process.platform})`,
-    "Toolchain on PATH: apply_patch, sg (ast-grep when installed), git, node/npm when present, grep/find/sed/head/tail/wc. `rg` may be missing — fall back to `grep -rn` without retrying rg.",
-    "Every observation header includes `Exit code:` and `cwd:` — trust that cwd; do not burn turns on `pwd`. `cd` persists across steps; env vars do not.",
+    "tool / args:",
+    tools,
     "",
-    "Every reply must be EXACTLY this shape (machine-parsed, streamed live) — including the final turn:",
-    "",
-    "<tool>: <≤8 word label>",
-    "```bash",
-    "<command>",
-    "```",
-    "",
-    `<tool> is ONE word, chosen from this list only — it is parsed as the step's tool type and drives the UI:`,
-    "  read    inspecting files or directories (cat, ls, head, wc)",
-    "  search  locating things (rg, grep, find)",
-    "  write   creating a new file",
-    "  edit    apply_patch (multi-file OK), git apply, or sg",
-    "  run     builds, installs, scaffolds, git, anything else",
-    "  test    running tests, type-checks or lints",
-    "  fix     a retry after the previous step failed",
-    "  think   planning with a read-only probe",
-    "  done    the final FINISHED echo (required to end the session)",
-    "",
-    "Important: output order is mandatory (the step is shown as soon as the label arrives):",
-    "- Token 1 of the reply must start the label line (`read: …`, `edit: …`, `done: …`, …) — never a preamble, plan, or monologue first.",
-    "- Prefer the next line to open ```bash immediately so the command streams early.",
-    "- Thinking out loud: only between the label and the ```bash fence (the UI folds it under Thought for Ns).",
-    "- Again, never put thinking before the label or after the closing fence. Only a key from the tool list is a valid step label.",
-    "- No essays or capability discussion outside that shape.",
-    "",
-    "Throughput — fewer turns, same quality:",
-    "- One step per reply. Prefer packing work into that step when it is safe.",
-    "- Bulk reads (required early): chain independent read-only probes with `&&` / `;` and clear separators",
-    "  (e.g. `echo '=== package.json ===' && cat package.json && echo '=== src/App.tsx ===' && cat src/App.tsx && grep -rn pattern --include='*.tsx' src`).",
-    "  Do not spend a turn per file. Gather the files you will edit in one or two read steps, then edit.",
-    "- Bulk edits via apply_patch only: when several files need changes and you already have current contents",
-    "  for each of them, ship one multi-file apply_patch (multiple *** Update/Add/Delete File blocks) instead of N edit turns.",
-    "- Quality gates (never skip for speed):",
-    "  · Only patch files you have actually read (or that are brand-new Add File). Never invent file bodies from memory.",
-    "  · Context lines must match the observation exactly. If unsure, re-read those files in one bulk step, then patch.",
-    "  · If any hunk fails, re-read the failing file(s) and fix the patch — do not switch to python/sed/node rewrites.",
-    "  · Keep patches focused: related changes for this Task in one apply_patch is good; unrelated drive-by edits are not.",
-    "- Separate steps when the next action truly depends on prior output (search → then targeted read → then patch).",
-    "",
-    "Editing — apply_patch is the only safe write path. Do NOT invent ad-hoc editors.",
-    "Forbidden for file create/update/delete: python, python3, node -e, perl, ruby, sed -i, awk rewrites, printf loops, or any hand-rolled replace script.",
-    "Allowed edit tools only:",
-    "",
-    "1) apply_patch (required for create/update/delete) — Codex-style; multi-file in one call is preferred when ready:",
-    "  apply_patch <<'PATCH'",
-    "  *** Begin Patch",
-    "  *** Update File: path/to/a.ts",
-    "  @@",
-    "   unchanged context line",
-    "  -old line",
-    "  +new line",
-    "  *** Update File: path/to/b.ts",
-    "  @@",
-    "  -old",
-    "  +new",
-    "  *** Add File: path/to/new.ts",
-    "  +export const x = 1",
-    "  *** Delete File: path/to/gone.ts",
-    "  *** End Patch",
-    "  PATCH",
-    "  Paths must be relative. Context lines start with a space; removals `-`; additions `+`.",
-    "  Every Update File must include real +/- hunks — a header with no hunks is a malformed empty patch.",
-    "  Prefer one multi-file apply_patch over several single-file turns once context is known.",
-    "  If apply_patch fails, re-read the file(s) and fix the context — do not fall back to rewriting whole files from memory.",
-    "",
-    "2) git apply — only for standard unified diffs (git format-patch / diff -u):",
-    "  git apply --whitespace=nowarn -p0 <<'DIFF'",
-    "  --- a/file.ts",
-    "  +++ b/file.ts",
-    "  @@ -1,3 +1,3 @@",
-    "  ...",
-    "  DIFF",
-    "",
-    "3) sg (ast-grep, on PATH) — structural search/replace when an AST pattern is clearer than a line patch:",
-    "  sg -p 'console.log($A)' -r 'logger.info($A)' -l ts --update-all",
-    "  Preview first without --update-all when unsure.",
-    "",
-    "4) New file only if apply_patch is awkward — quoted heredoc (no inventing replace scripts):",
-    "  cat > 'path/to/file.ts' <<'EOF'",
-    "  ...entire file...",
-    "  EOF",
-    "",
-    "Task discipline (critical — do not invent a smaller goal):",
-    "- The Task: line below is authoritative. Execute it; do not reverse-engineer a plausible task from the repo.",
-    "- If Task lists multiple deliverables (and/also/plus, numbered items, bullets), complete ALL of them before done:.",
-    "- When multiple files implement those deliverables, one multi-file apply_patch is better than finishing after the first file.",
-    "- A green build/typecheck only proves syntax — it does not prove the Task is done.",
-    "",
-    "Finishing (critical — the session stays open until this runs):",
-    "- Do not announce completion in free text. Prose summaries, checklists, or \"all done\" do not stop the runner.",
-    `- The ONLY accepted finish token is the exact string ${FINISHED} (not TASK_COMPLETE, DONE, COMPLETE, FINISHED, or any other invention).`,
-    "- Only when every Task requirement is shipped — after at most one verify step — emit EXACTLY:",
-    "  done: <≤8 word label>",
-    "  ```bash",
-    `  echo "${FINISHED}: <one-line summary that names each deliverable>"`,
-    "  ```",
-    `- The shell stdout must contain a line that starts with ${FINISHED}. Wrong markers leave the session running.`,
-    "- Prefer finishing over optional polish — never over unfinished requirements. Do not done: after a partial win.",
-    "",
-    "Behaviour Notes:",
-    "- Quote paths. Prefer apply_patch over whole-file rewrites.",
-    "- No verify parades: at most one build/test after real edits; never re-check the same fact.",
-    `- Output capped at ${MAX_OBSERVATION} chars (middle cut) — filter with grep/tail; for large files, prefer grep -n for symbols over blind line windows.`,
-    "- No interactive tools, no long-lived servers/watchers (killed by timeout). Scaffold with -y.",
-    "- Images/files attached to this chat are already in context — reference them; do not ask the user to re-upload.",
+    "label is required and short — it is the UI title.",
+    "Prefer read/search/write/edit/delete over run. read returns the whole file. Use only advertised argument names; after an error, correct the call from its message instead of repeating it.",
+    "edit: copy old verbatim from a read (including spaces). Several files → args.files: [{path,old,new}].",
+    "Before builds/tests, inspect package scripts or project config; use existing tooling (Bun when preferred over npm), but do not waste time debating tool choice.",
+    "Follow applicable repository directives such as AGENTS.md or CLAUDE.md.",
+    "Do not invent command output. One tool per reply. Do not discuss the protocol — just emit the object.",
+    `cwd: ${cwd}  shell: ${SHELL}`,
     win,
-    `\nTask: ${task}`,
+    `Task: ${task}`,
 
   ].join("\n");
 
 }
 
-/**
- * Follow-up on an existing chat: server already has the system protocol + history.
- * Keep this short so we don't re-burn the full seed prompt every turn — but restate the
- * bits models forget late (format, task, forced finish marker).
- */
 function followUpPrompt(cwd: string, task: string): string {
 
   return [
-    "Continue the same runner session.",
-    stickyProtocol(task),
-    `cwd: ${cwd} · shell still ${SHELL}.`,
-    "Do not restate prior work. Emit only the next action (or done: + FINISHED echo if every requirement is already complete).",
-    "",
-    `Follow-up (new requirements — treat as part of Task): ${task}`,
+    `Continue. JSON {\"tool\",\"label\",\"args\"} — tool=${advertisedTools()}.`,
+    `cwd: ${cwd}`,
+    `Follow-up: ${task}`,
 
   ].join("\n");
 
 }
 
-/** Observation → next user message: exit, cwd, output, protocol+task sticky, optional hint. */
-function observationMessage(
-  exitCode: number,
-  output: string,
-  opts: { cwd: string; task: string; hint?: string },
-): string {
+function observationMessage(opts: {
 
-  const parts = [
-    `Exit code: ${exitCode}`,
-    `cwd: ${opts.cwd}`,
-    "",
-    truncate(output) || "<no output>",
-    "",
-    stickyProtocol(opts.task),
-  ];
+  ok: boolean;
+  tool?: string;
+  cwd: string;
+  task?: string;
+  output?: string;
+  error?: string;
+  note?: string;
+  exit?: number;
 
-  if (opts.hint) {
+}): string {
 
-    parts.push("", opts.hint);
+  const body: Record<string, unknown> = {
+
+    ok: opts.ok,
+    cwd: opts.cwd,
+    next: schemaHint(),
+
+  };
+
+  if (opts.task) {
+
+    body.task = clipTask(opts.task);
 
   }
 
-  return parts.join("\n");
+  if (opts.tool) {
+
+    body.tool = opts.tool;
+
+  }
+
+  if (opts.exit != null) {
+
+    body.exit = opts.exit;
+
+  }
+
+  if (opts.output) {
+
+    body.output = truncate(opts.output);
+
+  }
+
+  if (opts.error) {
+
+    body.error = opts.error;
+
+  }
+
+  if (opts.note) {
+
+    body.note = opts.note;
+
+  }
+
+  return JSON.stringify(body);
 
 }
 
@@ -397,6 +306,48 @@ export function riskReason(command: string): string | null {
   }
 
   return null;
+
+}
+
+function stripCrlfNoise(text: string): string {
+
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !/LF will be replaced by CRLF|CRLF will be replaced by LF/i.test(line))
+    .join("\n");
+
+}
+
+/** Keep exit/errors/tail; drop webpack asset dumps and CRLF warnings. */
+function summarizeRun(output: string, exit: number, ms: number): string {
+
+  const clean = stripCrlfNoise(output).trim();
+  const lines = clean ? clean.split("\n") : [];
+  const header = `exit ${exit} in ${ms}ms`;
+
+  if (lines.length <= 80 && clean.length <= 6000) {
+
+    return `${header}\n${clean}`.trim();
+
+  }
+
+  const errors = lines.filter((line) => /\berror\b|ERR!|ELIFECYCLE|failed to compile/i.test(line)).slice(0, 16);
+  const tail = lines.slice(-20).join("\n");
+  const parts = [header, `${lines.length} lines`];
+
+  if (errors.length) {
+
+    parts.push(`errors:\n${errors.join("\n")}`);
+
+  }
+
+  if (tail) {
+
+    parts.push(`tail:\n${tail}`);
+
+  }
+
+  return parts.join("\n\n");
 
 }
 
@@ -629,6 +580,9 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
         PAGER: "cat",
         NO_COLOR: "1",
         FORCE_COLOR: "0",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.safecrlf",
+        GIT_CONFIG_VALUE_0: "false",
         NPM_CONFIG_YES: "true",
         NPM_CONFIG_FUND: "false",
         NPM_CONFIG_AUDIT: "false",
@@ -824,18 +778,32 @@ export class MiniAgent {
 
     }
 
-    // fold mid-run notes into the sticky Task so done: cannot ignore them
     this.task = [this.task, ...notes].filter(Boolean).join("\n");
+    const note = notes.join("\n\n");
 
-    return [
+    try {
 
-      message,
-      "",
-      "The user sent a message while you were working. Read it carefully and adjust your next action. Address it before continuing prior work if it conflicts. It is now part of Task.",
-      "",
-      ...notes.flatMap((note, i) => (i === 0 ? [note] : ["", note])),
+      const raw = JSON.parse(message) as Record<string, unknown>;
 
-    ].join("\n");
+      raw.note = note;
+      raw.task = clipTask(this.task);
+      raw.next = schemaHint();
+
+      return JSON.stringify(raw);
+
+    } catch {
+
+      return observationMessage({
+
+        ok: true,
+        cwd: this.cwd,
+        task: this.task,
+        output: message,
+        note,
+
+      });
+
+    }
 
   }
 
@@ -952,7 +920,6 @@ export class MiniAgent {
 
       let message = followUp ? followUpPrompt(this.cwd, task) : prompt(this.cwd, task);
       let misses = 0;
-      let lastProse = "";
       let firstSend = true;
 
       for (let step = 1; step <= maxSteps; step += 1) {
@@ -1015,89 +982,63 @@ export class MiniAgent {
 
         }
 
-        // turn.text is answer-only (reasoning stripped) — keeps tool parsing reliable
         this.noteTokens(turn.text + (turn.reasoning ?? ""), step);
         onEvent({ type: "assistant", text: turn.text, reasoning: turn.reasoning });
         phase("Thinking");
 
-        const parsed = parseReply(turn.text);
-        const command = extractCommand(turn.text);
+        const call = parseToolCalls(turn.text)[0];
 
-        if (parsed.desc) {
-
-          lastProse = parsed.desc;
-
-        }
-
-        const truncated = command ? incompleteReason(command) : null;
-
-        if (command && truncated) {
+        if (!call) {
 
           misses += 1;
 
           if (misses >= MAX_MISSES) {
 
-            onEvent({ type: "error", message: `The block kept arriving incomplete (${truncated}). Try a smaller task or a different model.` });
+            onEvent({ type: "error", message: `${misses} replies in a row were not a JSON tool call. Try a different model.` });
 
             return;
 
           }
 
-          onEvent({ type: "status", text: "Block arrived incomplete — asking for a resend" });
+          message = observationMessage({
 
-          message = [
+            ok: false,
+            cwd: this.cwd,
+            task: this.task,
+            error: `Need one JSON object: {\"tool\",\"label\",\"args\"}. tool=${advertisedTools()}`,
 
-            `Your block was not run: ${truncated}. It reached me cut off at ${command.length} characters, so the rest never arrived.`,
-            "Do not resend the same block. Prefer a smaller apply_patch, or split a large add: `*** Add File` for the first chunk only, then a follow-up Update — or `cat >` then `cat >>` for plain writes.",
-            "After a write, check with `wc -c 'file'` and `tail -3 'file'` if the fence looked truncated.",
-
-          ].join("\n");
+          });
 
           continue;
 
         }
 
-        if (!command) {
+        let exec;
+
+        try {
+
+          exec = prepareCall(call, this.cwd);
+
+        } catch (err) {
 
           misses += 1;
 
-          // model sometimes finishes with prose + FINISHED echo request already satisfied in prior turn
-          const finishedInProse = extractFinishedSummary(turn.text);
-
-          if (finishedInProse && finishedInProse !== "Task complete.") {
-
-            onEvent({ type: "done", summary: finishedInProse });
-
-            return;
-
-          }
-
           if (misses >= MAX_MISSES) {
 
-            onEvent({ type: "error", message: `${misses} replies in a row had no bash block — this assistant is not following the protocol. Try a different model.` });
+            onEvent({ type: "error", message: err instanceof Error ? err.message : String(err) });
 
             return;
 
           }
 
-          if (turn.text.includes("```")) {
+          message = observationMessage({
 
-            message = [
-              "Your reply opened a bash block but never closed it, so nothing could be run. Resend a smaller block, closing the fence.",
-              stickyProtocol(this.task),
-            ].join("\n\n");
-            continue;
+            ok: false,
+            cwd: this.cwd,
+            task: this.task,
+            error: err instanceof Error ? err.message : String(err),
 
-          }
-
-          message = [
-
-            "That reply contained no bash code block, so the runner executed nothing and the task did not advance.",
-            "Do not answer in free prose — including to say you are finished. Emit only the schema.",
-            stickyProtocol(this.task),
-            "If every Task requirement is already complete, emit label done: and a bash fence that echoes the finish marker (see seed) plus a one-line summary.",
-
-          ].join("\n");
+          });
 
           continue;
 
@@ -1105,39 +1046,96 @@ export class MiniAgent {
 
         misses = 0;
 
+        const command = JSON.stringify({ tool: exec.tool, label: exec.label, args: call.args });
+
         onEvent({ type: "command", command });
 
-        // approve() resolves immediately in auto/smart-safe modes; we should stay on Thinking while parked on a prompt
-        const approval = approve(command);
-        const waiting = setTimeout(() => phase("Thinking"), 40);
-        const ok = await approval;
+        if (exec.kind === "done") {
 
-        clearTimeout(waiting);
+          if (this.pending.length) {
 
-        if (!ok) {
+            message = await this.applyInterjections(observationMessage({
 
-          message = "The user declined to run that command. Propose a different one.";
+              ok: false,
+              tool: "done",
+              cwd: this.cwd,
+              task: this.task,
+              error: `You were about to finish (${exec.summary}). A new user note arrived — address it first.`,
+
+            }));
+
+            continue;
+
+          }
+
+          onEvent({ type: "done", summary: exec.summary ?? exec.label });
+
+          return;
+
+        }
+
+        if (exec.kind === "echo") {
+
+          onEvent({ type: "echo", text: exec.output ?? exec.label });
+          message = observationMessage({ ok: true, tool: exec.tool, cwd: this.cwd, task: this.task, output: "Message shown to user.", exit: 0 });
           continue;
+
+        }
+
+        const needsApproval = exec.kind === "run" || exec.tool === "delete";
+        const approvePayload = exec.command ?? command;
+
+        if (needsApproval) {
+
+          const waiting = setTimeout(() => phase("Thinking"), 40);
+          const ok = await approve(approvePayload);
+
+          clearTimeout(waiting);
+
+          if (!ok) {
+
+            message = observationMessage({
+
+              ok: false,
+              tool: exec.tool,
+              cwd: this.cwd,
+              task: this.task,
+              error: "User declined that action. Choose a different tool.",
+
+            });
+
+            continue;
+
+          }
 
         }
 
         phase("Running");
 
-        const run = await runCommand(wrapCommand(command, this.toolPath), this.cwd, timeoutMs, (child) => {
+        let output = exec.output ?? "";
+        let exitCode = exec.exit ?? 0;
 
-          this.child = child;
+        if (exec.kind === "run" && exec.command) {
 
-        });
+          const started = Date.now();
+          const run = await runCommand(wrapCommand(exec.command, this.toolPath), this.cwd, timeoutMs, (child) => {
 
-        this.child = null;
+            this.child = child;
 
-        const { output, cwd: ended } = parseRun(run.output);
-        const exitCode = run.exitCode;
+          });
 
-        // only follow the shell somewhere that actually exists, or the next spawn fails before running anything
-        if (ended && ended !== this.cwd && existsSync(ended)) {
+          this.child = null;
 
-          this.cwd = ended;
+          const parsed = parseRun(run.output);
+
+          output = summarizeRun(parsed.output, run.exitCode, Date.now() - started);
+          exitCode = run.exitCode;
+
+          if (parsed.cwd && parsed.cwd !== this.cwd && existsSync(parsed.cwd)) {
+
+            this.cwd = parsed.cwd;
+
+          }
 
         }
 
@@ -1152,64 +1150,30 @@ export class MiniAgent {
 
         onEvent({ type: "observation", text: output, exitCode });
 
-        // accept finish from stdout, or from a pure done-echo command (stdout may be truncated)
-        const summary = extractFinishedSummary(output) ?? (command ? extractFinishedSummary(command) : null);
+        let error: string | undefined;
 
-        if (summary) {
+        if (exitCode !== 0 && exec.tool === "edit") {
 
-          // prefer the model's own one-liner when FINISHED was bare
-          const finalSummary = summary === "Task complete." && lastProse ? lastProse.split(/\r?\n/)[0].trim() : summary;
-
-          // a note arrived while the finish command ran — keep the loop open for it
-          if (this.pending.length) {
-
-            message = await this.applyInterjections(observationMessage(exitCode, output, {
-              cwd: this.cwd,
-              task: this.task,
-              hint: `You were about to finish ("${finalSummary}"). The user sent a new message — address it before finishing again with: echo "${FINISHED}: <summary>".`,
-            }));
-
-            continue;
-
-          }
-
-          onEvent({ type: "done", summary: finalSummary });
-
-          return;
+          error = "Some files failed (see FAILED lines). Re-read only those files and retry just them — do not rewrite via run.";
 
         }
 
-        // failed patch: distinguish empty/malformed patches from real context mismatches
-        const emptyPatch = exitCode !== 0 && /no \+|empty patch|malformed empty|no file operations/i.test(output);
-        const patchMiss = exitCode !== 0 && /apply_patch:|Invalid Context|failed to update|git apply/i.test(output);
+        message = observationMessage({
 
-        let stepHint: string | undefined;
-
-        if (emptyPatch) {
-
-          stepHint = "That patch was empty or had no +/- hunks (not a context mismatch). Resend apply_patch with real -old and +new lines under *** Update File.";
-
-        } else if (patchMiss) {
-
-          stepHint = "Patch context did not match. Re-cat the file, fix the @@ context lines, and retry apply_patch (or git apply) — do not rewrite the whole file from memory, and do not invent a python/sed editor.";
-
-        } else {
-
-          // model invented TASK_COMPLETE / DONE / etc. — correct it immediately
-          stepHint = wrongFinishHint(command, output, parsed.tool) ?? undefined;
-
-        }
-
-        message = observationMessage(exitCode, output, {
+          ok: exitCode === 0,
+          tool: exec.tool,
           cwd: this.cwd,
           task: this.task,
-          hint: stepHint,
+          output,
+          exit: exitCode,
+          error,
+
         });
 
       }
 
       onEvent({ type: "status", text: `Step limit reached (${maxSteps})` });
-      onEvent({ type: "error", message: `Step limit (${maxSteps}) reached without a ${FINISHED} marker.` });
+      onEvent({ type: "error", message: `Step limit (${maxSteps}) reached without a done call.` });
 
     } catch (err) {
 

@@ -6,12 +6,18 @@ import type {
   Chat,
   ChatDetail,
   ChatListResponse,
+  ContinueChatResponse,
   CreateChatOptions,
   CreateChatResponse,
+  CustomModel,
+  KnowledgeFolderTree,
   KnowledgeItem,
+  KnowledgeListResponse,
   KnowledgeUploadInit,
   SendMessageOptions,
   SendMessageRequest,
+  TeamUsage,
+  UserBootstrap,
   UserMessage,
 } from "./types";
 
@@ -290,6 +296,44 @@ export class BoodleClient {
 
   }
 
+  /** Cancel an in-flight generation. POST is 405 — the client uses DELETE. */
+  async stopChat(chatId: string): Promise<void> {
+
+    await this.request("DELETE", `/chat/${chatId}/stop`);
+
+  }
+
+  async deleteMessage(chatId: string, messageId: string): Promise<void> {
+
+    await this.request("DELETE", `/chat/${chatId}/message/${messageId}`);
+
+  }
+
+  /** Fork a new chat (`isContinueChat`) from an existing submission. */
+  async continueFromSubmission(submissionId: string, name?: string): Promise<ContinueChatResponse> {
+
+    return this.requestJson<ContinueChatResponse>(
+      "POST",
+      `/chat/continue/submission/${submissionId}`,
+      name ? { name } : {},
+    );
+
+  }
+
+  async getChatOverview(chatId: string): Promise<Chat> {
+
+    return this.requestJson<Chat>("GET", `/chat/${chatId}/overview`);
+
+  }
+
+  async searchChats(searchTerm: string): Promise<ChatListResponse> {
+
+    const q = encodeURIComponent(searchTerm);
+
+    return this.requestJson<ChatListResponse>("GET", `/chat/search?searchTerm=${q}`);
+
+  }
+
   /** Best-effort rename — Boodlebox may accept PATCH or PUT; failures are non-fatal for callers. */
   async renameChat(chatId: string, name: string): Promise<void> {
 
@@ -364,6 +408,93 @@ export class BoodleClient {
     const raw = await this.requestJson<unknown>("GET", "/assistant");
 
     return flattenAssistants(raw);
+
+  }
+
+  async listRecentAssistants(): Promise<AssistantSummary[]> {
+
+    const raw = await this.requestJson<unknown>("GET", "/assistant/recent");
+
+    return flattenAssistants(raw);
+
+  }
+
+  async listCustomModels(): Promise<CustomModel[]> {
+
+    const raw = await this.requestJson<unknown>("GET", "/assistant/custom/models");
+    const rows = Array.isArray(raw) ? raw : [];
+    const out: CustomModel[] = [];
+
+    for (const item of rows) {
+
+      if (!item || typeof item !== "object") {
+
+        continue;
+
+      }
+
+      const obj = item as Record<string, unknown>;
+      const llm = asMeta(obj.llm) ?? asMeta(obj.model);
+      const id = typeof obj.id === "string" ? obj.id : typeof llm?.id === "string" ? llm.id : "";
+      const name = typeof obj.name === "string" ? obj.name : typeof llm?.name === "string" ? llm.name : "";
+
+      if (!id || !name) {
+
+        continue;
+
+      }
+
+      out.push({
+
+        id,
+        name,
+
+        taskId: typeof obj.taskId === "string" ? obj.taskId : typeof llm?.defaultTaskId === "string" ? llm.defaultTaskId : undefined,
+        imageModelId: obj.imageModelId === null || typeof obj.imageModelId === "string" ? (obj.imageModelId as string | null) : null,
+
+        api: typeof llm?.api === "string" ? llm.api : undefined,
+        model: typeof llm?.model === "string" ? llm.model : undefined,
+
+        contextLength: typeof llm?.contextLength === "number" ? llm.contextLength : undefined,
+        maxTokens: typeof llm?.maxTokens === "number" ? llm.maxTokens : undefined,
+
+      });
+
+    }
+
+    return out;
+
+  }
+
+  async getUser(): Promise<UserBootstrap> {
+
+    return this.requestJson<UserBootstrap>("GET", "/user");
+
+  }
+
+  async getUserFeatures(): Promise<unknown[]> {
+
+    const raw = await this.requestJson<unknown>("GET", "/user/features");
+
+    return Array.isArray(raw) ? raw : [];
+
+  }
+
+  async getKnowledgeFolders(): Promise<KnowledgeFolderTree> {
+
+    return this.requestJson<KnowledgeFolderTree>("GET", "/knowledge/folder");
+
+  }
+
+  async listFavoriteKnowledge(): Promise<KnowledgeListResponse> {
+
+    return this.requestJson<KnowledgeListResponse>("GET", "/knowledge/favorites");
+
+  }
+
+  async getTeamUsage(): Promise<TeamUsage> {
+
+    return this.requestJson<TeamUsage>("GET", "/teams/usage");
 
   }
 
@@ -513,6 +644,11 @@ function flattenAssistants(raw: unknown): AssistantSummary[] {
           maxTokens: typeof llm?.maxTokens === "number" ? llm.maxTokens : undefined,
 
           premiumCategory: typeof llm?.premiumCategory === "string" ? llm.premiumCategory : undefined,
+
+          assistantType: typeof obj.assistantType === "string" ? obj.assistantType : undefined,
+          useDocumentUi: typeof obj.useDocumentUi === "boolean" ? obj.useDocumentUi : undefined,
+
+          defaultTaskId: typeof llm?.defaultTaskId === "string" ? llm.defaultTaskId : undefined,
 
         });
 

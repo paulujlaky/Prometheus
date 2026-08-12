@@ -1,5 +1,5 @@
-import { Component, createRef, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUpIcon, ChevronDownIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
+import { Component, createRef, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
+import { ArrowUpIcon, ChevronDownIcon, PaperclipIcon, SquareIcon, UploadIcon, XIcon } from "lucide-react";
 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, } from "@/comps/ui/dropdown";
 
@@ -31,6 +31,7 @@ interface ComposerProps {
 
   /** Open a multi-file picker; return absolute paths. */
   onPickImages?: () => Promise<string[]>;
+  onFiles?: (files: File[]) => Promise<string[]>;
 
 }
 
@@ -41,12 +42,18 @@ interface ComposerState {
   /** Absolute paths queued for upload with the next send. */
   attachments: string[];
 
+  /** A file drag is over the composer — drives the drop veil. */
+  dragging: boolean;
+
+  /** Paths added by the last drop/paste; animated in, then cleared. */
+  landed: string[];
+
 }
 
 const MAX_HEIGHT = 190;
 
 /** Circular progress around the Stop control — track is always visible; arc fills with context use. */
-function ContextRing({ ratio, used, limit, onStop }: { ratio: number; used?: number; limit?: number; onStop: () => void }) {
+function ContextRing({ ratio, used, limit, onStop, canSend }: { ratio: number; used?: number; limit?: number; onStop: () => void; canSend: boolean }) {
 
   const size = 38;
   const stroke = 2.5;
@@ -70,9 +77,18 @@ function ContextRing({ ratio, used, limit, onStop }: { ratio: number; used?: num
 
       </svg>
 
-      <button type="button" aria-label="Stop" onClick={onStop} className="relative flex size-8 items-center justify-center rounded-full text-ink transition-[transform,background-color] duration-200 hover:bg-hover active:scale-[0.96]" >
+      <button
+        type={canSend ? "submit" : "button"}
+        aria-label={canSend ? "Send note" : "Stop"}
+        title={canSend ? "Send note to the agent" : undefined}
+        onClick={canSend ? undefined : onStop}
+        className={cn(
+          "relative flex size-8 items-center justify-center rounded-full transition-[transform,background-color,color] duration-200 active:scale-[0.96]",
+          canSend ? "bg-ink text-page" : "text-ink hover:bg-hover",
+        )}
+      >
 
-        <SquareIcon className="size-3.5 fill-current stroke-none" />
+        {canSend ? <ArrowUpIcon className="size-4.5" strokeWidth={2.4} /> : <SquareIcon className="size-3.5 fill-current stroke-none" />}
 
       </button>
 
@@ -92,9 +108,24 @@ function fileLabel(path: string): string {
 
 export class Composer extends Component<ComposerProps, ComposerState> {
 
-  state: ComposerState = { text: "", attachments: [] };
+  state: ComposerState = { text: "", attachments: [], dragging: false, landed: [] };
 
   private input = createRef<HTMLTextAreaElement>();
+
+  /** dragenter/dragleave fire per child — count them so the veil does not flicker. */
+  private dragDepth = 0;
+
+  private landTimer: ReturnType<typeof setTimeout> | null = null;
+
+  componentWillUnmount() {
+
+    if (this.landTimer) {
+
+      clearTimeout(this.landTimer);
+
+    }
+
+  }
 
   componentDidUpdate(_prev: ComposerProps, prev: ComposerState) {
 
@@ -150,7 +181,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
     }
 
     this.props.onSend(payload, attachments);
-    this.setState({ text: "", attachments: [] });
+    this.setState({ text: "", attachments: [], landed: [] });
 
   };
 
@@ -199,11 +230,106 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
   };
 
+  private addFiles = async (files: File[]) => {
+
+    if (this.props.disabled || !this.props.onFiles) return;
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (!images.length) return;
+    const paths = await this.props.onFiles(images);
+
+    // only the genuinely new paths animate — re-dropping a queued file should not re-fire
+    this.setState(
+
+      (prev) => ({
+
+        attachments: [...new Set([...prev.attachments, ...paths])],
+        landed: paths.filter((path) => !prev.attachments.includes(path)),
+
+      }),
+
+      () => {
+
+        if (this.landTimer) clearTimeout(this.landTimer);
+        this.landTimer = setTimeout(() => this.setState({ landed: [] }), 420);
+
+      },
+
+    );
+
+  };
+
+  /** Ignore text/selection drags — the veil is only for files. */
+  private hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+
+  private onDragEnter = (event: DragEvent) => {
+
+    if (this.props.disabled || !this.hasFiles(event)) return;
+
+    event.preventDefault();
+    this.dragDepth += 1;
+
+    if (!this.state.dragging) {
+
+      this.setState({ dragging: true });
+
+    }
+
+  };
+
+  private onDragOver = (event: DragEvent) => {
+
+    event.preventDefault();
+
+    if (!this.props.disabled && this.hasFiles(event)) {
+
+      event.dataTransfer.dropEffect = "copy";
+
+    }
+
+  };
+
+  private onDragLeave = (event: DragEvent) => {
+
+    if (!this.hasFiles(event)) return;
+
+    this.dragDepth = Math.max(0, this.dragDepth - 1);
+
+    if (this.dragDepth === 0) {
+
+      this.setState({ dragging: false });
+
+    }
+
+  };
+
+  private onDrop = (event: DragEvent) => {
+
+    event.preventDefault();
+
+    this.dragDepth = 0;
+    this.setState({ dragging: false });
+
+    void this.addFiles(Array.from(event.dataTransfer.files));
+
+  };
+
+  private onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+
+    const files = Array.from(event.clipboardData.files);
+    if (files.some((file) => file.type.startsWith("image/"))) {
+
+      event.preventDefault();
+      void this.addFiles(files);
+
+    }
+
+  };
+
   render() {
 
     const { assistants, assistantId, busy, disabled, placeholder, disabledPlaceholder, contextRatio = 0, contextUsed, contextLimit, onModelChange, onStop, onPickImages } = this.props;
 
-    const { text, attachments } = this.state;
+    const { text, attachments, dragging, landed } = this.state;
 
     const model = assistants.find((assistant) => assistant.id === assistantId);
     const groups = groupAssistants(assistants);
@@ -213,9 +339,28 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
     return (
 
-      <form className="mx-auto w-full max-w-3xl shrink-0 px-5 pb-5" onSubmit={this.submit}>
+      <form className="mx-auto w-full max-w-3xl shrink-0 px-5 pb-5" onSubmit={this.submit} onDragEnter={this.onDragEnter} onDragOver={this.onDragOver} onDragLeave={this.onDragLeave} onDrop={this.onDrop}>
 
-        <div role="presentation" onClick={() => this.input.current?.focus()} className="flex cursor-text flex-col gap-2.5 rounded-window border border-line bg-field p-3 shadow-card transition-[border-color] duration-150 focus-within:border-line-strong" >
+        <div
+          role="presentation"
+          onClick={() => this.input.current?.focus()}
+          className={cn(
+            "relative flex cursor-text flex-col gap-2.5 rounded-window border border-line bg-field p-3 transition-[border-color,transform] duration-150 focus-within:border-line-strong",
+            dragging ? "animate-drop-ring scale-[1.01] border-brand/70" : "shadow-card",
+          )}
+        >
+
+          {dragging ? (
+
+            <div className="animate-drop-veil pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1.5 rounded-window bg-page/78 backdrop-blur-[2px]">
+
+              <UploadIcon className="size-5 text-brand-ink" strokeWidth={2.2} />
+
+              <span className="text-[12.5px] font-medium text-ink-2">Drop images to attach</span>
+
+            </div>
+
+          ) : null}
 
           {attachments.length > 0 ? (
 
@@ -223,7 +368,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
               {attachments.map((path) => (
 
-                <span key={path} className="inline-flex max-w-full items-center gap-1 rounded-control border border-line bg-inset px-2 py-0.5 text-[12px] text-ink-2">
+                <span key={path} className={cn("inline-flex max-w-full items-center gap-1 rounded-control border border-line bg-inset px-2 py-0.5 text-[12px] text-ink-2", landed.includes(path) && "animate-chip-land")}>
 
                   <span className="min-w-0 truncate" title={path}>{fileLabel(path)}</span>
 
@@ -254,6 +399,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
             onChange={(event) => this.setState({ text: event.target.value })}
             onKeyDown={this.onKeyDown}
+            onPaste={this.onPaste}
 
           />
 
@@ -333,25 +479,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
               {busy ? (
 
-                <>
-
-                  {canSend ? (
-
-                    <button type="submit" aria-label="Send note" title="Send note to the agent"
-
-                      className="flex size-8 items-center justify-center rounded-full bg-ink text-page transition-[background-color,color,transform] duration-200 active:scale-[0.96]"
-
-                    >
-
-                      <ArrowUpIcon className="size-4.5" strokeWidth={2.4} />
-
-                    </button>
-
-                  ) : null}
-
-                  <ContextRing ratio={contextRatio} used={contextUsed} limit={contextLimit} onStop={onStop} />
-
-                </>
+                <ContextRing ratio={contextRatio} used={contextUsed} limit={contextLimit} onStop={onStop} canSend={canSend} />
 
               ) : (
 

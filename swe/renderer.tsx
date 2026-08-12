@@ -30,14 +30,17 @@ interface SweBridge {
 
   listChats: (projectDir?: string | null) => Promise<SweChat[]>;
   deleteChat: (chatId: string) => Promise<void>;
-  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; project?: string | null; entries: Entry[] }>;
+  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; project?: string | null; modelId?: string | null; entries: Entry[] }>;
   rememberChat: (chatId: string, projectDir?: string | null) => Promise<void>;
   claimChat: (chatId: string, projectDir: string) => Promise<void>;
 
   pickImages: () => Promise<string[]>;
+  filePaths: (files: File[]) => string[];
+  importImages: (files: File[]) => Promise<string[]>;
 
   start: (options: {
 
+    runId: string;
     task: string;
     cwd: string;
 
@@ -51,14 +54,15 @@ interface SweBridge {
 
   }) => Promise<void>;
 
-  interject: (options: { text: string; imagePaths?: string[] }) => Promise<void>;
+  interject: (options: { runId: string; text: string; imagePaths?: string[] }) => Promise<void>;
 
-  stop: () => Promise<void>;
+  stop: (runId: string) => Promise<void>;
 
   approve: (id: number, ok: boolean) => Promise<void>;
 
-  onEvent: (handler: (event: AgentEvent) => void) => void;
-  onApproval: (handler: (request: Approval) => void) => void;
+  onEvent: (handler: (message: { runId: string; event: AgentEvent }) => void) => void;
+  onApproval: (handler: (request: Approval & { runId: string }) => void) => void;
+  onRunEnded: (handler: (message: { runId: string }) => void) => void;
 
 }
 
@@ -91,7 +95,6 @@ declare global {
 
 }
 
-const MODEL_KEY = "swe:assistantId";
 const MODE_KEY = "swe:approvalMode";
 
 // distributes over the Entry union, unlike a bare Omit
@@ -153,6 +156,23 @@ class Elapsed extends Component<{ since: number }, { now: number }> {
     );
 
   }
+
+}
+
+/** A later call arrived — stop treating earlier steps as in-flight. */
+function closeOpenSteps(entries: Entry[]): Entry[] {
+
+  return entries.map((entry) => {
+
+    if (entry.kind !== "step" || entry.output !== null) {
+
+      return entry;
+
+    }
+
+    return { ...entry, output: "", streaming: false };
+
+  });
 
 }
 
@@ -223,7 +243,7 @@ export class App extends Component<{}, AppState> {
     entries: [],
 
     assistants: [],
-    assistantId: localStorage.getItem(MODEL_KEY),
+    assistantId: null,
 
     cwd: null,
     mode: (localStorage.getItem(MODE_KEY) as ApprovalMode | null) ?? "smart",
@@ -268,6 +288,7 @@ export class App extends Component<{}, AppState> {
    * so the row does not remount (and re-play slide-in) when the reply completes.
   */
   private streamEntryId: string | null = null;
+  private activeRunId: string | null = null;
 
   private ensureStreamId(): string {
 
@@ -283,27 +304,19 @@ export class App extends Component<{}, AppState> {
 
   componentDidMount() {
 
-    window.swe.onEvent(this.onEvent);
-
-    window.swe.onApproval((approval) => this.setState({ approval }));
-
-    void window.swe.lastCwd().then((cwd) => {
-
-      if (cwd) {
-
-        this.setState({ cwd }, () => {
-
-          void this.refreshChats();
-
-        });
-
-      } else {
-
-        void this.refreshChats();
-
-      }
-
+    window.swe.onEvent(({ runId, event }) => {
+      if (runId === this.activeRunId) this.onEvent(event);
     });
+
+    window.swe.onApproval((approval) => {
+      if (approval.runId === this.activeRunId) this.setState({ approval });
+    });
+
+    window.swe.onRunEnded(({ runId }) => {
+      if (runId === this.activeRunId) this.setState({ running: false, startedAt: null, approval: null, stream: null });
+    });
+
+    void this.refreshChats();
 
     void window.swe.models().then((assistants) => {
 
@@ -468,8 +481,8 @@ export class App extends Component<{}, AppState> {
 
         const stream = (prev.stream ?? "") + event.text;
 
-        // the fence is where thinking stops and the command starts
-        if (this.thinkEndedAt == null && stream.includes("```")) {
+        // thinking ends when the JSON call (or a legacy fence) starts
+        if (this.thinkEndedAt == null && (/"tool"\s*:/.test(stream) || stream.includes("```"))) {
 
           this.thinkEndedAt = Date.now();
 
@@ -507,7 +520,7 @@ export class App extends Component<{}, AppState> {
 
       this.setState((prev) => ({
 
-        entries: [...prev.entries, {
+        entries: [...closeOpenSteps(prev.entries), {
           id,
           kind: "step",
           tool,
@@ -542,11 +555,11 @@ export class App extends Component<{}, AppState> {
 
         if (last?.kind === "step" && last.command === null && last.output === null) {
 
-          return { entries: [...prev.entries.slice(0, -1), { ...last, command: event.command }] };
+          return { entries: [...closeOpenSteps(prev.entries.slice(0, -1)), { ...last, command: event.command }] };
 
         }
 
-        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", tool: null, desc: "", thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
+        return { entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "step", tool: null, desc: "", thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
 
       });
 
@@ -574,10 +587,21 @@ export class App extends Component<{}, AppState> {
 
     }
 
+    if (event.type === "echo") {
+
+      this.setState((prev) => ({ entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "echo", text: event.text }] }));
+      return;
+
+    }
+
     if (event.type === "done") {
 
-      this.push({ kind: "done", text: cleanSummary(event.summary) });
-      this.setState({ status: "Done" });
+      this.setState((prev) => ({
+
+        entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "done", text: cleanSummary(event.summary) }],
+        status: "Done",
+
+      }));
 
       return;
 
@@ -723,6 +747,8 @@ export class App extends Component<{}, AppState> {
 
         activeChatId: detail.id,
         entries,
+        cwd: project,
+        assistantId: detail.modelId ?? prev.assistantId,
         status: "Idle",
         chats: prev.chats.map((c) => (
           c.id === detail.id
@@ -793,6 +819,7 @@ export class App extends Component<{}, AppState> {
 
       await window.swe.interject({
 
+        runId: this.activeRunId!,
         text: task,
         imagePaths: imagePaths.length ? imagePaths : undefined,
 
@@ -824,6 +851,9 @@ export class App extends Component<{}, AppState> {
       return;
 
     }
+
+    const runId = crypto.randomUUID();
+    this.activeRunId = runId;
 
     const model = assistants.find((a) => a.id === assistantId);
     const modelLabel = model ? displayName(model.name) : assistantId ?? undefined;
@@ -898,6 +928,7 @@ export class App extends Component<{}, AppState> {
 
       await window.swe.start({
 
+        runId,
         task,
         cwd,
 
@@ -1170,14 +1201,16 @@ export class App extends Component<{}, AppState> {
 
             onModelChange={(id) => {
 
-              localStorage.setItem(MODEL_KEY, id);
               this.setState({ assistantId: id });
 
             }}
 
             onSend={(task, imagePaths) => void this.start(task, imagePaths)}
             onPickImages={() => window.swe.pickImages()}
-            onStop={() => void window.swe.stop()}
+            onFiles={(files) => window.swe.importImages(files)}
+            onStop={() => {
+              if (this.activeRunId) void window.swe.stop(this.activeRunId);
+            }}
 
           />
 

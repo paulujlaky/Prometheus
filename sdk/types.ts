@@ -99,6 +99,90 @@ export interface AssistantSummary {
 
   premiumCategory?: string;
 
+  assistantType?: string;
+  useDocumentUi?: boolean;
+
+  /** Boodle task template id (chat vs image vs research). Not a client tool. */
+  defaultTaskId?: string;
+
+}
+
+export interface CustomModel {
+
+  id: string;
+  name: string;
+
+  taskId?: string;
+  imageModelId?: string | null;
+
+  api?: string;
+  model?: string;
+
+  contextLength?: number;
+  maxTokens?: number;
+
+}
+
+export interface TeamUsage {
+
+  limits: unknown;
+  teamUsage: unknown;
+
+  tier?: string;
+
+}
+
+export interface KnowledgeFolder {
+
+  id: string;
+  name: string;
+
+  folderType?: string;
+  itemType?: string;
+
+  role?: string;
+
+  createdBy?: string;
+  modified?: number;
+
+}
+
+export interface KnowledgeListResponse {
+
+  entries: KnowledgeItem[];
+
+  total: number;
+  offset: number;
+  limit: number;
+
+}
+
+export interface KnowledgeFolderTree {
+
+  folders: Record<string, KnowledgeFolder>;
+  knowledge: unknown[];
+
+  lists: Record<string, { entries: { id: string; itemType?: string }[]; limit: number; offset: number; total: number }>;
+
+  remainingFolderIds?: string[];
+
+}
+
+export interface ContinueChatResponse {
+
+  chat: Chat;
+  messages: ApiChatMessage[];
+
+}
+
+/** Loose GET /user bootstrap — teams, flags, alias map. */
+export interface UserBootstrap {
+
+  assistant?: unknown;
+  profiles?: unknown;
+  teams?: unknown;
+  user?: unknown;
+
 }
 
 export interface KnowledgeItem {
@@ -327,6 +411,24 @@ export type ContentBlock =
     }
   | {
 
+      kind: "image";
+
+      key: string;
+      url: string;
+      title: string;
+
+    }
+  | {
+
+      kind: "code";
+
+      key: string;
+      language: string;
+      text: string;
+
+    }
+  | {
+
       kind: "error";
 
       key: string;
@@ -390,6 +492,7 @@ export interface ResponseSnapshot {
   progress: string | null;
 
   links: Extract<ContentBlock, { kind: "link" }>[];
+  images: Extract<ContentBlock, { kind: "image" }>[];
 
   error: string | null;
 
@@ -468,3 +571,34 @@ export type StreamChange =
       data: WsData;
 
     };
+
+// Client-side JSON tool protocol (PlainText — Boodle does not accept a tools array)
+
+export interface ToolSpec {
+
+  name: string;
+  description: string;
+
+  /** JSON Schema for `args`. Optional. */
+  parameters?: Record<string, unknown>;
+
+}
+
+export interface ToolCall {
+
+  tool: string;
+  label?: string;
+
+  /** Object, array, or scalar — tools interpret their own shape. */
+  args: unknown;
+
+}
+
+export interface ToolResult {
+
+  tool: string;
+
+  ok: boolean;
+  content: string;
+
+}

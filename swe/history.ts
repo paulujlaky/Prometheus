@@ -1,4 +1,4 @@
-import { extractCommand, extractFinishedSummary, extractTaskText, FINISHED, parseReply, type Tool } from "./parse";
+import { extractCommand, extractFinishedSummary, extractTaskText, parseObservation, parseReply, type Tool } from "./parse";
 
 import { isAssistantMessage, isUserMessage } from "../sdk/messages";
 import { ResponseStream } from "../sdk/stream";
@@ -53,26 +53,6 @@ function assistantParts(message: Extract<ApiChatMessage, { type: "Assistant" }>,
 
 }
 
-/** Observation the harness sends after each command. */
-function parseObservation(text: string): { exitCode: number; output: string } | null {
-
-  const match = /^Exit code:\s*(-?\d+)\s*\n?([\s\S]*)$/.exec(text.trim());
-
-  if (!match) {
-
-    return null;
-
-  }
-
-  return {
-
-    exitCode: Number(match[1]),
-    output: (match[2] ?? "").replace(/^\n/, ""),
-
-  };
-
-}
-
 /**
  * Rebuilds the mini-swe transcript from a Boodle chat detail.
  */
@@ -86,7 +66,6 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
   let sawTask = false;
 
   let openStep: Extract<HistoryEntry, { kind: "step" }> | null = null;
-  let pushedDone = false;
 
   const push = (entry: WithoutId<HistoryEntry> & { id?: string }) => {
 
@@ -98,14 +77,6 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
   };
 
   const pushDone = (summary: string) => {
-
-    if (pushedDone) {
-
-      return;
-
-    }
-
-    pushedDone = true;
     push({ kind: "done", text: summary });
 
   };
@@ -340,11 +311,10 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
       openStep = null;
       pushDone(summary);
 
-    } else if (openStep.tool === "done" && openStep.command && openStep.command.includes(FINISHED)) {
+    } else if (openStep.tool === "done") {
 
-      // tool done: + command mentions marker but extract was picky — still close as finished
-      const fallback = openStep.desc?.trim() || "Task complete.";
-      openStep.output = openStep.command;
+      const fallback = extractFinishedSummary(openStep.command ?? "") || openStep.desc?.trim() || "Task complete.";
+      openStep.output = openStep.command ?? "";
       openStep.exitCode = 0;
       openStep = null;
       pushDone(fallback);

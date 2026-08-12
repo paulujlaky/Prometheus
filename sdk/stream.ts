@@ -129,6 +129,8 @@ export class ResponseStream {
   private latestProgress: string | null = null;
 
   private links: Extract<ContentBlock, { kind: "link" }>[] = [];
+  private images: Extract<ContentBlock, { kind: "image" }>[] = [];
+  private codes: Extract<ContentBlock, { kind: "code" }>[] = [];
 
   private unknowns: Extract<ContentBlock, { kind: "unknown" }>[] = [];
   private errors: Extract<ContentBlock, { kind: "error" }>[] = [];
@@ -170,6 +172,8 @@ export class ResponseStream {
     this.latestProgress = null;
 
     this.links = [];
+    this.images = [];
+    this.codes = [];
 
     this.unknowns = [];
     this.errors = [];
@@ -205,6 +209,7 @@ export class ResponseStream {
       progress: this.latestProgress,
 
       links: [...this.links],
+      images: [...this.images],
 
       error: this.lastError,
 
@@ -326,6 +331,18 @@ export class ResponseStream {
 
     }
 
+    for (const image of this.images) {
+
+      out.push(image);
+
+    }
+
+    for (const code of this.codes) {
+
+      out.push(code);
+
+    }
+
     for (const err of this.errors) {
 
       out.push(err);
@@ -390,6 +407,8 @@ export class ResponseStream {
 
       this.sectionOrder = [];
       this.links = [];
+      this.images = [];
+      this.codes = [];
 
       this.unknowns = [];
       this.errors = [];
@@ -537,6 +556,18 @@ export class ResponseStream {
       case "Link":
 
         return this.onLink(part);
+
+      case "Image":
+
+        return this.onImage(part);
+
+      case "CodeBlock":
+
+        return this.onCode(part);
+
+      case "SectionHeader":
+
+        return this.onSectionHeader(part);
 
       case "Error":
 
@@ -762,6 +793,60 @@ export class ResponseStream {
     this.links.push(block);
 
     return [{ kind: "block", snapshot: this.snapshot(), block }];
+
+  }
+
+  private onImage(part: RawPart): StreamChange[] {
+
+    const url = str(part.imageUrl) ?? str(part.url) ?? "";
+    const title = str(part.title) ?? "";
+    const key = `image:${url || title}`;
+
+    if (!url || this.images.some((image) => image.key === key)) {
+
+      return [];
+
+    }
+
+    const block: Extract<ContentBlock, { kind: "image" }> = { kind: "image", key, url, title };
+
+    this.images.push(block);
+
+    return [{ kind: "block", snapshot: this.snapshot(), block }];
+
+  }
+
+  private onCode(part: RawPart): StreamChange[] {
+
+    const text = str(part.content) ?? extractText(part.content) ?? str(part.code) ?? "";
+    const language = str(part.language) ?? str(part.lang) ?? "";
+    const key = `code:${this.codes.length}:${language}`;
+
+    if (!text) {
+
+      return [];
+
+    }
+
+    const block: Extract<ContentBlock, { kind: "code" }> = { kind: "code", key, language, text };
+
+    this.codes.push(block);
+
+    return [{ kind: "block", snapshot: this.snapshot(), block }];
+
+  }
+
+  private onSectionHeader(part: RawPart): StreamChange[] {
+
+    const content = str(part.content) ?? extractText(part.content) ?? str(part.sectionType) ?? "";
+
+    if (!content) {
+
+      return [];
+
+    }
+
+    return this.onProgress({ ...part, type: "Progress", content });
 
   }
 

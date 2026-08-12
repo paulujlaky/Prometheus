@@ -227,6 +227,31 @@ export class ChatSession {
 
   }
 
+  /** Cancel the in-flight generation (DELETE /chat/:id/stop). */
+  async cancel(): Promise<void> {
+
+    try {
+
+      await this.client.stopChat(this.chatId);
+
+    } catch {
+
+      // already finished / unknown verb — still unblock waiters
+    }
+
+    this.clearPendingFinal(new Error("Generation cancelled"));
+
+    if (this.activeAssistantTurnId) {
+
+      this.patchTurn(this.activeAssistantTurnId, { status: "error", error: "cancelled" });
+
+    }
+
+    this.busy = false;
+    this.emitState();
+
+  }
+
   /** Attach knowledge items to this chat (images/files already uploaded). */
   async attachKnowledge(knowledgeIds: string[]): Promise<void> {
 
