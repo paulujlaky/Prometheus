@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 import type { AgentEvent } from "./agent";
 import type { AssistantSummary } from "../sdk/types";
+import type { UndoMark } from "./tools/snapshot";
 import type { UsageFile } from "./usage";
 
 export interface SweChatSummary {
@@ -20,6 +21,7 @@ export interface SweChatSummary {
 contextBridge.exposeInMainWorld("swe", {
 
   models: (): Promise<AssistantSummary[]> => ipcRenderer.invoke("models"),
+  preferredModel: (): Promise<string | null> => ipcRenderer.invoke("models:preferred"),
 
   pickDir: (): Promise<string | null> => ipcRenderer.invoke("pick-dir"),
   lastCwd: (): Promise<string | null> => ipcRenderer.invoke("settings:last-cwd"),
@@ -28,6 +30,10 @@ contextBridge.exposeInMainWorld("swe", {
   openProject: (cwd: string): Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null> => ipcRenderer.invoke("settings:open-project", cwd),
 
   usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
+
+  undos: (chatId: string): Promise<UndoMark[]> => ipcRenderer.invoke("rollback:list", chatId),
+  undo: (chatId: string, commit: string): Promise<{ ok: boolean; files: string[]; text: string }> =>
+    ipcRenderer.invoke("rollback:undo", chatId, commit),
 
   listChats: (projectDir?: string | null): Promise<SweChatSummary[]> =>
     ipcRenderer.invoke("chats:list", projectDir ?? null),
@@ -42,6 +48,7 @@ contextBridge.exposeInMainWorld("swe", {
     project?: string | null;
     modelId?: string | null;
     entries: unknown[];
+    undos: UndoMark[];
   }> => ipcRenderer.invoke("chats:get", chatId),
 
   rememberChat: (chatId: string, projectDir?: string | null): Promise<void> =>

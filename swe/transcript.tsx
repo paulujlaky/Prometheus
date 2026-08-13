@@ -1,5 +1,5 @@
 import { Component, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, MessageSquareIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, MessageSquareIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon } from "lucide-react";
 
 import { UsageHeatmap, type UsageFile } from "@/comps/heatmap";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/scroller";
@@ -693,7 +693,51 @@ function TaskBubble({ text, attachments }: { text: string; attachments?: string[
 
 }
 
-function Verdict({ tone, icon, children }: { tone: "green" | "red"; icon: ReactNode; children: ReactNode }) {
+/** What the transcript needs to offer a rollback beside one verdict. */
+export interface UndoInfo {
+
+  commit: string;
+  undone?: boolean;
+
+}
+
+function UndoControl({ info, busy, onUndo }: { info: UndoInfo; busy: boolean; onUndo: (commit: string) => void }) {
+
+  if (info.undone) {
+
+    return (
+
+      <span className="flex items-center gap-1.5 px-2 py-1 text-[12px] text-ink-3" title="These changes were rolled back">
+
+        <Undo2Icon className="size-3.5" strokeWidth={2} />
+        Undone
+
+      </span>
+
+    );
+
+  }
+
+  return (
+
+    <button
+      type="button"
+      disabled={busy}
+      title="Restore the files to their state before this run"
+      onClick={() => onUndo(info.commit)}
+      className="flex items-center gap-1.5 rounded-full px-2 py-1 text-[12px] text-ink-3 transition-colors hover:bg-surface hover:text-ink disabled:pointer-events-none disabled:opacity-50"
+    >
+
+      <Undo2Icon className="size-3.5" strokeWidth={2} />
+      {busy ? "Undoing…" : "Undo"}
+
+    </button>
+
+  );
+
+}
+
+function Verdict({ tone, icon, action, children }: { tone: "green" | "red"; icon: ReactNode; action?: ReactNode; children: ReactNode }) {
 
   return (
 
@@ -705,9 +749,11 @@ function Verdict({ tone, icon, children }: { tone: "green" | "red"; icon: ReactN
 
       </span>
 
-      {/* first child keeps its top margin at zero so the opening line stays level with the glyph,
-          and the list under it gets room so the sentence beside the icon can breathe */}
+      {/* first child keeps its top margin at zero so the opening line stays level with the glyph */}
+
       <div className="min-w-0 flex-1 pt-0.5 [&_ol:first-child]:mt-0 [&_p:first-child+ol]:mt-2.5 [&_p:first-child+ul]:mt-2.5 [&_p:first-child]:mt-0 [&_ul:first-child]:mt-0">{children}</div>
+
+      {action ? <div className="shrink-0">{action}</div> : null}
 
     </div>
 
@@ -729,6 +775,13 @@ interface TranscriptProps {
 
   isOpen: (entry: Entry) => boolean;
   onToggle: (entry: Entry) => void;
+
+  /** Rollback mark for a verdict row, when a snapshot was taken for that run. */
+  undoFor?: (entry: Entry) => UndoInfo | null;
+  onUndo?: (commit: string) => void;
+
+  /** Commit currently being restored, so its control can show progress. */
+  undoBusy?: string | null;
 
 }
 
@@ -794,9 +847,23 @@ function toBlocks(entries: Entry[]): Block[] {
 
 }
 
-export function Transcript({ entries, running, empty, usage, isOpen, onToggle }: TranscriptProps) {
+export function Transcript({ entries, running, empty, usage, isOpen, onToggle, undoFor, onUndo, undoBusy }: TranscriptProps) {
 
   const blocks = toBlocks(entries);
+
+  const undoNode = (entry: Entry): ReactNode => {
+
+    const info = undoFor?.(entry) ?? null;
+
+    if (!info || !onUndo) {
+
+      return null;
+
+    }
+
+    return <UndoControl info={info} busy={undoBusy === info.commit} onUndo={onUndo} />;
+
+  };
 
   // between steps nothing is streaming and no row is pending, so the transcript would look idle
   const busy = entries.some((entry) => entry.kind === "step" && !isDoneStep(entry) && (entry.streaming || entry.output === null));
@@ -847,7 +914,7 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
 
                   ) : block.entry.kind === "done" ? (
 
-                    <Verdict tone="green" icon={<CheckIcon className="size-3.5" strokeWidth={3.5} />}>
+                    <Verdict tone="green" icon={<CheckIcon className="size-3.5" strokeWidth={3.5} />} action={undoNode(block.entry)}>
 
                       <Md className="max-w-[42rem] text-[14px] text-ink">{cleanSummary(block.entry.text)}</Md>
 

@@ -17,6 +17,7 @@ import {
   settingsForChat,
   UNASSIGNED_PROJECT,
 } from "./settings";
+import { forgetMarks, loadMarks, markUndone, recordMark, restoreSnapshot, snapshotsAvailable } from "./tools/snapshot";
 import { loadUsage } from "./usage";
 
 import type { ChatDetail } from "../sdk/types";
@@ -170,6 +171,7 @@ function createWindow() {
 
 // the renderer groups these with the same picker the web app uses
 ipcMain.handle("models", async () => getClient().listAssistants());
+ipcMain.handle("models:preferred", () => getClient().preferredAssistantId);
 
 ipcMain.handle("settings:get", () => loadSettings());
 
@@ -195,6 +197,30 @@ ipcMain.handle("settings:set-cwd", (_event, cwd: string) => {
 });
 
 ipcMain.handle("usage:get", () => loadUsage());
+
+ipcMain.handle("rollback:list", (_event, chatId: string) => (snapshotsAvailable() ? loadMarks(chatId) : []));
+
+ipcMain.handle("rollback:undo", (_event, chatId: string, commit: string) => {
+
+  const mark = loadMarks(chatId).find((row) => row.commit === commit);
+
+  if (!mark) {
+
+    return { ok: false, files: [], text: "That snapshot is no longer on record." };
+
+  }
+
+  const report = restoreSnapshot(mark.project, commit);
+
+  if (report.ok) {
+
+    markUndone(chatId, commit);
+
+  }
+
+  return report;
+
+});
 
 /** Pull project root from the harness seed / sticky lines in a chat's history. */
 function extractProjectFromDetail(detail: ChatDetail): string | null {
@@ -376,6 +402,7 @@ ipcMain.handle("chats:delete", async (_event, chatId: string) => {
 
   await getClient().deleteChat(chatId);
   forgetChatId(chatId);
+  forgetMarks(chatId);
 
 });
 
@@ -415,6 +442,7 @@ ipcMain.handle("chats:get", async (_event, chatId: string) => {
     project,
     modelId: saved.modelId,
     entries: entriesFromChatDetail(detail),
+    undos: snapshotsAvailable() ? loadMarks(chatId) : [],
 
   };
 
@@ -525,6 +553,11 @@ ipcMain.handle("start", async (_event, options: {
 
   let notifyTitle = chatTitle(options.task.split(/\s+/).slice(0, 8).join(" "));
 
+  // the snapshot lands before the chat has an id on a fresh run, and a run can end with no
+  // verdict at all, so the mark is held here and only persisted once a verdict exists to pin it to
+  let snapshotCommit: string | null = null;
+  let markChatId = options.chatId ?? null;
+
   const agent = new MiniAgent({
 
     client: getClient(),
@@ -535,7 +568,21 @@ ipcMain.handle("start", async (_event, options: {
 
     onEvent: (event) => {
 
+      if (event.type === "snapshot") {
+
+        snapshotCommit = event.commit;
+
+      }
+
+      if (event.type === "done" && snapshotCommit && markChatId) {
+
+        recordMark(markChatId, { commit: snapshotCommit, project: options.cwd, summary: event.summary, at: Date.now() });
+
+      }
+
       if (event.type === "session") {
+
+        markChatId = event.chatId;
 
         rememberChatId(event.chatId, options.cwd);
         rememberChatSettings(event.chatId, options.cwd, options.assistantId ?? null);

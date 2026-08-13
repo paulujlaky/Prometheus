@@ -9,6 +9,7 @@ import { estimateTokens } from "./lib/tokens";
 import { followUpPrompt, formatResults, NUDGE, parseActions, systemPrompt, type Action, type Result } from "./protocol";
 import { execute } from "./tools/dispatch";
 import { projectDoc, repoMap } from "./tools/fs";
+import { captureSnapshot } from "./tools/snapshot";
 import { recordUsage } from "./usage";
 
 import type { BoodleClient } from "../sdk/client";
@@ -40,6 +41,8 @@ export type AgentEvent =
   | { type: "status"; text: string }
   | { type: "usage"; used: number; step: number }
   | { type: "session"; chatId: string; title: string }
+  /** Worktree commit in the shadow store, taken before this run touched anything. */
+  | { type: "snapshot"; commit: string }
   /** User message injected mid-loop (queued until the next model turn). */
   | { type: "interjection"; text: string }
   | { type: "say"; text: string }
@@ -872,6 +875,15 @@ export class MiniAgent {
       const seedTitle = session.state.chat?.name?.trim() || "New chat";
 
       onEvent({ type: "session", chatId: session.chatId, title: seedTitle });
+
+      // taken before the first block runs, so undo returns the tree to its pre-run state
+      const snapshot = captureSnapshot(this.cwd, `before ${titleFromPrompt(task)}`);
+
+      if (snapshot) {
+
+        onEvent({ type: "snapshot", commit: snapshot });
+
+      }
 
       if (!followUp) {
 

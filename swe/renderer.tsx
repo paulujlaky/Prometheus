@@ -12,9 +12,10 @@ import { cn } from "@/lib/utils";
 
 import { Sidebar, type SweChat } from "./sidebar";
 import { fileEdits } from "./parse";
-import { cleanSummary, parseReply, streamStep, Transcript, type Entry } from "./transcript";
+import { cleanSummary, parseReply, streamStep, Transcript, type Entry, type UndoInfo } from "./transcript";
 
 import type { AgentEvent } from "./agent";
+import type { UndoMark } from "./tools/snapshot";
 import type { AssistantSummary } from "../sdk/types";
 
 import "./index.css";
@@ -22,6 +23,7 @@ import "./index.css";
 interface SweBridge {
 
   models: () => Promise<AssistantSummary[]>;
+  preferredModel: () => Promise<string | null>;
   pickDir: () => Promise<string | null>;
   lastCwd: () => Promise<string | null>;
   setCwd: (cwd: string) => Promise<string | null>;
@@ -30,10 +32,13 @@ interface SweBridge {
 
   usage: () => Promise<UsageFile>;
 
+  undos: (chatId: string) => Promise<UndoMark[]>;
+  undo: (chatId: string, commit: string) => Promise<{ ok: boolean; files: string[]; text: string }>;
+
   listChats: (projectDir?: string | null) => Promise<SweChat[]>;
   deleteChat: (chatId: string) => Promise<void>;
   renameChat: (chatId: string, name: string) => Promise<void>;
-  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; project?: string | null; modelId?: string | null; entries: Entry[] }>;
+  getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; project?: string | null; modelId?: string | null; entries: Entry[]; undos?: UndoMark[] }>;
   rememberChat: (chatId: string, projectDir?: string | null) => Promise<void>;
   claimChat: (chatId: string, projectDir: string) => Promise<void>;
 
@@ -238,6 +243,12 @@ interface AppState {
   activeChatId: string | null;
   recentProjects: { dir: string; count: number }[];
 
+  /** Rollback marks for this chat, oldest first — one per verdict row that has a snapshot. */
+  undos: UndoMark[];
+
+  /** Commit being restored right now, so its control can show progress. */
+  undoBusy: string | null;
+
 }
 
 export class App extends Component<{}, AppState> {
@@ -272,9 +283,15 @@ export class App extends Component<{}, AppState> {
     activeChatId: null,
     recentProjects: [],
 
-  };
+    undos: [],
+    undoBusy: null,
+
+    };
 
   private seq = 0;
+
+  /** Snapshot taken at the top of the live run; pinned to a mark once a verdict lands. */
+  private pendingSnapshot: string | null = null;
 
   /** Wall-clock start of the current model stream (for "Thought for Ns"). */
   private streamStartedAt: number | null = null;
@@ -337,9 +354,13 @@ export class App extends Component<{}, AppState> {
 
     void this.refreshChats();
 
-    void window.swe.models().then((assistants) => {
+    void Promise.all([window.swe.models(), window.swe.preferredModel()]).then(([assistants, preferredModelId]) => {
 
-      this.setState((prev) => ({ assistants, assistantId: prev.assistantId ?? assistants[0]?.id ?? null }));
+      const preferred = assistants.some((assistant) => assistant.id === preferredModelId)
+        ? preferredModelId
+        : null;
+
+      this.setState((prev) => ({ assistants, assistantId: prev.assistantId ?? preferred ?? assistants[0]?.id ?? null }));
 
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
@@ -394,6 +415,78 @@ export class App extends Component<{}, AppState> {
   /** Steps stay folded until the user opens one; the label alone carries the transcript. */
   private isOpen = (entry: Entry) => entry.kind === "step" && this.state.toggled.has(entry.id);
 
+  /**
+   * Pair a verdict row with its snapshot. A run can finish without one (no git, folder moved),
+   * so the lists are aligned from the newest end rather than by position from the top.
+   */
+  private undoFor = (entry: Entry): UndoInfo | null => {
+
+    const { undos, entries } = this.state;
+
+    if (entry.kind !== "done" || !undos.length) {
+
+      return null;
+
+    }
+
+    const verdicts = entries.filter((row) => row.kind === "done");
+    const index = verdicts.indexOf(entry);
+
+    if (index < 0) {
+
+      return null;
+
+    }
+
+    const mark = undos[index - (verdicts.length - undos.length)];
+
+    return mark ? { commit: mark.commit, undone: mark.undone } : null;
+
+  };
+
+  private handleUndo = async (commit: string) => {
+
+    const chatId = this.state.activeChatId;
+
+    if (!chatId || this.state.undoBusy) {
+
+      return;
+
+    }
+
+    this.setState({ undoBusy: commit });
+
+    try {
+
+      const report = await window.swe.undo(chatId, commit);
+
+      if (!report.ok) {
+
+        this.push({ kind: "error", text: report.text });
+
+        return;
+
+      }
+
+      this.setState((prev) => ({
+
+        undos: prev.undos.map((mark) => (mark.commit === commit ? { ...mark, undone: true } : mark)),
+        status: report.text,
+
+      }));
+
+    } catch (err) {
+
+      this.push({ kind: "error", text: `Undo failed: ${String(err)}` });
+
+    } finally {
+
+      this.setState({ undoBusy: null });
+
+    }
+
+  };
+
   private toggle = (entry: Entry) => {
 
     this.setState((prev) => {
@@ -436,6 +529,14 @@ export class App extends Component<{}, AppState> {
     if (event.type === "usage") {
 
       this.setState({ tokensUsed: event.used });
+
+      return;
+
+    }
+
+    if (event.type === "snapshot") {
+
+      this.pendingSnapshot = event.commit;
 
       return;
 
@@ -656,10 +757,16 @@ export class App extends Component<{}, AppState> {
 
     if (event.type === "done") {
 
+      const commit = this.pendingSnapshot;
+      const project = this.state.cwd ?? "";
+
       this.setState((prev) => ({
 
         entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "done", text: cleanSummary(event.summary) }],
-        status: "Done",
+        status: `Done in ${formatElapsed(Date.now() - (prev.startedAt ?? Date.now()))}`,
+
+        // main persists the same mark; mirroring it here keeps the control live without a round trip
+        undos: commit ? [...prev.undos, { commit, project, summary: event.summary, at: Date.now() }] : prev.undos,
 
       }));
 
@@ -702,6 +809,8 @@ export class App extends Component<{}, AppState> {
       chatsLoading: true,
       activeChatId: null,
       entries: [],
+      undos: [],
+      undoBusy: null,
       stream: null,
       toggled: new Set(),
       approval: null,
@@ -747,8 +856,10 @@ export class App extends Component<{}, AppState> {
       running: false,
       startedAt: null,
       status: "Idle",
+      undos: [],
+      undoBusy: null,
 
-    });
+      });
 
   };
 
@@ -766,8 +877,10 @@ export class App extends Component<{}, AppState> {
       tokensUsed: 0,
       running: false,
       startedAt: null,
+      undos: [],
+      undoBusy: null,
 
-    });
+      });
 
     try {
 
@@ -810,6 +923,7 @@ export class App extends Component<{}, AppState> {
         activeChatId: detail.id,
         entries,
         cwd: project,
+        undos: detail.undos ?? [],
         assistantId: detail.modelId ?? prev.assistantId,
         running: Boolean(live),
         startedAt: live?.startedAt ?? null,
@@ -1059,7 +1173,7 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const { entries, assistants, assistantId, cwd, mode, running, startedAt, status, stream, approval, tokensUsed, usage: dailyUsage, chats, chatsLoading, activeChatId } = this.state;
+    const { entries, assistants, assistantId, cwd, mode, running, startedAt, status, stream, approval, tokensUsed, usage: dailyUsage, chats, chatsLoading, activeChatId, undoBusy } = this.state;
 
     const model = assistants.find((a) => a.id === assistantId);
     const liveThought = this.streamStartedAt != null && this.thinkEndedAt != null ? this.thinkEndedAt - this.streamStartedAt : null;
@@ -1200,6 +1314,10 @@ export class App extends Component<{}, AppState> {
             isOpen={this.isOpen}
             onToggle={this.toggle}
 
+            undoFor={this.undoFor}
+            onUndo={this.handleUndo}
+            undoBusy={undoBusy}
+
           />
 
           {approval && (
@@ -1266,7 +1384,7 @@ export class App extends Component<{}, AppState> {
 
             <div className="flex w-fit items-center gap-2.5 rounded-full bg-field px-3.5 py-1.5 shadow-hairline">
 
-              {status === "Done" ? <CheckIcon className="size-3.5 text-green" strokeWidth={3} /> : null}
+              {status.startsWith("Done in ") ? <CheckIcon className="size-3.5 text-green" strokeWidth={3} /> : null}
 
               {/* the agent sends "Step 2 · Drafting"; splitting it lets the gap come from flex, not the glyph */}
               {status.split(" · ").map((part, index) => (
@@ -1275,7 +1393,7 @@ export class App extends Component<{}, AppState> {
 
                   {index > 0 ? <span className="text-[13px] text-ink-3">·</span> : null}
 
-                  <span className={cn( "text-[13px] font-medium", status === "Error" ? "text-red" : status === "Done" ? "text-green" : "text-ink-2", )} >
+                  <span className={cn( "text-[13px] font-medium", status === "Error" ? "text-red" : status.startsWith("Done in ") ? "text-green" : "text-ink-2", )} >
 
                     {part}
 
