@@ -189,7 +189,8 @@ function splitLead(lead: string): { thinking: string; label: string } {
   }
 
   const last = (lines[lines.length - 1] ?? "")
-    .replace(/^[-*>\s]+/, "")
+    .replace(/^[-*>#\s]+/, "")
+    .replace(/^\d+[.)]\s+/, "")
     .replace(/[*_`]/g, "")
     .replace(/[:.]\s*$/, "")
     .trim();
@@ -272,10 +273,17 @@ const GUIDE = `You are a coding agent. You work in a real repository and you fin
 
 ## Replying
 
-Above every block, one short line naming the step — the user reads it as that row's title.
-Then the block. Only blocks run; never describe an action instead of taking it. Put every
-block you already know you need in the same reply: they run top to bottom and stop at the
-first failure, and one reply of four blocks beats four replies of one.
+Every block gets a title line directly above it: three to six words naming that step. It
+becomes the label of that row in the transcript, and a block without one shows up unlabelled.
+This holds for every block in the reply — including the ones after a <say>, which does not
+title them. Only blocks run; never describe an action instead of taking it.
+
+Put every block you already know you need in the same reply: they run top to bottom and stop
+at the first failure, and one reply of four blocks beats four replies of one.
+
+  <say>
+  Tracing how deletion is wired before I add rename beside it.
+  </say>
 
   find both call sites
   <grep>

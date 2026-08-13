@@ -1027,9 +1027,25 @@ export class MiniAgent {
         }
 
         const skipped = actions.length - results.length;
+        const notes: string[] = [];
 
-        message = skipped > 0
-          ? `${formatResults(results)}\n\n[harness]\n${skipped} later ${skipped === 1 ? "block" : "blocks"} in that reply did not run. Send ${skipped === 1 ? "it" : "them"} again if still needed.`
+        if (skipped > 0) {
+
+          notes.push(`${skipped} later ${skipped === 1 ? "block" : "blocks"} in that reply did not run. Send ${skipped === 1 ? "it" : "them"} again if still needed.`);
+
+        }
+
+        // labels drift away first when a reply gets long; saying so costs a line and fixes the next one
+        const unlabelled = batch.filter((action) => !action.label && action.verb !== "say" && action.verb !== "done").length;
+
+        if (unlabelled) {
+
+          notes.push(`${unlabelled === 1 ? "A block" : `${unlabelled} blocks`} had no title line above ${unlabelled === 1 ? "it" : "them"}, so ${unlabelled === 1 ? "that row is" : "those rows are"} unlabelled for the user. Put three to six words on the line directly above every block.`);
+
+        }
+
+        message = notes.length
+          ? `${formatResults(results)}\n\n[harness]\n${notes.join("\n")}`
           : formatResults(results);
 
       }
