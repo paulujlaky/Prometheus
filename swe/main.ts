@@ -379,6 +379,20 @@ ipcMain.handle("chats:delete", async (_event, chatId: string) => {
 
 });
 
+ipcMain.handle("chats:rename", async (_event, chatId: string, name: string) => {
+
+  const trimmed = typeof name === "string" ? name.trim() : "";
+
+  if (!chatId || !trimmed) {
+
+    throw new Error("Chat id and name are required");
+
+  }
+
+  await getClient().renameChat(chatId, trimmed);
+
+});
+
 ipcMain.handle("chats:get", async (_event, chatId: string) => {
 
   const detail = await getClient().getChat(chatId);
@@ -509,6 +523,8 @@ ipcMain.handle("start", async (_event, options: {
     throw new Error("This session is already running");
   }
 
+  let notifyTitle = chatTitle(options.task.split(/\s+/).slice(0, 8).join(" "));
+
   const agent = new MiniAgent({
 
     client: getClient(),
@@ -524,10 +540,16 @@ ipcMain.handle("start", async (_event, options: {
         rememberChatId(event.chatId, options.cwd);
         rememberChatSettings(event.chatId, options.cwd, options.assistantId ?? null);
 
+        if (event.title.trim() && event.title.trim().toLowerCase() !== "new chat") {
+
+          notifyTitle = chatTitle(event.title);
+
+        }
+
       }
 
       send(options.runId, event);
-      if (event.type === "done") alertUser("Agent finished", "Your agent is done.");
+      if (event.type === "done") alertUser(notifyTitle, "Done.");
 
     },
 
@@ -549,7 +571,7 @@ ipcMain.handle("start", async (_event, options: {
 
         flushDeltas(options.runId);
         window?.webContents.send("approval", { runId: options.runId, id, command, reason });
-        alertUser("Agent needs approval", reason ?? command);
+        alertUser(notifyTitle, reason ?? command);
 
       });
 

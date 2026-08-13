@@ -4,29 +4,35 @@ import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { ChatSession } from "../sdk/index";
-import { parseToolCalls } from "../sdk/tools";
 
 import { estimateTokens } from "./lib/tokens";
-import { prepareCall, VERB_HELP, VERBS } from "./tools/dispatch";
+import { followUpPrompt, formatResults, NUDGE, parseActions, systemPrompt, type Action, type Result } from "./protocol";
+import { execute } from "./tools/dispatch";
+import { projectDoc, repoMap } from "./tools/fs";
 import { recordUsage } from "./usage";
 
 import type { BoodleClient } from "../sdk/client";
 
-const MAX_OBSERVATION = Number(process.env.SWE_MAX_OUTPUT ?? 16000);
+const MAX_OBSERVATION = Number(process.env.SWE_MAX_OUTPUT ?? 24000);
+
 /** Hard ceiling on a single command's captured output, so a runaway process cannot exhaust memory. */
 const MAX_RUN_BUFFER = Number(process.env.SWE_MAX_RUN_BUFFER ?? 2_000_000);
 const DEFAULT_MAX_STEPS = Number(process.env.SWE_MAX_STEPS ?? 100);
+
 /** Per-command wall clock (default 10 min). Override with SWE_CMD_TIMEOUT_MS. */
 const DEFAULT_CMD_TIMEOUT_MS = Number(process.env.SWE_CMD_TIMEOUT_MS ?? 600_000);
 
 const CWD_MARKER = "__SWE_CWD__";
 
-// a model that refuses the harness role usually keeps refusing; bail rather than burn the step budget
+// a model that will not emit a block usually keeps not emitting one; bail rather than burn the budget
 const MAX_MISSES = 3;
+
+// one reply may carry a batch, but a wall of blocks is a model that has stopped looking at results
+const MAX_ACTIONS_PER_TURN = 8;
 
 export type AgentEvent =
   | { type: "delta"; text: string }
-  /** Platform chain-of-thought (sectionType Reasoning) — not harness prose. */
+  /** Platform chain-of-thought (sectionType Reasoning). */
   | { type: "reasoning"; text: string }
   | { type: "assistant"; text: string; reasoning?: string }
   | { type: "command"; command: string }
@@ -36,7 +42,7 @@ export type AgentEvent =
   | { type: "session"; chatId: string; title: string }
   /** User message injected mid-loop (queued until the next model turn). */
   | { type: "interjection"; text: string }
-  | { type: "echo"; text: string }
+  | { type: "say"; text: string }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };
 
@@ -127,101 +133,6 @@ function toBashPath(p: string): string {
 
 }
 
-/** Clip a task for sticky re-anchors without blowing the context window. */
-function clipTask(task: string, max = 700): string {
-
-  const one = task.replace(/\s+/g, " ").trim();
-
-  if (one.length <= max) {
-
-    return one;
-
-  }
-
-  return `${one.slice(0, max - 1).trimEnd()}…`;
-
-}
-
-function prompt(cwd: string, task: string): string {
-
-  const tools = VERBS.map((verb) => `  ${verb} ${VERB_HELP[verb]}`).join("\n");
-
-  return [
-    "Coding agent. Think if needed, then emit one JSON object — that is the tool call:",
-    "{\"tool\":\"read\",\"label\":\"short title\",\"args\":{}}",
-    "",
-    tools,
-    "",
-    "Batch paths in one read. Prefer search/read/edit over run. edit.old is copied from a read.",
-    "Use echo often: short status for the user (plan, findings, what you are about to change). Do not stay silent between tool calls.",
-    `cwd: ${cwd}`,
-    `Task: ${task}`,
-
-  ].join("\n");
-
-}
-
-function followUpPrompt(cwd: string, task: string): string {
-
-  return `Continue. One JSON tool call. cwd: ${cwd}\nTask: ${task}`;
-
-}
-
-function observationMessage(opts: {
-
-  ok: boolean;
-  tool?: string;
-  cwd: string;
-  task?: string;
-  output?: string;
-  error?: string;
-  note?: string;
-  exit?: number;
-
-}): string {
-
-  const body: Record<string, unknown> = {
-
-    ok: opts.ok,
-    cwd: opts.cwd,
-    task: clipTask(opts.task ?? ""),
-
-  };
-
-  if (opts.tool) {
-
-    body.tool = opts.tool;
-
-  }
-
-  if (opts.exit != null) {
-
-    body.exit = opts.exit;
-
-  }
-
-  if (opts.output) {
-
-    body.output = truncate(opts.output);
-
-  }
-
-  if (opts.error) {
-
-    body.error = opts.error;
-
-  }
-
-  if (opts.note) {
-
-    body.note = opts.note;
-
-  }
-
-  return JSON.stringify(body);
-
-}
-
 /** Upload local files as Boodle knowledge items (images/docs). */
 async function uploadPaths(client: BoodleClient, paths: string[]): Promise<string[]> {
 
@@ -295,7 +206,7 @@ function stripCrlfNoise(text: string): string {
 
 }
 
-/** Keep exit/errors/tail; drop webpack asset dumps and CRLF warnings. */
+/** Keep exit/errors/tail; drop asset dumps and CRLF warnings. */
 function summarizeRun(output: string, exit: number, ms: number): string {
 
   const clean = stripCrlfNoise(output).trim();
@@ -328,33 +239,23 @@ function summarizeRun(output: string, exit: number, ms: number): string {
 
 }
 
-function truncate(text: string): string {
+function truncate(text: string, max = MAX_OBSERVATION): string {
 
-  if (text.length <= MAX_OBSERVATION) {
+  if (text.length <= max) {
 
     return text;
 
   }
 
-  const half = Math.floor(MAX_OBSERVATION / 2);
-  const cut = text.length - MAX_OBSERVATION;
+  const half = Math.floor(max / 2);
+  const dropped = text.length - max;
 
-  // loud, because a silently clipped middle is where the real error usually is
-  const notice = [
-    "",
-    "",
-    `===== ${cut} CHARACTERS CUT FROM THE MIDDLE OF THIS OUTPUT =====`,
-    "Do not re-read the same window. Narrow it: read with start/end for a specific line range, or search for a pattern to locate the right lines first.",
-    "",
-    "",
-  ].join("\n");
-
-  return `${text.slice(0, half)}${notice}${text.slice(-half)}`;
+  return `${text.slice(0, half)}\n\n... ${dropped} characters cut from the middle ...\n\n${text.slice(-half)}`;
 
 }
 
 /**
- * PATH prefixes for bundled tools (apply_patch, sg/ast-grep)
+ * PATH prefixes for bundled tools (sg/ast-grep)
 */
 export function wrapCommand(command: string, toolBins?: string): string {
 
@@ -366,17 +267,10 @@ export function wrapCommand(command: string, toolBins?: string): string {
 
 }
 
-/** Resolve dirs that contain apply_patch + node_modules/.bin (sg). */
+/** Resolve dirs that contain node_modules/.bin (sg). */
 export function resolveToolBinDirs(bundleDir: string): string[] {
 
   const dirs: string[] = [];
-  const applyDir = join(bundleDir, "bin");
-
-  if (existsSync(applyDir)) {
-
-    dirs.push(applyDir);
-
-  }
 
   // electron runs swe/dist/main.cjs → project root is ../..
   const rootCandidates = [
@@ -674,9 +568,6 @@ export class MiniAgent {
   private cwd = "";
   private toolPath = "";
 
-  /** Active user task — included on every observation. */
-  private task = "";
-
   /** Cumulative estimated tokens of everything sent + received this run (server keeps full history). */
   private tokensUsed = 0;
 
@@ -692,14 +583,13 @@ export class MiniAgent {
 
     // bun inlines __dirname; resolve tools relative to the running main bundle (swe/dist)
     const bundleDir = resolve(dirname(process.argv[1] ?? "."));
-    const bins = resolveToolBinDirs(bundleDir).map(toBashPath);
 
-    this.toolPath = bins.join(":");
+    this.toolPath = resolveToolBinDirs(bundleDir).map(toBashPath).join(":");
 
   }
 
   /**
-   * Queue a user message into the active loop. 
+   * Queue a user message into the active loop.
    */
   interject(text: string, imagePaths: string[] = []) {
 
@@ -751,7 +641,7 @@ export class MiniAgent {
 
   }
 
-  /** Fold any queued user notes into the next outbound message; attach new images first. */
+  /** Fold queued user notes into the next message as their own block; attach new images first. */
   private async applyInterjections(message: string): Promise<string> {
 
     if (!this.pending.length || !this.session) {
@@ -770,6 +660,7 @@ export class MiniAgent {
       if (item.imagePaths?.length) {
 
         const ids = await uploadPaths(this.options.client, item.imagePaths);
+
         await this.session.attachKnowledge(ids);
 
       }
@@ -788,31 +679,7 @@ export class MiniAgent {
 
     }
 
-    this.task = [this.task, ...notes].filter(Boolean).join("\n");
-    const note = notes.join("\n\n");
-
-    try {
-
-      const raw = JSON.parse(message) as Record<string, unknown>;
-
-      raw.note = note;
-      raw.task = clipTask(this.task);
-
-      return JSON.stringify(raw);
-
-    } catch {
-
-      return observationMessage({
-
-        ok: true,
-        cwd: this.cwd,
-        task: this.task,
-        output: message,
-        note,
-
-      });
-
-    }
+    return `${message}\n\n[user]\n${notes.join("\n\n")}`;
 
   }
 
@@ -826,16 +693,131 @@ export class MiniAgent {
 
   }
 
+  private async confirm(command: string): Promise<boolean> {
+
+    this.options.onEvent({ type: "status", text: "Waiting for approval" });
+
+    return this.options.approve(command);
+
+  }
+
+  /** One block: execute it, tell the UI, hand back what the model should see. */
+  private async runAction(action: Action, timeoutMs: number): Promise<Result | "done"> {
+
+    const { onEvent } = this.options;
+
+    onEvent({ type: "command", command: action.raw });
+
+    if (action.verb === "delete" && !(await this.confirm(`delete ${action.path || action.body.trim()}`))) {
+
+      const text = "The user declined that delete. Do something else.";
+
+      onEvent({ type: "observation", text, exitCode: 1 });
+
+      return { verb: "delete", ok: false, text };
+
+    }
+
+    let outcome;
+
+    try {
+
+      outcome = execute(action, this.cwd);
+
+    } catch (err) {
+
+      const text = err instanceof Error ? err.message : String(err);
+
+      onEvent({ type: "observation", text, exitCode: 1 });
+
+      return { verb: action.verb, ok: false, text };
+
+    }
+
+    if (outcome.kind === "done") {
+
+      if (this.pending.length) {
+
+        const text = "A new note from the user arrived before you finished. Read it below and address it first.";
+
+        onEvent({ type: "observation", text, exitCode: 1 });
+
+        return { verb: "done", ok: false, text };
+
+      }
+
+      onEvent({ type: "observation", text: outcome.summary, exitCode: 0 });
+      onEvent({ type: "done", summary: outcome.summary });
+
+      return "done";
+
+    }
+
+    if (outcome.kind === "say") {
+
+      // the say event settles its own row; a second observation would land on no open step
+      // and the renderer would invent an unlabelled one for it
+      onEvent({ type: "say", text: outcome.text });
+
+      return { verb: "say", ok: true, text: "shown to the user" };
+
+    }
+
+    if (outcome.kind === "result") {
+
+      const { result } = outcome;
+
+      onEvent({ type: "observation", text: result.text, exitCode: result.ok ? 0 : 1 });
+
+      return { ...result, text: truncate(result.text) };
+
+    }
+
+    if (!(await this.confirm(outcome.command))) {
+
+      const text = "The user declined that command. Do something else.";
+
+      onEvent({ type: "observation", text, exitCode: 1 });
+
+      return { verb: "run", ok: false, text };
+
+    }
+
+    onEvent({ type: "status", text: "Running" });
+
+    const started = Date.now();
+    const run = await runCommand(wrapCommand(outcome.command, this.toolPath), this.cwd, timeoutMs, (child) => {
+
+      this.child = child;
+
+    });
+
+    this.child = null;
+
+    const parsed = parseRun(run.output);
+    const text = summarizeRun(parsed.output, run.exitCode, Date.now() - started);
+
+    if (parsed.cwd && parsed.cwd !== this.cwd && existsSync(parsed.cwd)) {
+
+      this.cwd = parsed.cwd;
+
+    }
+
+    onEvent({ type: "observation", text, exitCode: run.exitCode });
+
+    return { verb: "run", ok: run.exitCode === 0, text: truncate(text) };
+
+  }
+
   async run(task: string, runOptions: AgentRunOptions = {}): Promise<void> {
 
-    const { client, onEvent, approve } = this.options;
+    const { client, onEvent } = this.options;
 
     const maxSteps = this.options.maxSteps ?? DEFAULT_MAX_STEPS;
     const timeoutMs = this.options.commandTimeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
 
     // forward slashes, because a backslash path in a bash prompt is a trap
     this.cwd = this.options.cwd.replaceAll("\\", "/");
-    this.task = task;
     this.tokensUsed = 0;
 
     const followUp = Boolean(runOptions.chatId);
@@ -864,20 +846,18 @@ export class MiniAgent {
 
       }
 
-      const session = followUp
-        ? await ChatSession.open(client, runOptions.chatId!, {
+      const session = followUp ? await ChatSession.open(client, runOptions.chatId!, {
 
-            assistantId: this.options.assistantId,
-            refreshOnComplete: false,
+        assistantId: this.options.assistantId,
+        refreshOnComplete: false,
 
-          })
-        : await ChatSession.create(client, {
+      }) : await ChatSession.create(client, {
 
-            assistantId: this.options.assistantId,
-            refreshOnComplete: false,
-            knowledgeIds: knowledgeIds.length ? knowledgeIds : undefined,
+        assistantId: this.options.assistantId,
+        refreshOnComplete: false,
+        knowledgeIds: knowledgeIds.length ? knowledgeIds : undefined,
 
-          });
+      });
 
       this.session = session;
 
@@ -899,8 +879,7 @@ export class MiniAgent {
 
       }
 
-      // history lives on the server, so each step only sends the new observation
-      // stream only answer deltas into the fence parser — reasoning is a separate channel
+      // history lives on the server, so each step only sends the new results
       this.session.on((event) => {
 
         if (event.type !== "stream") {
@@ -927,7 +906,9 @@ export class MiniAgent {
 
       });
 
-      let message = followUp ? followUpPrompt(this.cwd, task) : prompt(this.cwd, task);
+      const map = repoMap(this.cwd);
+
+      let message = followUp ? followUpPrompt(map, task) : systemPrompt(map, projectDoc(this.cwd), task);
       let misses = 0;
       let firstSend = true;
 
@@ -941,10 +922,9 @@ export class MiniAgent {
 
         }
 
-        // Thinking | Drafting | Running — default working state is Thinking
         const phase = (text: string) => onEvent({ type: "status", text: `Step ${step} · ${text}` });
 
-        // mid-loop user notes land here — after the prior command, before the next model turn
+        // mid-loop user notes land here — after the prior results, before the next model turn
         message = await this.applyInterjections(message);
 
         if (this.stopped) {
@@ -973,9 +953,7 @@ export class MiniAgent {
 
         // attach knowledgeIds only on the first user message of a new chat (createChat already linked them;
         // re-send is harmless; on follow-up we already attachKnowledge above)
-        const sendOpts = firstSend && knowledgeIds.length && !followUp
-          ? { knowledgeIds }
-          : {};
+        const sendOpts = firstSend && knowledgeIds.length && !followUp ? { knowledgeIds } : {};
 
         firstSend = false;
 
@@ -993,198 +971,66 @@ export class MiniAgent {
 
         this.noteTokens(turn.text + (turn.reasoning ?? ""), step);
         onEvent({ type: "assistant", text: turn.text, reasoning: turn.reasoning });
-        phase("Thinking");
+        phase("Working");
 
-        const call = parseToolCalls(turn.text)[0];
+        const { actions } = parseActions(turn.text);
 
-        if (!call) {
+        if (!actions.length) {
 
           misses += 1;
 
           if (misses >= MAX_MISSES) {
 
-            onEvent({ type: "error", message: `${misses} replies in a row were not a JSON tool call. Try a different model.` });
+            onEvent({ type: "error", message: `${misses} replies in a row carried no action block. Try a different model.` });
 
             return;
 
           }
 
-          message = observationMessage({
-
-            ok: false,
-            cwd: this.cwd,
-            task: this.task,
-            error: "Need one JSON object: {\"tool\",\"label\",\"args\"}.",
-
-          });
-
-          continue;
-
-        }
-
-        let exec;
-
-        try {
-
-          exec = prepareCall(call, this.cwd);
-
-        } catch (err) {
-
-          const reason = err instanceof Error ? err.message : String(err);
-
-          misses += 1;
-
-          // prepareCall runs the side effect (write/delete/edit) inline, so a throw here lands
-          // after the reply parse already opened a step row. Only an observation closes that row
-          // (renderer fills output+exitCode); without one it renders a label with a blank status.
-          onEvent({ type: "observation", text: reason, exitCode: 1 });
-
-          if (misses >= MAX_MISSES) {
-
-            onEvent({ type: "error", message: reason });
-
-            return;
-
-          }
-
-          message = observationMessage({
-
-            ok: false,
-            cwd: this.cwd,
-            task: this.task,
-            error: reason,
-
-          });
-
+          message = NUDGE;
           continue;
 
         }
 
         misses = 0;
 
-        const command = JSON.stringify({ tool: exec.tool, label: exec.label, args: call.args });
+        const results: Result[] = [];
+        const batch = actions.slice(0, MAX_ACTIONS_PER_TURN);
 
-        onEvent({ type: "command", command });
+        for (const action of batch) {
 
-        if (exec.kind === "done") {
+          const result = await this.runAction(action, timeoutMs);
 
-          if (this.pending.length) {
+          if (result === "done") {
 
-            message = await this.applyInterjections(observationMessage({
-
-              ok: false,
-              tool: "done",
-              cwd: this.cwd,
-              task: this.task,
-              error: `You were about to finish (${exec.summary}). A new user note arrived — address it first.`,
-
-            }));
-
-            continue;
+            return;
 
           }
 
-          onEvent({ type: "done", summary: exec.summary ?? exec.label });
+          results.push(result);
 
-          return;
+          if (this.stopped) {
 
-        }
+            onEvent({ type: "status", text: "Stopped" });
 
-        if (exec.kind === "echo") {
+            return;
 
-          onEvent({ type: "echo", text: exec.output ?? exec.label });
-          message = observationMessage({ ok: true, tool: exec.tool, cwd: this.cwd, task: this.task, output: "ok", exit: 0 });
-          continue;
+          }
 
-        }
+          // a failed block usually invalidates the ones behind it; let the model look before it leaps
+          if (!result.ok) {
 
-        const needsApproval = exec.kind === "run" || exec.tool === "delete";
-        const approvePayload = exec.command ?? command;
-
-        if (needsApproval) {
-
-          const waiting = setTimeout(() => phase("Thinking"), 40);
-          const ok = await approve(approvePayload);
-
-          clearTimeout(waiting);
-
-          if (!ok) {
-
-            message = observationMessage({
-
-              ok: false,
-              tool: exec.tool,
-              cwd: this.cwd,
-              task: this.task,
-              error: "User declined that action. Choose a different tool.",
-
-            });
-
-            continue;
+            break;
 
           }
 
         }
 
-        phase("Running");
+        const skipped = actions.length - results.length;
 
-        let output = exec.output ?? "";
-        let exitCode = exec.exit ?? 0;
-
-        if (exec.kind === "run" && exec.command) {
-
-          const started = Date.now();
-          const run = await runCommand(wrapCommand(exec.command, this.toolPath), this.cwd, timeoutMs, (child) => {
-
-            this.child = child;
-
-          });
-
-          this.child = null;
-
-          const parsed = parseRun(run.output);
-
-          output = summarizeRun(parsed.output, run.exitCode, Date.now() - started);
-          exitCode = run.exitCode;
-
-          if (parsed.cwd && parsed.cwd !== this.cwd && existsSync(parsed.cwd)) {
-
-            this.cwd = parsed.cwd;
-
-          }
-
-        }
-
-        if (this.stopped) {
-
-          onEvent({ type: "observation", text: output, exitCode });
-          onEvent({ type: "status", text: "Stopped" });
-
-          return;
-
-        }
-
-        onEvent({ type: "observation", text: output, exitCode });
-
-        let error: string | undefined;
-
-        if (exitCode !== 0 && exec.tool === "edit") {
-
-          error = "Some files failed (see FAILED lines). Re-read only those files and retry just them — do not rewrite via run.";
-
-        }
-
-        message = observationMessage({
-
-          ok: exitCode === 0,
-          tool: exec.tool,
-          cwd: this.cwd,
-          task: this.task,
-          output,
-          exit: exitCode,
-          error,
-
-        });
+        message = skipped > 0
+          ? `${formatResults(results)}\n\n[harness]\n${skipped} later ${skipped === 1 ? "block" : "blocks"} in that reply did not run. Send ${skipped === 1 ? "it" : "them"} again if still needed.`
+          : formatResults(results);
 
       }
 

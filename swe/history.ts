@@ -1,4 +1,5 @@
-import { extractCommand, extractFinishedSummary, extractTaskText, parseObservation, parseReply, type Tool } from "./parse";
+import { extractTaskText, parseReply, parseResults, type Tool } from "./parse";
+import { parseActions } from "./protocol";
 
 import { isAssistantMessage, isUserMessage } from "../sdk/messages";
 import { ResponseStream } from "../sdk/stream";
@@ -35,6 +36,8 @@ export type HistoryEntry =
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
 
+type Step = Extract<HistoryEntry, { kind: "step" }>;
+
 function assistantParts(message: Extract<ApiChatMessage, { type: "Assistant" }>, chatId: string): { text: string; reasoning: string } {
 
   const stream = ResponseStream.fromHistory(chatId, message.responses ?? [], {
@@ -53,8 +56,15 @@ function assistantParts(message: Extract<ApiChatMessage, { type: "Assistant" }>,
 
 }
 
+/** Rough gen-time from prose length, so a replayed row still shows "Thought for Ns". */
+function thoughtMsOf(thinking: string): number | null {
+
+  return thinking.trim() ? Math.max(1000, Math.round(thinking.length / 50) * 1000) : null;
+
+}
+
 /**
- * Rebuilds the mini-swe transcript from a Boodle chat detail.
+ * Rebuilds the transcript from a Boodle chat detail.
  */
 export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
@@ -65,95 +75,73 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
   let seq = 0;
   let sawTask = false;
 
-  let openStep: Extract<HistoryEntry, { kind: "step" }> | null = null;
+  // rows from the last reply that are still waiting for their result
+  let open: Step[] = [];
 
-  const push = (entry: WithoutId<HistoryEntry> & { id?: string }) => {
+  const push = (entry: WithoutId<HistoryEntry>): HistoryEntry => {
 
     seq += 1;
-    const full = { ...entry, id: entry.id ?? `h${seq}` } as HistoryEntry;
+
+    const full = { ...entry, id: `h${seq}` } as HistoryEntry;
+
     entries.push(full);
+
     return full;
 
   };
 
-  const pushDone = (summary: string) => {
-    push({ kind: "done", text: summary });
+  /** Pair a harness message with the rows it answers. Returns false when it is not one. */
+  const settle = (text: string): boolean => {
 
-  };
+    const results = parseResults(text);
 
-  const closeStep = (exitCode: number, output: string) => {
-
-    if (!openStep) {
-
-      // still surface a done marker if FINISHED arrived without a paired step
-      const summary = extractFinishedSummary(output);
-
-      if (summary) {
-
-        pushDone(summary);
-
-      }
-
-      return;
-
-    }
-
-    const command = openStep.command;
-    openStep.output = output;
-    openStep.exitCode = exitCode;
-
-    // stdout may be empty (Windows/bash echo quirks) while the fence was a correct finish echo —
-    // recover the summary from the command so reloads still show the terminal done row.
-    const summary = extractFinishedSummary(output)
-      ?? (command ? extractFinishedSummary(command) : null);
-
-    openStep = null;
-
-    if (summary) {
-
-      pushDone(summary);
-
-    }
-
-  };
-
-  /** Apply harness feedback (Exit code: …) whether it arrived as User or as next-turn submission. */
-  const applyHarnessText = (text: string): boolean => {
-
-    if (!text) {
+    if (!results.length) {
 
       return false;
 
     }
 
-    const observation = parseObservation(text);
+    results.forEach((result, index) => {
 
-    if (observation) {
+      const step = open[index];
 
-      closeStep(observation.exitCode, observation.output);
-      return true;
+      if (!step) {
 
-    }
-
-    // bare FINISHED line (rare, but tolerate)
-    const summary = extractFinishedSummary(text);
-
-    if (summary && !text.includes("You are a coding agent") && text.length < 500) {
-
-      if (openStep) {
-
-        openStep.output = text;
-        openStep.exitCode = 0;
-        openStep = null;
+        return;
 
       }
 
-      pushDone(summary);
-      return true;
+      step.output = result.output;
+      step.exitCode = result.exitCode;
+
+    });
+
+    // a block that never ran (the batch stopped, or the run ended) has no result to show
+    for (const step of open.slice(results.length)) {
+
+      step.output = "";
 
     }
 
-    return false;
+    open = [];
+
+    return true;
+
+  };
+
+  const closeStale = () => {
+
+    for (const step of open) {
+
+      if (step.output === null) {
+
+        step.output = "";
+
+      }
+
+    }
+
+    open = [];
 
   };
 
@@ -171,15 +159,61 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
           push({ kind: "task", text: task });
           sawTask = true;
-          continue;
 
         }
 
+        continue;
+
       }
 
-      if (applyHarnessText(text)) {
+      settle(text);
 
-        continue;
+      continue;
+
+    }
+
+    if (!isAssistantMessage(message)) {
+
+      continue;
+
+    }
+
+    const submission = (message.submission ?? "").trim();
+
+    if (!sawTask) {
+
+      const task = extractTaskText(submission);
+
+      if (task) {
+
+        push({ kind: "task", text: task });
+        sawTask = true;
+
+      }
+
+    } else if (submission) {
+
+      // the previous reply's results usually ride on this row rather than a User one
+      settle(submission);
+
+    }
+
+    const { text, reasoning } = assistantParts(message, chatId);
+
+    if (!text && !reasoning) {
+
+      continue;
+
+    }
+
+    const { thinking, actions } = parseActions(text);
+    const thought = reasoning || thinking;
+
+    if (!actions.length) {
+
+      if (thought) {
+
+        push({ kind: "step", tool: null, desc: "", thinking: thought, thoughtMs: thoughtMsOf(thought), command: null, output: "", exitCode: null, streaming: false });
 
       }
 
@@ -187,145 +221,46 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
     }
 
-    if (isAssistantMessage(message)) {
+    closeStale();
 
-      const submission = (message.submission ?? "").trim();
+    actions.forEach((action, index) => {
 
-      // previous step's observation is usually here, not on a User row
-      if (sawTask && applyHarnessText(submission)) {
+      const { tool, desc } = parseReply(action.raw);
 
-        // fall through to process this assistant's response as the next step
-      } else if (submission && !sawTask) {
+      // the reply's prose belongs to the first row it produced, not to every one of them
+      const own = index === 0 ? thought : "";
 
-        const task = extractTaskText(submission);
-
-        if (task) {
-
-          push({ kind: "task", text: task });
-          sawTask = true;
-
-        }
-
-      }
-
-      const { text, reasoning } = assistantParts(message, chatId);
-
-      if (!text && !reasoning) {
-
-        continue;
-
-      }
-
-      // model-only finish (no bash) — rare
-      const finishedOnly = extractFinishedSummary(text);
-
-      if (finishedOnly && !extractCommand(text)) {
-
-        pushDone(finishedOnly);
-        continue;
-
-      }
-
-      const { tool, desc, thinking: harnessThinking, command } = parseReply(text);
-      // prefer platform Reasoning section over harness prose between label and fence
-      const thinking = reasoning || harnessThinking;
-
-      // FINISHED echo is often itself a bash step: desc + echo MINI_SWE_FINISHED
-      if (command && extractFinishedSummary(command)) {
-
-        if (openStep && openStep.output === null) {
-
-          openStep.output = "";
-          openStep.exitCode = 0;
-          openStep = null;
-
-        }
-
-        openStep = push({
-
-          kind: "step",
-
-          tool: tool ?? "done",
-          desc: desc || "Finish",
-
-          thinking,
-          thoughtMs: thinking.trim() ? Math.max(1000, Math.round(thinking.length / 50) * 1000) : null,
-
-          command,
-          output: null,
-          exitCode: null,
-
-          streaming: false,
-
-        }) as (Extract<HistoryEntry, { kind: "step" }>);
-
-        continue;
-
-      }
-
-      if (!command && !desc && !thinking) {
-
-        continue;
-
-      }
-
-      // exitCode stays null: we never saw the result, so the row must not claim success
-      if (openStep && openStep.output === null) {
-
-        openStep.output = "<no observation stored>";
-        openStep = null;
-
-      }
-
-      openStep = push({
+      const step = push({
 
         kind: "step",
 
-        tool,
-        desc: desc || "Command",
+        tool: tool ?? action.verb,
+        desc,
 
-        thinking,
-        thoughtMs: thinking.trim() ? Math.max(1000, Math.round(thinking.length / 50) * 1000) : null,
+        thinking: own,
+        thoughtMs: thoughtMsOf(own),
 
-        command,
+        command: action.raw,
         output: null,
         exitCode: null,
 
         streaming: false,
 
-      }) as Extract<HistoryEntry, { kind: "step" }>;
+      }) as Step;
 
-    }
+      open.push(step);
 
-  }
+      if (action.verb === "done") {
 
-  if (openStep && openStep.output === null) {
+        push({ kind: "done", text: action.body.trim() || "Task complete." });
 
-    const summary = openStep.command ? extractFinishedSummary(openStep.command) : null;
+      }
 
-    // last step was the FINISHED echo itself (no observation stored yet)
-    if (summary) {
-
-      openStep.output = openStep.command ?? "";
-      openStep.exitCode = 0;
-      openStep = null;
-      pushDone(summary);
-
-    } else if (openStep.tool === "done") {
-
-      const fallback = extractFinishedSummary(openStep.command ?? "") || openStep.desc?.trim() || "Task complete.";
-      openStep.output = openStep.command ?? "";
-      openStep.exitCode = 0;
-      openStep = null;
-      pushDone(fallback);
-
-    } else {
-
-      openStep.output = "";
-
-    }
+    });
 
   }
+
+  closeStale();
 
   return entries;
 

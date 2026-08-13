@@ -1,5 +1,5 @@
 import { Component, createRef, type MouseEvent as ReactMouseEvent } from "react";
-import { EllipsisVerticalIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { EllipsisVerticalIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -33,6 +33,7 @@ interface SidebarProps {
   projectDir: string | null;
 
   onSelect: (chat: SweChat) => void;
+  onRename: (chat: SweChat, name: string) => void;
   onDelete: (chat: SweChat) => void;
   onNew: () => void;
 
@@ -41,6 +42,7 @@ interface SidebarProps {
 interface SidebarState {
 
   menu: ContextMenu | null;
+  renameValue: string | null;
   hovered: string | null;
   box: { top: number; height: number } | null;
 
@@ -222,32 +224,41 @@ function groupChats(chats: SweChat[], projectDir: string | null): ChatGroup[] {
 
 export class Sidebar extends Component<SidebarProps, SidebarState> {
 
-  state: SidebarState = { menu: null, hovered: null, box: null };
+  state: SidebarState = { menu: null, renameValue: null, hovered: null, box: null };
 
   private list = createRef<HTMLDivElement>();
+  private menu = createRef<HTMLDivElement>();
+  private renameInput = createRef<HTMLInputElement>();
 
   private rows = new Map<string, HTMLButtonElement>();
 
   componentDidMount() {
 
-    window.addEventListener("click", this.closeMenu);
-    window.addEventListener("scroll", this.closeMenu, true);
+    window.addEventListener("mousedown", this.onPointerDown, true);
+    window.addEventListener("scroll", this.onScroll, true);
     window.addEventListener("keydown", this.onKey);
 
     this.moveHighlight();
 
   }
 
-  componentDidUpdate() {
+  componentDidUpdate(_: SidebarProps, previousState: SidebarState) {
 
     this.moveHighlight();
+
+    if (this.state.renameValue !== null && previousState.renameValue === null) {
+
+      this.renameInput.current?.focus();
+      this.renameInput.current?.select();
+
+    }
 
   }
 
   componentWillUnmount() {
 
-    window.removeEventListener("click", this.closeMenu);
-    window.removeEventListener("scroll", this.closeMenu, true);
+    window.removeEventListener("mousedown", this.onPointerDown, true);
+    window.removeEventListener("scroll", this.onScroll, true);
     window.removeEventListener("keydown", this.onKey);
 
   }
@@ -286,7 +297,43 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
     if (this.state.menu) {
 
-      this.setState({ menu: null });
+      this.setState({ menu: null, renameValue: null });
+
+    }
+
+  };
+
+  /**
+   * Dismiss on a press that landed outside the menu. Asking the menu whether it contains the
+   * target beats relying on a stopPropagation deep in a React handler reaching window: the
+   * click that opened the menu, and the click on Rename inside it, both used to close it.
+   */
+  private onPointerDown = (event: Event) => {
+
+    if (!this.state.menu) {
+
+      return;
+
+    }
+
+    const target = event.target as Node | null;
+
+    if (target && this.menu.current?.contains(target)) {
+
+      return;
+
+    }
+
+    this.closeMenu();
+
+  };
+
+  /** Focusing the rename input can scroll an ancestor, and that must not read as a dismissal. */
+  private onScroll = () => {
+
+    if (this.state.renameValue === null) {
+
+      this.closeMenu();
 
     }
 
@@ -307,7 +354,46 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
     event.preventDefault();
     event.stopPropagation();
 
-    this.setState({ menu: { x: event.clientX, y: event.clientY, chat } });
+    this.setState({ menu: { x: event.clientX, y: event.clientY, chat }, renameValue: null });
+
+  };
+
+  private renameFromMenu = () => {
+
+    const { menu } = this.state;
+
+    if (!menu) {
+
+      return;
+
+    }
+
+    this.setState({ renameValue: displayTitle(menu.chat) });
+
+  };
+
+  private submitRename = () => {
+
+    const { menu, renameValue } = this.state;
+
+    if (!menu || renameValue === null) {
+
+      return;
+
+    }
+
+    const current = displayTitle(menu.chat);
+    const name = renameValue.trim();
+
+    this.setState({ menu: null, renameValue: null });
+
+    if (!name || name === current) {
+
+      return;
+
+    }
+
+    this.props.onRename(menu.chat, name);
 
   };
 
@@ -321,7 +407,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
     }
 
-    this.setState({ menu: null });
+    this.setState({ menu: null, renameValue: null });
     this.props.onDelete(menu.chat);
 
   };
@@ -523,6 +609,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
         {menu && (
 
           <div
+            ref={this.menu}
             className="fixed z-50 min-w-40 overflow-hidden rounded-card bg-surface p-1 text-[13.5px] shadow-overlay"
             style={{
 
@@ -533,9 +620,55 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
               transformOrigin: "top left",
 
             }}
-            onClick={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
           >
+
+            {this.state.renameValue === null ? (
+
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-chip px-2.5 py-2 text-left text-ink-2 transition-colors duration-100 hover:bg-hover"
+                onClick={this.renameFromMenu}
+              >
+
+                <PencilIcon className="size-4" />
+                Rename session
+
+              </button>
+
+            ) : (
+
+              <form
+                className="p-1"
+                onSubmit={(event) => {
+
+                  event.preventDefault();
+                  this.submitRename();
+
+                }}
+              >
+
+                <input
+                  ref={this.renameInput}
+                  value={this.state.renameValue}
+                  aria-label="Session name"
+                  className="h-8 w-full rounded-chip border border-line bg-field px-2 text-[13.5px] text-ink outline-none focus:border-brand"
+                  onChange={(event) => this.setState({ renameValue: event.target.value })}
+                  onKeyDown={(event) => {
+
+                    if (event.key === "Escape") {
+
+                      event.stopPropagation();
+                      this.closeMenu();
+
+                    }
+
+                  }}
+                />
+
+              </form>
+
+            )}
 
             <button
               type="button"

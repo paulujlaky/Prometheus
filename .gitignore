@@ -5,4 +5,7 @@ dist/
 .DS_Store
 _docs
 
+# a `>nul` redirect under Git Bash writes a real file instead of discarding
+nul
+
 CLAUDE.md

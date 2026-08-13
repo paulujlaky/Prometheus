@@ -32,6 +32,7 @@ interface SweBridge {
 
   listChats: (projectDir?: string | null) => Promise<SweChat[]>;
   deleteChat: (chatId: string) => Promise<void>;
+  renameChat: (chatId: string, name: string) => Promise<void>;
   getChat: (chatId: string) => Promise<{ id: string; name: string; title: string; project?: string | null; modelId?: string | null; entries: Entry[] }>;
   rememberChat: (chatId: string, projectDir?: string | null) => Promise<void>;
   claimChat: (chatId: string, projectDir: string) => Promise<void>;
@@ -294,6 +295,11 @@ export class App extends Component<{}, AppState> {
   private streamEntryId: string | null = null;
   private activeRunId: string | null = null;
 
+  /** Running agents keyed by their persisted chat ID. */
+  private runByChat = new Map<string, { runId: string; startedAt: number }>();
+  private chatByRun = new Map<string, string>();
+  private approvalsByRun = new Map<string, Approval>();
+
   private ensureStreamId(): string {
 
     if (this.streamEntryId == null) {
@@ -313,11 +319,20 @@ export class App extends Component<{}, AppState> {
     });
 
     window.swe.onApproval((approval) => {
+      this.approvalsByRun.set(approval.runId, approval);
       if (approval.runId === this.activeRunId) this.setState({ approval });
     });
 
     window.swe.onRunEnded(({ runId }) => {
-      if (runId === this.activeRunId) this.setState({ running: false, startedAt: null, approval: null, stream: null });
+      const chatId = this.chatByRun.get(runId);
+      if (chatId) this.runByChat.delete(chatId);
+      this.chatByRun.delete(runId);
+      this.approvalsByRun.delete(runId);
+
+      if (runId === this.activeRunId) {
+        this.activeRunId = null;
+        this.setState({ running: false, startedAt: null, approval: null, stream: null });
+      }
     });
 
     void this.refreshChats();
@@ -440,6 +455,15 @@ export class App extends Component<{}, AppState> {
 
       };
 
+      if (this.activeRunId) {
+        const run = {
+          runId: this.activeRunId,
+          startedAt: this.state.startedAt ?? Date.now(),
+        };
+        this.runByChat.set(event.chatId, run);
+        this.chatByRun.set(this.activeRunId, event.chatId);
+      }
+
       this.setState((prev) => ({
 
         activeChatId: event.chatId,
@@ -486,8 +510,8 @@ export class App extends Component<{}, AppState> {
 
         const stream = (prev.stream ?? "") + event.text;
 
-        // thinking ends when the JSON call (or a legacy fence) starts
-        if (this.thinkEndedAt == null && (/"tool"\s*:/.test(stream) || stream.includes("```"))) {
+        // thinking ends the moment the first action block opens
+        if (this.thinkEndedAt == null && parseReply(stream).tool !== null) {
 
           this.thinkEndedAt = Date.now();
 
@@ -564,7 +588,10 @@ export class App extends Component<{}, AppState> {
 
         }
 
-        return { entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "step", tool: null, desc: "", thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
+        // a later block in a batched reply: it carries its own label, so re-derive rather than blanking the row
+        const { tool, desc } = parseReply(event.command);
+
+        return { entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "step", tool, desc, thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
 
       });
 
@@ -592,9 +619,37 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    if (event.type === "echo") {
+    if (event.type === "say") {
 
-      this.setState((prev) => ({ entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "echo", text: event.text }] }));
+      this.setState((prev) => {
+
+        const last = prev.entries[prev.entries.length - 1];
+
+        // settle the streamed echo step in place so the label row is not left behind
+        if (last?.kind === "step" && last.output === null) {
+
+          return {
+
+            entries: [...prev.entries.slice(0, -1), {
+
+              ...last,
+
+              tool: last.tool ?? "say",
+              command: last.command ?? `<say>\n${event.text}\n</say>`,
+              output: event.text,
+              exitCode: 0,
+              streaming: false,
+
+            }],
+
+          };
+
+        }
+
+        return { entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "say", text: event.text }] };
+
+      });
+
       return;
 
     }
@@ -677,13 +732,7 @@ export class App extends Component<{}, AppState> {
   }
 
   private newSession = () => {
-
-    if (this.state.running) {
-
-      return;
-
-    }
-
+    this.activeRunId = null;
     this.seq = 0;
     this.streamEntryId = null;
     this.streamReasoning = "";
@@ -695,6 +744,8 @@ export class App extends Component<{}, AppState> {
       approval: null,
       tokensUsed: 0,
       activeChatId: null,
+      running: false,
+      startedAt: null,
       status: "Idle",
 
     });
@@ -702,13 +753,7 @@ export class App extends Component<{}, AppState> {
   };
 
   private selectChat = async (chat: SweChat) => {
-
-    if (this.state.running) {
-
-      return;
-
-    }
-
+    this.activeRunId = null;
     this.streamEntryId = null;
     this.streamReasoning = "";
     this.setState({
@@ -719,6 +764,8 @@ export class App extends Component<{}, AppState> {
       toggled: new Set(),
       approval: null,
       tokensUsed: 0,
+      running: false,
+      startedAt: null,
 
     });
 
@@ -751,6 +798,8 @@ export class App extends Component<{}, AppState> {
       const detail = await window.swe.getChat(chat.id);
       const entries = (detail.entries ?? []) as Entry[];
       const project = detail.project ?? chat.project ?? cwd ?? null;
+      const live = this.runByChat.get(detail.id);
+      this.activeRunId = live?.runId ?? null;
 
       // keep seq ahead of loaded ids so live steps don't collide
       this.seq = entries.length + 100;
@@ -762,7 +811,10 @@ export class App extends Component<{}, AppState> {
         entries,
         cwd: project,
         assistantId: detail.modelId ?? prev.assistantId,
-        status: "Idle",
+        running: Boolean(live),
+        startedAt: live?.startedAt ?? null,
+        approval: live ? this.approvalsByRun.get(live.runId) ?? null : null,
+        status: live ? "Working" : "Idle",
         chats: prev.chats.map((c) => (
           c.id === detail.id
             ? { ...c, title: detail.title || c.title, project, name: detail.name || c.name }
@@ -781,6 +833,28 @@ export class App extends Component<{}, AppState> {
       });
 
       this.push({ kind: "error", text: `Could not load session: ${err instanceof Error ? err.message : String(err)}` });
+
+    }
+
+  };
+
+  private renameChat = async (chat: SweChat, name: string) => {
+
+    try {
+
+      await window.swe.renameChat(chat.id, name);
+
+      this.setState((prev) => ({
+
+        chats: prev.chats.map((item) => (
+          item.id === chat.id ? { ...item, name, title: name } : item
+        )),
+
+      }));
+
+    } catch (err) {
+
+      this.push({ kind: "error", text: `Could not rename session: ${err instanceof Error ? err.message : String(err)}` });
 
     }
 
@@ -867,6 +941,12 @@ export class App extends Component<{}, AppState> {
 
     const runId = crypto.randomUUID();
     this.activeRunId = runId;
+
+    if (activeChatId) {
+      const live = { runId, startedAt: Date.now() };
+      this.runByChat.set(activeChatId, live);
+      this.chatByRun.set(runId, activeChatId);
+    }
 
     const model = assistants.find((a) => a.id === assistantId);
     const modelLabel = model ? displayName(model.name) : assistantId ?? undefined;
@@ -960,9 +1040,16 @@ export class App extends Component<{}, AppState> {
       this.push({ kind: "error", text: err instanceof Error ? err.message : String(err) });
 
     } finally {
+      if (this.activeRunId === runId) {
+        this.activeRunId = null;
+        this.streamEntryId = null;
+        this.setState({ running: false, startedAt: null, approval: null, stream: null });
+      }
 
-      this.streamEntryId = null;
-      this.setState({ running: false, startedAt: null, approval: null, stream: null });
+      const finishedChat = this.chatByRun.get(runId);
+      if (finishedChat) this.runByChat.delete(finishedChat);
+      this.chatByRun.delete(runId);
+      this.approvalsByRun.delete(runId);
       void this.refreshChats();
       void this.refreshUsage();
 
@@ -1008,6 +1095,7 @@ export class App extends Component<{}, AppState> {
           projectDir={cwd}
 
           onSelect={(chat) => void this.selectChat(chat)}
+          onRename={(chat, name) => void this.renameChat(chat, name)}
           onDelete={(chat) => void this.deleteChat(chat)}
           onNew={this.newSession}
 

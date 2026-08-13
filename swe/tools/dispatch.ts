@@ -1,341 +1,157 @@
-import type { ToolCall } from "../../sdk/types";
+import { applyEdit } from "./edit";
+import { deleteFiles, grep, listDir, parseReadSpec, readFiles, writeFile } from "./fs";
 
-import { firstString, filesOf, pathsOf } from "../parse";
-import { applyPatch, formatApplyReport } from "./apply_patch";
-import { deleteFiles, readFiles, searchFiles, writeFiles } from "./fs";
+import type { Action, Result, Verb } from "../protocol";
 
-export const VERBS = ["read", "search", "write", "edit", "delete", "run", "echo", "done"] as const;
+export type Outcome =
 
-export type Verb = (typeof VERBS)[number];
+  | { kind: "result"; result: Result }
+  | { kind: "run"; command: string }
+  | { kind: "say"; text: string }
+  | { kind: "done"; summary: string };
 
-/** Must stay in lockstep with VERBS — missing keys fail the typecheck. */
-export const VERB_HELP: { [K in Verb]: string } = {
+function bodyLines(action: Action): string[] {
 
-  read: "{paths:[file, …]}",
-  search: "{pattern, path?}",
-  write: "{path, content} or {files:[{path,content}]}",
-  edit: "{path, old, new}",
-  delete: "{paths:[file, …]}",
-  run: "{command}  — shell: build/test/git only",
-  echo: "{text}  — tell the user what you found or will do",
-  done: "{summary}",
-
-};
-
-export function advertisedTools(): string {
-
-  return VERBS.join("|");
+  return action.body.split("\n").map((line) => line.trim()).filter(Boolean);
 
 }
 
-export interface ToolExec {
+/** The target of a block, whether the model put it on the tag or on the first line. */
+function targetOf(action: Action): string {
 
-  tool: Verb;
-  label: string;
+  if (action.path) {
 
-  kind: "local" | "run" | "echo" | "done";
+    return action.path;
 
-  output?: string;
-  command?: string;
-  summary?: string;
-  exit?: number;
+  }
+
+  return bodyLines(action)[0] ?? "";
 
 }
 
-export function isVerb(name: string): name is Verb {
+const PATH_ONLY = /^[\w./@-]+\.\w+$/;
 
-  return (VERBS as readonly string[]).includes(name);
+/** `<edit>` with the path on its own first line instead of on the tag. */
+function splitLeadingPath(action: Action): { path: string; body: string } {
+
+  if (action.path) {
+
+    return { path: action.path, body: action.body };
+
+  }
+
+  const [first, ...rest] = action.body.split("\n");
+
+  if (PATH_ONLY.test(first.trim())) {
+
+    return { path: first.trim(), body: rest.join("\n") };
+
+  }
+
+  return { path: "", body: action.body };
 
 }
 
-export function defaultLabel(call: ToolCall): string {
+// reading through the shell loses line numbers and costs a whole turn; the real tools are better.
+// sed and awk stay allowed on purpose — a bulk transform is exactly what they are for, and a bad
+// one shows up in the next build, whereas banning them costs several turns of hand edits.
+const READERS = /^\s*(grep|rg|ag|ack|findstr|cat|type|head|tail|less|more|ls|dir|tree|find)\b/i;
 
-  if (call.label?.trim()) {
+export function execute(action: Action, cwd: string): Outcome {
 
-    return call.label.replace(/\s+/g, " ").trim().split(/\s+/).slice(0, 8).join(" ");
+  const ok = (verb: Verb, text: string): Outcome => ({ kind: "result", result: { verb, ok: true, text } });
 
-  }
+  if (action.verb === "say") {
 
-  const paths = pathsOf(call.args);
-  const files = filesOf(call.args);
-
-  if (files[0]) {
-
-    return files[0].path.split("/").pop() ?? call.tool;
+    return { kind: "say", text: action.body.trim() };
 
   }
 
-  if (paths[0]) {
+  if (action.verb === "done") {
 
-    return paths[0].split("/").pop() ?? call.tool;
-
-  }
-
-  const pattern = firstString(call.args, "pattern");
-
-  if (pattern) {
-
-    return pattern.slice(0, 40);
+    return { kind: "done", summary: action.body.trim() || "Task complete." };
 
   }
 
-  return call.tool;
+  if (action.verb === "run") {
 
-}
+    const command = action.body.trim();
 
-export function prepareCall(call: ToolCall, cwd: string): ToolExec {
+    if (!command) {
 
-  const tool = call.tool.toLowerCase();
-
-  if (!isVerb(tool)) {
-
-    throw new Error(`unknown tool "${call.tool}" — use ${VERBS.join("|")}`);
-
-  }
-
-  const label = defaultLabel({ ...call, tool });
-  const args = call.args;
-
-  if (tool === "read") {
-
-    return { tool, label, kind: "local", output: readFiles(cwd, pathsOf(args), rangeOf(args)) };
-
-  }
-
-  if (tool === "search") {
-
-    const pattern = firstString(args, "pattern") ?? "";
-    const path = firstString(args, "path") ?? firstString(args, "root") ?? ".";
-    const glob = firstString(args, "glob") ?? undefined;
-    const max = numberOf(args, "max") ?? 80;
-    const context = numberOf(args, "context") ?? 2;
-
-    return { tool, label, kind: "local", output: searchFiles(cwd, pattern, path, glob, max, context) };
-
-  }
-
-  if (tool === "write") {
-
-    return { tool, label, kind: "local", output: writeFiles(cwd, filesOf(args)) };
-
-  }
-
-  if (tool === "delete") {
-
-    return { tool, label, kind: "local", output: deleteFiles(cwd, pathsOf(args)) };
-
-  }
-
-  if (tool === "edit") {
-
-    const patch = patchFromArgs(args);
-
-    const report = applyPatch(patch, cwd);
-
-    return {
-
-      tool,
-      label,
-      kind: "local",
-      output: formatApplyReport(report),
-      exit: report.ok ? 0 : 1,
-
-    };
-
-  }
-
-  if (tool === "run") {
-
-    const command = firstString(args, "command");
-
-    if (!command?.trim()) {
-
-      throw new Error("run: args.command required");
+      throw new Error("run needs a command");
 
     }
 
-    return { tool, label, kind: "run", command };
+    if (READERS.test(command)) {
 
-  }
-
-  if (tool === "echo") {
-
-    const text = firstString(args, "text");
-
-    if (!text?.trim()) {
-
-      throw new Error("echo: args.text required");
+      throw new Error(`Use <read>, <grep> or <ls> to look at files — they give line numbers. <run> is for building, testing and git.`);
 
     }
 
-    return { tool, label, kind: "echo", output: text.trim() };
+    return { kind: "run", command };
 
   }
 
-  const summary = firstString(args, "summary") ?? pathsOf(args)[0] ?? label;
+  if (action.verb === "ls") {
 
-  return { tool: "done", label, kind: "done", summary: summary.trim() || "Task complete." };
-
-}
-
-/** Prefer {path,old,new} — JSON-safe. Still accepts a raw apply_patch string. */
-export function patchFromArgs(args: unknown): string {
-
-  const raw = firstString(args, "patch");
-
-  if (raw?.trim()) {
-
-    return raw;
+    return ok("ls", listDir(cwd, targetOf(action) || "."));
 
   }
 
-  const files = editFilesOf(args);
+  if (action.verb === "read") {
 
-  if (!files.length) {
+    const lines = bodyLines(action);
+    const specs = (lines.length ? lines : [action.path]).filter(Boolean).map(parseReadSpec);
 
-    throw new Error("edit: args.path + old/new (or args.files / args.patch) required");
+    return ok("read", readFiles(cwd, specs));
 
   }
 
-  const lines = ["*** Begin Patch"];
+  if (action.verb === "grep") {
 
-  for (const file of files) {
+    // every line is a pattern — a model searching for two symbols writes them on two lines
+    const patterns = bodyLines(action);
+    const where = action.path;
 
-    if (file.kind === "delete") {
+    const options = where.includes("*") ? { glob: where } : { path: where || "." };
 
-      lines.push(`*** Delete File: ${file.path}`);
-      continue;
+    return ok("grep", grep(cwd, patterns, options));
+
+  }
+
+  if (action.verb === "write") {
+
+    const { path, body } = splitLeadingPath(action);
+
+    if (!path) {
+
+      throw new Error("write needs a path on the tag: <write swe/file.ts>");
 
     }
 
-    if (file.kind === "add") {
-
-      lines.push(`*** Add File: ${file.path}`);
-
-      for (const line of file.body.split("\n")) {
-
-        lines.push(`+${line}`);
-
-      }
-
-      continue;
-
-    }
-
-    lines.push(`*** Update File: ${file.path}`);
-    lines.push("@@");
-
-    for (const line of file.old.split("\n")) {
-
-      lines.push(`-${line}`);
-
-    }
-
-    for (const line of file.next.split("\n")) {
-
-      lines.push(`+${line}`);
-
-    }
+    return ok("write", writeFile(cwd, path, body));
 
   }
 
-  lines.push("*** End Patch");
+  if (action.verb === "delete") {
 
-  return lines.join("\n");
+    const targets = action.path ? [action.path] : bodyLines(action);
 
-}
-
-export function editFilesOf(args: unknown): { path: string; kind: "update" | "add" | "delete"; old: string; next: string; body: string }[] {
-
-  if (Array.isArray(args)) {
-
-    return args.flatMap(editFilesOf);
+    return ok("delete", deleteFiles(cwd, targets));
 
   }
 
-  if (!args || typeof args !== "object") {
+  const { path, body } = splitLeadingPath(action);
 
-    return [];
+  if (!path) {
 
-  }
-
-  const obj = args as Record<string, unknown>;
-
-  if (Array.isArray(obj.files)) {
-
-    return obj.files.flatMap(editFilesOf);
+    throw new Error("edit needs a path on the tag: <edit swe/file.ts>");
 
   }
 
-  if (typeof obj.path !== "string") {
+  const report = applyEdit(cwd, path, body);
 
-    return [];
-
-  }
-
-  if (obj.delete === true) {
-
-    return [{ path: obj.path, kind: "delete", old: "", next: "", body: "" }];
-
-  }
-
-  const next = typeof obj.new === "string" ? obj.new : typeof obj.content === "string" ? obj.content : "";
-  const old = typeof obj.old === "string" ? obj.old : "";
-
-  if (!old && next) {
-
-    return [{ path: obj.path, kind: "add", old: "", next, body: next }];
-
-  }
-
-  if (old || next) {
-
-    return [{ path: obj.path, kind: "update", old, next, body: next }];
-
-  }
-
-  return [];
-
-}
-
-function rangeOf(args: unknown): { start?: number; end?: number } {
-
-  const start = numberOf(args, "start") ?? numberOf(args, "from") ?? numberOf(args, "offset");
-  const end = numberOf(args, "end") ?? numberOf(args, "to");
-  const limit = numberOf(args, "limit");
-
-  if (start != null && end == null && limit != null) {
-
-    return { start, end: start + limit - 1 };
-
-  }
-
-  return { start, end };
-
-}
-
-function numberOf(args: unknown, key: string): number | undefined {
-
-  if (!args || typeof args !== "object" || Array.isArray(args)) {
-
-    return undefined;
-
-  }
-
-  const value = (args as Record<string, unknown>)[key];
-
-  if (typeof value === "number" && Number.isFinite(value)) {
-
-    return Math.trunc(value);
-
-  }
-
-  if (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value))) {
-
-    return Math.trunc(Number(value));
-
-  }
-
-  return undefined;
+  return { kind: "result", result: { verb: "edit", ok: report.ok, text: report.text } };
 
 }

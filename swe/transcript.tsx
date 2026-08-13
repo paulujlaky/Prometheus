@@ -1,5 +1,5 @@
 import { Component, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, MessageSquareIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, WrenchIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, MessageSquareIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 
 import { UsageHeatmap, type UsageFile } from "@/comps/heatmap";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/scroller";
@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 
 import { Code, FileWriteView } from "./code";
 import { Md } from "./md";
-import { cleanSummary, fileEdits, inferTool, isDoneStep, parseReply, parseWrites, runCommandOf, summarizeCall, type FileEdit, type ParsedReply, type Tool } from "./parse";
+import { cleanSummary, sayTextOf, fileEdits, inferTool, isDoneStep, parseReply, parseWrites, runCommandOf, summarizeCall, type FileEdit, type ParsedReply, type Tool } from "./parse";
 
 export { cleanSummary, parseReply };
 export type { ParsedReply };
@@ -43,7 +43,7 @@ export interface Step {
 export type Entry =
   | Step
   | { id: string; kind: "task"; text: string; attachments?: string[] }
-  | { id: string; kind: "echo"; text: string }
+  | { id: string; kind: "say"; text: string }
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
 
@@ -102,10 +102,7 @@ export type StepStatus = "working" | "succeeded" | "failed" | "unknown";
  * Every settled step reports a status, so the trailing column never blinks in and out.
  * `unknown` is a replayed step whose observation was never stored.
 */
-export function stepStatus(
-  step: Pick<Step, "streaming" | "output" | "exitCode">,
-  opts: { pending?: boolean } = {},
-): StepStatus {
+export function stepStatus( step: Pick<Step, "streaming" | "output" | "exitCode">, opts: { pending?: boolean } = {}, ): StepStatus {
 
   const pending = opts.pending ?? true;
 
@@ -200,16 +197,14 @@ export function Working() {
 
 const TOOL_ICONS: Record<Tool, typeof FileTextIcon> = {
 
+  ls: FolderIcon,
   read: FileTextIcon,
-  search: SearchIcon,
+  grep: SearchIcon,
   write: FilePlus2Icon,
   edit: PencilLineIcon,
   delete: Trash2Icon,
   run: TerminalIcon,
-  echo: MessageSquareIcon,
-  test: CheckIcon,
-  fix: WrenchIcon,
-  think: SparklesIcon,
+  say: MessageSquareIcon,
   done: CheckIcon,
 
 };
@@ -328,6 +323,56 @@ class StepRow extends Component<StepRowProps, StepRowState> {
 
     }
 
+    const kind = step.tool ?? inferTool(step.command);
+
+    if (kind === "say") {
+
+      const text = sayTextOf(step.command) || (step.output?.trim() && step.output !== "ok" ? step.output.trim() : "");
+
+      return (
+
+        <>
+
+          {showThinking ? (
+
+            <ToolRow
+
+              icon={SparklesIcon}
+              working={thinkLive}
+
+              label={ thinkLive ? <span className="shimmer-label min-w-0 truncate text-[14px] font-medium">Thinking</span> : <span className="min-w-0 truncate text-[14px] font-medium text-ink-2">Thought for {seconds ?? 1}s</span> }
+
+              open={thinkOpen}
+              onToggle={() => this.setState((prev) => ({ thinkOpen: !prev.thinkOpen }))}
+
+            >
+
+              <Md className="text-[12.5px] leading-[1.7] text-ink-2">{thinking}</Md>
+
+            </ToolRow>
+
+          ) : null}
+
+          {text ? (
+
+            <div className="flex min-h-9 py-2 w-full items-center animate-tool-reveal">
+
+              <Md className="text-[14px] leading-normal text-ink">{text}</Md>
+
+            </div>
+
+          ) : working ? (
+
+            <Working />
+
+          ) : null}
+
+        </>
+
+      );
+
+    }
+
     const writes = step.command ? parseWrites(step.command) : [];
 
     let linesAdded = 0;
@@ -341,7 +386,6 @@ class StepRow extends Component<StepRowProps, StepRowState> {
     }
 
     const hasLineCounts = linesAdded > 0 || linesRemoved > 0;
-    const kind = step.tool ?? inferTool(step.command);
     const bash = runCommandOf(step.command, step.tool);
     const showDiff = kind === "edit" && writes.length > 0;
     const overview = !bash && !showDiff ? summarizeCall(step.command, step.tool) : "";
@@ -406,7 +450,7 @@ class StepRow extends Component<StepRowProps, StepRowState> {
 
         <ToolRow
 
-          icon={TOOL_ICONS[step.tool ?? inferTool(step.command)]}
+          icon={TOOL_ICONS[step.tool ?? inferTool(step.command) ?? "run"]}
           working={working}
 
           label={label}
@@ -661,7 +705,9 @@ function Verdict({ tone, icon, children }: { tone: "green" | "red"; icon: ReactN
 
       </span>
 
-      <div className="min-w-0 flex-1 pt-0.5">{children}</div>
+      {/* first child keeps its top margin at zero so the opening line stays level with the glyph,
+          and the list under it gets room so the sentence beside the icon can breathe */}
+      <div className="min-w-0 flex-1 pt-0.5 [&_ol:first-child]:mt-0 [&_p:first-child+ol]:mt-2.5 [&_p:first-child+ul]:mt-2.5 [&_p:first-child]:mt-0 [&_ul:first-child]:mt-0">{children}</div>
 
     </div>
 
@@ -689,6 +735,27 @@ interface TranscriptProps {
 /** Rows collapse into blocks: contiguous steps become one run, everything else stands alone. */
 type Block = { key: string; kind: "run"; steps: Step[] } | { key: string; kind: "entry"; entry: Exclude<Entry, Step> };
 
+function asSayStep(entry: Extract<Entry, { kind: "say" }>): Step {
+
+  return {
+
+    id: entry.id,
+    kind: "step",
+
+    tool: "say",
+    desc: "",
+    thinking: "",
+
+    command: `<say>\n${entry.text}\n</say>`,
+    output: entry.text,
+    exitCode: 0,
+
+    streaming: false,
+
+  };
+
+}
+
 function toBlocks(entries: Entry[]): Block[] {
 
   const blocks: Block[] = [];
@@ -701,23 +768,25 @@ function toBlocks(entries: Entry[]): Block[] {
 
     }
 
-    if (entry.kind !== "step") {
+    // echoes sit in the run (gap-1) so they line up with other tool calls
+    if (entry.kind === "say" || entry.kind === "step") {
 
-      blocks.push({ key: entry.id, kind: "entry", entry });
+      const step = entry.kind === "say" ? asSayStep(entry) : entry;
+      const last = blocks[blocks.length - 1];
+
+      if (last?.kind === "run") {
+
+        last.steps.push(step);
+        continue;
+
+      }
+
+      blocks.push({ key: `run-${step.id}`, kind: "run", steps: [step] });
       continue;
 
     }
 
-    const last = blocks[blocks.length - 1];
-
-    if (last?.kind === "run") {
-
-      last.steps.push(entry);
-      continue;
-
-    }
-
-    blocks.push({ key: `run-${entry.id}`, kind: "run", steps: [entry] });
+    blocks.push({ key: entry.id, kind: "entry", entry });
 
   }
 
@@ -772,7 +841,7 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
 
                     <TaskBubble text={block.entry.text} attachments={block.entry.attachments} />
 
-                  ) : block.entry.kind === "echo" ? (
+                  ) : block.entry.kind === "say" ? (
 
                     <div className="max-w-[42rem] animate-fade-up"><Md className="text-[14px] text-ink">{block.entry.text}</Md></div>
 
@@ -780,7 +849,7 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle }:
 
                     <Verdict tone="green" icon={<CheckIcon className="size-3.5" strokeWidth={3.5} />}>
 
-                      <Md className="text-[14px] text-ink">{cleanSummary(block.entry.text)}</Md>
+                      <Md className="max-w-[42rem] text-[14px] text-ink">{cleanSummary(block.entry.text)}</Md>
 
                     </Verdict>
 

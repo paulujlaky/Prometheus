@@ -106,8 +106,12 @@ export function Md({ children, className, inline }: { children: string; classNam
         "[&_p]:my-0 [&_p+p]:mt-2",
         "[&_strong]:font-semibold",
         "[&_code]:rounded [&_code]:bg-muted/60 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
-        "[&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-4",
-        "[&_ol]:my-1 [&_ol]:list-decimal [&_ol]:pl-4",
+        // marker sits flush with the paragraph above it; the negative indent keeps wrapped
+        // lines hanging under the text rather than under the bullet
+        "[&_ul]:my-1 [&_ul]:list-inside [&_ul]:list-disc [&_ul]:pl-0",
+        "[&_ol]:my-1 [&_ol]:list-inside [&_ol]:list-decimal [&_ol]:pl-0",
+        "[&_li]:pl-[1.35em] [&_li]:-indent-[1.35em]",
+        "[&_li_p]:inline [&_li>ul]:indent-0 [&_li>ol]:indent-0",
         "[&_a]:text-primary [&_a]:underline",
         className,
       )}

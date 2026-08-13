@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("swe", {
     ipcRenderer.invoke("chats:list", projectDir ?? null),
 
   deleteChat: (chatId: string): Promise<void> => ipcRenderer.invoke("chats:delete", chatId),
+  renameChat: (chatId: string, name: string): Promise<void> => ipcRenderer.invoke("chats:rename", chatId, name),
 
   getChat: (chatId: string): Promise<{
     id: string;

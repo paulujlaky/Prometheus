@@ -14,7 +14,9 @@ Be sure to set the full, required browser `Cookie` header. Otherwise, nothing wi
 
 ## Coding Agent (`swe/`)
 
-A [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent)–style loop in an Electron window. The model replies with **exactly one** `bash` block, the app runs it on your machine, and combined stdout/stderr plus the exit code go back as the next message. Bash is the entire tool surface, so it works with Boodlebox.
+An agent loop in an Electron window, built for models with **no native tool calling**. The model writes
+tagged blocks in plain text; the app runs them on your machine and posts the results back. No JSON, so
+nothing has to be escaped — the hardest thing a model has to get right is copying a line of code exactly.
 
 ### Run The Agent
 
@@ -28,19 +30,31 @@ That builds the renderer (Vite) and the process (Bun), then launches Electron.
 
 1. Choose a **working folder** (last path is remembered).
 2. Pick a **model** (grouped by provider) and an **approval mode**.
-3. Describe a task. Each reply opens with a one-word tool classifier plus a short label, then one bash block.
-4. The block is written to a temp script and executed with `bash` (or `SWE_SHELL`).
-5. Output is fed back; the loop continues until `MINI_SWE_FINISHED` appears in the output, or the step limit is hit.
+3. Describe a task. The system prompt ships a map of the repo — every file with its line count and
+   top-level symbols — plus your `CLAUDE.md` / `AGENTS.md` inline, so discovery and house style
+   both cost zero turns.
+4. Each reply is a line of intent plus one or more action blocks, which run in order.
+5. Results go back as `[verb ok]` / `[verb failed]`. The loop ends on `<done>` or the step limit.
 
-### Step Protocol
+### Protocol
 
-Every reply is exactly `<tool>: <≤8 word label>` followed by one ```bash block. The tool is parsed from a
-closed vocabulary and drives the icon and grouping in the transcript:
+```
+<ls>       list a directory: files, line counts, symbols
+<read>     whole files or a line range, always numbered
+<grep>     literal text or /regex/, grouped by file
+<edit>     @@ FIND / @@ REPLACE pairs against exact file text
+<write>    create or replace a file
+<delete>   remove files (asks first)
+<run>      shell: build, test, git (asks first)
+<say>      a line to the user
+<done>     final summary, ends the run
+```
 
-`read` · `search` · `write` · `edit` · `run` · `test` · `fix` · `think` · `done`
-
-Anything the model writes between the label and the fence is folded away as *Thought for Ns*. When a reply
-skips the classifier, the tool is inferred from the command itself (`apply_patch` → edit, `rg` → search, …).
+Blocks are forgiving where it costs nothing: verb synonyms (`list`, `search`, `bash`, `finish`) resolve,
+`<edit path="x">` and `<edit x>` are the same, an unclosed block still runs, and `<<<<<<< SEARCH` works
+wherever `@@ FIND` does. Edits match exactly first, then ignoring trailing space, then ignoring
+indentation — and a stale FIND comes back with the nearest real lines attached, so it is fixed in one
+turn instead of three. `swe/protocol.test.ts` pins all of it.
 
 ---
 
