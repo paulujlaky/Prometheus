@@ -1,4 +1,24 @@
-import type { AssistantSummary } from "../../sdk/types";
+import type { AssistantSummary, CustomModel } from "../../sdk/types";
+
+export const AGENT_MODEL_PREFIX = "agent:";
+
+export function agentModelId(llmId: string): string {
+
+  return `${AGENT_MODEL_PREFIX}${llmId}`;
+
+}
+
+export function isAgentModelId(id: string | null | undefined): boolean {
+
+  return Boolean(id && id.startsWith(AGENT_MODEL_PREFIX));
+
+}
+
+export function llmIdFromAgentModel(id: string): string {
+
+  return id.slice(AGENT_MODEL_PREFIX.length);
+
+}
 
 /** Major chat providers the picker surfaces, in display order. */
 const PROVIDERS = [
@@ -167,14 +187,94 @@ export function providerOf(assistant: AssistantSummary): Provider | null {
 export interface ProviderGroup {
 
   provider: Provider;
-  models: AssistantSummary[];
+  chat: AssistantSummary[];
+  agent: AssistantSummary[];
 
 }
 
-/** Keep only major-provider chat models, grouped for the submenu picker. */
+function sortByName(models: AssistantSummary[]): AssistantSummary[] {
+
+  return models.slice().sort((a, b) => a.name.localeCompare(b.name));
+
+}
+
+function isCatalogChat(assistant: AssistantSummary): boolean {
+
+  if (assistant.kind === "agent") {
+
+    return false;
+
+  }
+
+  if (assistant.assistantType && assistant.assistantType !== "SystemCreated") {
+
+    return false;
+
+  }
+
+  if (/^Boombox Agent\b/i.test(assistant.name)) {
+
+    return false;
+
+  }
+
+  return true;
+
+}
+
+/** Catalog chat models plus custom-bot (agent-native) rows, tagged for the picker. */
+export function mergeModelLists(assistants: AssistantSummary[], custom: CustomModel[]): AssistantSummary[] {
+
+  const chat = assistants.filter(isCatalogChat).map((assistant) => ({
+
+    ...assistant,
+    kind: "chat" as const,
+
+  }));
+
+  const seen = new Set(chat.map((assistant) => assistant.id));
+  const agent: AssistantSummary[] = [];
+
+  for (const model of custom) {
+
+    const id = agentModelId(model.id);
+
+    if (seen.has(id)) {
+
+      continue;
+
+    }
+
+    seen.add(id);
+
+    agent.push({
+
+      id,
+      name: model.name,
+
+      kind: "agent",
+
+      api: model.api,
+      model: model.model,
+
+      contextLength: model.contextLength,
+      maxTokens: model.maxTokens,
+
+      premiumCategory: model.premiumCategory,
+
+    });
+
+  }
+
+  return [...chat, ...agent];
+
+}
+
+/** Keep only major-provider models, grouped for the submenu picker. */
 export function groupAssistants(assistants: AssistantSummary[]): ProviderGroup[] {
 
-  const buckets = new Map<Provider, AssistantSummary[]>();
+  const chatBuckets = new Map<Provider, AssistantSummary[]>();
+  const agentBuckets = new Map<Provider, AssistantSummary[]>();
 
   for (const assistant of assistants) {
 
@@ -186,17 +286,19 @@ export function groupAssistants(assistants: AssistantSummary[]): ProviderGroup[]
 
     }
 
+    const buckets = assistant.kind === "agent" ? agentBuckets : chatBuckets;
     const list = buckets.get(provider) ?? [];
     list.push(assistant);
     buckets.set(provider, list);
 
   }
 
-  return PROVIDERS.filter((provider) => buckets.has(provider)).map((provider) => ({
+  return PROVIDERS.filter((provider) => chatBuckets.has(provider) || agentBuckets.has(provider)).map((provider) => ({
 
-      provider,
-      models: (buckets.get(provider) ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    provider,
+    chat: sortByName(chatBuckets.get(provider) ?? []),
+    agent: sortByName(agentBuckets.get(provider) ?? []),
 
-    }));
+  }));
 
 }

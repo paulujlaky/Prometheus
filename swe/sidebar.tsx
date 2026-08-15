@@ -1,5 +1,5 @@
 import { Component, createRef, type MouseEvent as ReactMouseEvent } from "react";
-import { EllipsisVerticalIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { EllipsisVerticalIcon, PencilIcon, PlusIcon, SettingsIcon, Trash2Icon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -12,6 +12,12 @@ export interface SweChat {
 
   /** Normalized project root when known; null/undefined = unassigned. */
   project?: string | null;
+
+  /** Chat that spawned this row; set only while a subagent is running. */
+  parentId?: string | null;
+
+  /** A live subagent, not a real chat — it has no id on the server and vanishes when the child ends. */
+  subagent?: boolean;
 
 }
 
@@ -32,10 +38,14 @@ interface SidebarProps {
   /** Active project folder (absolute). Null when none chosen — used to order/highlight that group. */
   projectDir: string | null;
 
+  /** Chats with a live agent loop — marks a row the user has switched away from. */
+  runningIds?: string[];
+
   onSelect: (chat: SweChat) => void;
   onRename: (chat: SweChat, name: string) => void;
   onDelete: (chat: SweChat) => void;
   onNew: () => void;
+  onOpenSettings: () => void;
 
 }
 
@@ -128,6 +138,63 @@ function folderLabel(path: string): string {
 
 }
 
+/** Live subagents ride directly under the chat that spawned them, in the order they started. */
+function nestSubagents(list: SweChat[]): SweChat[] {
+
+  const kids = new Map<string, SweChat[]>();
+  const rest: SweChat[] = [];
+
+  for (const chat of list) {
+
+    if (!chat.subagent) {
+
+      rest.push(chat);
+      continue;
+
+    }
+
+    const key = chat.parentId ?? "";
+    const group = kids.get(key);
+
+    if (group) {
+
+      group.push(chat);
+
+    } else {
+
+      kids.set(key, [chat]);
+
+    }
+
+  }
+
+  const out: SweChat[] = [];
+
+  for (const chat of rest) {
+
+    out.push(chat);
+
+    for (const kid of kids.get(chat.id) ?? []) {
+
+      out.push(kid);
+
+    }
+
+    kids.delete(chat.id);
+
+  }
+
+  // a run that has not been saved yet has no parent row to sit under, and losing the row is worse
+  for (const orphans of kids.values()) {
+
+    out.push(...orphans);
+
+  }
+
+  return out;
+
+}
+
 interface ChatGroup {
 
   key: string;
@@ -138,7 +205,7 @@ interface ChatGroup {
 
 }
 
-/** Group every project’s sessions; active project first, Unknown last. */
+/** Group every project’s sessions by recency of their latest chat. Unknown last. */
 function groupChats(chats: SweChat[], projectDir: string | null): ChatGroup[] {
 
   const buckets = new Map<string, SweChat[]>();
@@ -160,36 +227,29 @@ function groupChats(chats: SweChat[], projectDir: string | null): ChatGroup[] {
 
   }
 
-  for (const list of buckets.values()) {
+  for (const [key, list] of buckets) {
 
     list.sort((a, b) => b.modified - a.modified);
+
+    buckets.set(key, nestSubagents(list));
 
   }
 
   const active = normalizeDir(projectDir);
   const groups: ChatGroup[] = [];
 
-  if (active && buckets.has(active)) {
+  const known = [...buckets.entries()].filter(([key]) => key !== "");
 
-    groups.push({
+  // opening a chat must not reshuffle groups — only a newer modified time does
+  known.sort((a, b) => {
 
-      key: active,
-      label: folderLabel(active),
-      title: active,
-      chats: buckets.get(active)!,
-      current: true,
+    const delta = (b[1][0]?.modified ?? 0) - (a[1][0]?.modified ?? 0);
 
-    });
+    return delta !== 0 ? delta : folderLabel(a[0]).localeCompare(folderLabel(b[0]));
 
-    buckets.delete(active);
+  });
 
-  }
-
-  const others = [...buckets.entries()]
-    .filter(([key]) => key !== "")
-    .sort((a, b) => folderLabel(a[0]).localeCompare(folderLabel(b[0])));
-
-  for (const [key, list] of others) {
+  for (const [key, list] of known) {
 
     groups.push({
 
@@ -197,7 +257,7 @@ function groupChats(chats: SweChat[], projectDir: string | null): ChatGroup[] {
       label: folderLabel(key),
       title: key,
       chats: list,
-      current: false,
+      current: key === active,
 
     });
 
@@ -426,14 +486,34 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
   };
 
+  /** Not a button: there is no chat to open, and it must not steal the hover pill from real rows. */
+  private renderSubagentRow = (chat: SweChat) => {
+
+    return (
+
+      <div key={chat.id} className="relative z-10 flex w-full items-center gap-2 py-1.5 pl-6 pr-2" title={chat.title}>
+
+        <span className="size-1.5 shrink-0 rounded-full bg-ink" style={{ animation: "pixel-on 1200ms ease-in-out infinite" }} />
+
+        <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">{chat.title}</span>
+
+      </div>
+
+    );
+
+  };
+
   private renderChatRow = (chat: SweChat) => {
 
-    const { activeId, onSelect } = this.props;
+    const { activeId, onSelect, runningIds } = this.props;
     const { menu } = this.state;
 
     const active = chat.id === activeId;
     const hovered = this.state.hovered === chat.id;
     const menuFor = menu?.chat.id === chat.id;
+
+    // the slot holds one thing: the options button whenever it is reachable, the pulse otherwise
+    const away = Boolean(runningIds?.includes(chat.id)) && !active && !hovered && !menuFor;
 
     return (
 
@@ -473,11 +553,19 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
           onContextMenu={(event) => this.onContextMenu(event, chat)}
           className={cn(
             "flex size-6 shrink-0 items-center justify-center self-center rounded-chip text-ink-3 transition-[opacity,color,background-color] duration-150 hover:bg-hover hover:text-ink-2",
-            hovered || active || menuFor ? "opacity-100" : "opacity-0",
+            hovered || active || menuFor || away ? "opacity-100" : "opacity-0",
           )}
         >
 
-          <EllipsisVerticalIcon className="size-4" />
+          {away ? (
+
+            <span className="size-1.5 rounded-full bg-ink" style={{ animation: "pixel-on 1200ms ease-in-out infinite" }} title="Still running" />
+
+          ) : (
+
+            <EllipsisVerticalIcon className="size-4" />
+
+          )}
 
         </span>
 
@@ -511,11 +599,11 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
           </span>
 
-          <span className="shrink-0 text-[11px] tabular-nums text-ink-3/80">{group.chats.length}</span>
+          <span className="shrink-0 text-[11px] tabular-nums text-ink-3/80">{group.chats.filter((chat) => !chat.subagent).length}</span>
 
         </div>
 
-        {group.chats.map((chat) => this.renderChatRow(chat))}
+        {group.chats.map((chat) => (chat.subagent ? this.renderSubagentRow(chat) : this.renderChatRow(chat)))}
 
       </div>
 
@@ -525,7 +613,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
   render() {
 
-    const { chats, loading, onNew, projectDir } = this.props;
+    const { chats, loading, onNew, onOpenSettings, projectDir } = this.props;
     const { menu, box } = this.state;
 
     const groups = groupChats(chats, projectDir);
@@ -605,6 +693,18 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
           </div>
 
         </div>
+
+        {/* pinned below the scroller, so a long session list never pushes it out of reach */}
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="flex w-full shrink-0 items-center gap-2 rounded-control px-2.5 py-2 text-[13.5px] text-ink-2 transition-colors duration-100 bg-surface hover:bg-hover hover:text-ink"
+        >
+
+          <SettingsIcon className="size-4 text-ink-3" />
+          <span className="min-w-0 flex-1 truncate text-left">Settings</span>
+
+        </button>
 
         {menu && (
 

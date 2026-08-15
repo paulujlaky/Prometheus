@@ -9,8 +9,10 @@ import type {
   ContinueChatResponse,
   CreateChatOptions,
   CreateChatResponse,
+  CustomBotGroup,
   CustomModel,
   KnowledgeFolderTree,
+  ProvisionedAgentBot,
   KnowledgeItem,
   KnowledgeListResponse,
   KnowledgeUploadInit,
@@ -107,6 +109,12 @@ export class BoodleClient {
     const likelyEmpty = (c: Chat) => {
 
       const name = (c.name ?? "").trim().toLowerCase();
+
+      if (c.chatType && c.chatType !== "Private") {
+
+        return false;
+
+      }
 
       if (name === "new chat" || name === "") {
 
@@ -458,11 +466,84 @@ export class BoodleClient {
         contextLength: typeof llm?.contextLength === "number" ? llm.contextLength : undefined,
         maxTokens: typeof llm?.maxTokens === "number" ? llm.maxTokens : undefined,
 
+        premiumCategory: typeof llm?.premiumCategory === "string" ? llm.premiumCategory : undefined,
+
       });
 
     }
 
     return out;
+
+  }
+
+  async createCustomBot(body: {
+    name: string;
+    modelId: string;
+    instructions?: string | null;
+    description?: string;
+    welcome?: string | null;
+    allowRemix?: boolean;
+  }): Promise<CustomBotGroup> {
+
+    return this.requestJson<CustomBotGroup>("POST", "/assistant/custom/draft", {
+
+      allowRemix: body.allowRemix ?? false,
+      description: body.description ?? "",
+      instructions: body.instructions ?? null,
+      modelId: body.modelId,
+      name: body.name,
+      welcome: body.welcome ?? null,
+
+    });
+
+  }
+
+  async listCustomBotDrafts(limit = 50, offset = 0): Promise<{ total: number; entries: CustomBotGroup[] }> {
+
+    return this.requestJson("GET", `/assistant/custom/drafts?limit=${limit}&offset=${offset}`);
+
+  }
+
+  async publishCustomBot(draftId: string): Promise<CustomBotGroup> {
+
+    return this.requestJson<CustomBotGroup>("POST", `/assistant/custom/draft/${draftId}/publish`);
+
+  }
+
+  async deleteCustomBot(draftId: string): Promise<void> {
+
+    await this.request("DELETE", `/assistant/custom/draft/${draftId}`);
+
+  }
+
+  /**
+   * Mint a published custom bot for this LLM so `instructions` become the system prompt.
+   * One bot per call — shared bots would clobber instructions across chats.
+   */
+  async provisionAgentBot(options: { llmId: string; modelName: string; instructions: string }): Promise<ProvisionedAgentBot> {
+
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const name = `Boombox Agent · ${options.modelName} · ${suffix}`;
+
+    const created = await this.createCustomBot({
+
+      name,
+      modelId: options.llmId,
+      instructions: options.instructions,
+      description: "Boombox SWE agent",
+
+    });
+
+    const published = await this.publishCustomBot(created.draft.id);
+    const assistantId = published.published?.id;
+
+    if (!assistantId) {
+
+      throw new Error("Custom bot published without an assistant id");
+
+    }
+
+    return { draftId: created.draft.id, assistantId };
 
   }
 
@@ -628,6 +709,8 @@ function flattenAssistants(raw: unknown): AssistantSummary[] {
 
           id: obj.id,
           name: obj.name,
+
+          kind: "chat",
 
           alias: typeof obj.alias === "string" ? obj.alias : undefined,
           avatarUrl: typeof obj.avatarUrl === "string" ? obj.avatarUrl : typeof llm?.avatarUrl === "string" ? llm.avatarUrl : undefined,

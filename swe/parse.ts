@@ -88,6 +88,14 @@ function describe(action: Action): string {
 
   }
 
+  if (action.verb === "spawn") {
+
+    const count = bodyLines(action).length;
+
+    return count === 1 ? "1 subagent" : `${count} subagents`;
+
+  }
+
   if (action.verb === "say" || action.verb === "done") {
 
     return "";
@@ -236,6 +244,12 @@ export function summarizeCall(command: string | null, tool: Tool | null): string
   if (action.verb === "ls") {
 
     return `ls ${action.path || bodyLines(action)[0] || "."}`;
+
+  }
+
+  if (action.verb === "spawn") {
+
+    return bodyLines(action).join("\n");
 
   }
 

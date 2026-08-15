@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { BUILTIN_CMD_TIMEOUT_MS, BUILTIN_MAX_STEPS, clamp, CMD_TIMEOUT_RANGE, MAX_STEPS_RANGE, type Preferences } from "./lib/prefs";
+
+export { CMD_TIMEOUT_RANGE, MAX_STEPS_RANGE, type Preferences };
+
 /** App data root under the user profile (`~/.bbx`). */
 export const BBX_DIR = join(homedir(), ".bbx");
 
@@ -10,16 +14,27 @@ const SETTINGS_PATH = join(BBX_DIR, "settings.json");
 /** Chats created before project mapping — shown until triaged or claimed. */
 export const UNASSIGNED_PROJECT = "";
 
+/**
+ * What an unset preference resolves to. The env vars keep working for anyone who sets
+ * them today — a stored value only wins once the user has actually chosen one, so a
+ * fresh settings file cannot change how existing runs behave.
+ */
+export const FALLBACK_MAX_STEPS = Number(process.env.SWE_MAX_STEPS ?? BUILTIN_MAX_STEPS);
+export const FALLBACK_CMD_TIMEOUT_MS = Number(process.env.SWE_CMD_TIMEOUT_MS ?? BUILTIN_CMD_TIMEOUT_MS);
+
 export interface Settings {
 
   /** Frequently opened project roots, persisted in ~/.bbx/settings.json. */
   recentProjects?: { dir: string; count: number }[];
 
+  /** Settings-panel choices. Partial on disk; {@link loadPreferences} fills the gaps. */
+  prefs?: Partial<Preferences>;
+
   /** @deprecated Working directories now belong to individual chats. */
   cwd?: string | null;
 
   /** Per-chat working directory and selected model. */
-  chats?: Record<string, { dir?: string | null; modelId?: string | null }>;
+  chats?: Record<string, { dir?: string | null; modelId?: string | null; botAssistantId?: string | null }>;
 
   /**
    * @deprecated Flat list from pre-project builds. Migrated into `projectChats`
@@ -38,6 +53,47 @@ export interface Settings {
 export interface RecentProject {
   dir: string;
   count: number;
+}
+
+/** Stored preferences with every gap filled — safe to read straight into a run. */
+export function loadPreferences(): Preferences {
+
+  const stored = loadSettings().prefs ?? {};
+
+  return {
+
+    defaultModelId: typeof stored.defaultModelId === "string" && stored.defaultModelId
+      ? stored.defaultModelId
+      : null,
+
+    maxSteps: clamp(stored.maxSteps, MAX_STEPS_RANGE, FALLBACK_MAX_STEPS),
+    commandTimeoutMs: clamp(stored.commandTimeoutMs, CMD_TIMEOUT_RANGE, FALLBACK_CMD_TIMEOUT_MS),
+
+  };
+
+}
+
+/** Merge a patch over what is stored, then hand back the resolved set. */
+export function savePreferences(patch: Partial<Preferences>): Preferences {
+
+  const prefs: Partial<Preferences> = { ...(loadSettings().prefs ?? {}), ...patch };
+
+  if (prefs.maxSteps !== undefined) {
+
+    prefs.maxSteps = clamp(prefs.maxSteps, MAX_STEPS_RANGE, FALLBACK_MAX_STEPS);
+
+  }
+
+  if (prefs.commandTimeoutMs !== undefined) {
+
+    prefs.commandTimeoutMs = clamp(prefs.commandTimeoutMs, CMD_TIMEOUT_RANGE, FALLBACK_CMD_TIMEOUT_MS);
+
+  }
+
+  saveSettings({ prefs });
+
+  return loadPreferences();
+
 }
 
 /** Return up to ten projects, ordered by descending open count. */
@@ -300,7 +356,7 @@ export function loadChatIdsForProject(projectDir: string | null | undefined): st
  * Bind a chat to a project (or unassigned). Moves the id if it already lived
  * under another project. Newest first, capped per project.
  */
-export function rememberChatId(chatId: string, projectDir?: string | null): void {
+export function rememberChatId(chatId: string, projectDir?: string | null, bump = true): void {
 
   if (!chatId) {
 
@@ -312,6 +368,23 @@ export function rememberChatId(chatId: string, projectDir?: string | null): void
   const key = projectDir == null || projectDir === ""
     ? UNASSIGNED_PROJECT
     : normalizeProjectPath(projectDir);
+
+  const here = map[key] ?? [];
+
+  if (here.includes(chatId)) {
+
+    if (!bump) {
+
+      return;
+
+    }
+
+    map[key] = [chatId, ...here.filter((id) => id !== chatId)].slice(0, 80);
+    saveSettings({ projectChats: map, chatIds: [] });
+
+    return;
+
+  }
 
   // strip from every bucket first so renames do not duplicate
   for (const [proj, ids] of Object.entries(map)) {
@@ -330,15 +403,15 @@ export function rememberChatId(chatId: string, projectDir?: string | null): void
 
   }
 
-  const list = [chatId, ...(map[key] ?? []).filter((id) => id !== chatId)].slice(0, 80);
-  map[key] = list;
+  const rest = (map[key] ?? []).filter((id) => id !== chatId);
+  map[key] = (bump ? [chatId, ...rest] : [...rest, chatId]).slice(0, 80);
 
   saveSettings({ projectChats: map, chatIds: [] });
 
 }
 
 /** Persist metadata that must be restored with a specific chat. */
-export function rememberChatSettings(chatId: string, dir?: string | null, modelId?: string | null): void {
+export function rememberChatSettings(chatId: string, dir?: string | null, modelId?: string | null, botAssistantId?: string | null): void {
 
   if (!chatId) return;
 
@@ -350,19 +423,21 @@ export function rememberChatSettings(chatId: string, dir?: string | null, modelI
     ...previous,
     ...(dir !== undefined ? { dir: dir ? normalizeProjectPath(dir) : null } : {}),
     ...(modelId !== undefined ? { modelId: modelId || null } : {}),
+    ...(botAssistantId !== undefined ? { botAssistantId: botAssistantId || null } : {}),
   };
 
   saveSettings({ chats });
 
 }
 
-export function settingsForChat(chatId: string): { dir: string | null; modelId: string | null } {
+export function settingsForChat(chatId: string): { dir: string | null; modelId: string | null; botAssistantId: string | null } {
 
   const value = loadSettings().chats?.[chatId];
 
   return {
     dir: typeof value?.dir === "string" && value.dir ? value.dir : projectForChat(chatId),
     modelId: typeof value?.modelId === "string" && value.modelId ? value.modelId : null,
+    botAssistantId: typeof value?.botAssistantId === "string" && value.botAssistantId ? value.botAssistantId : null,
   };
 
 }

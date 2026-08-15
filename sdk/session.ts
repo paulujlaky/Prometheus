@@ -84,7 +84,7 @@ export class ChatSession {
       reconnectDelayMs: options.reconnectDelayMs ?? 1500,
       maxReconnectAttempts: options.maxReconnectAttempts ?? 8,
 
-      timeoutMs: options.timeoutMs ?? 180_000,
+      timeoutMs: options.timeoutMs ?? 720_000,
 
       // stream snapshot is authoritative; avoid a full GET after every turn
       refreshOnComplete: options.refreshOnComplete ?? false,

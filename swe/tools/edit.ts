@@ -272,6 +272,19 @@ export interface EditResult {
 
 }
 
+/**
+ * Nothing reaches disk until every pair lands, so a failure leaves the file exactly as it was.
+ * Saying so matters: without it the next error's line numbers read like proof that half the block
+ * applied, and the model starts editing around changes that were never made.
+ */
+function rolledBack(rel: string, pairs: number, text: string): EditResult {
+
+  const scope = pairs > 1 ? "No pairs were applied" : "Nothing was applied";
+
+  return { ok: false, text: `${text}\n\n${scope} — ${rel} is unchanged. Fix this pair and send the whole block again.`, added: 0, removed: 0 };
+
+}
+
 export function applyEdit(cwd: string, target: string, body: string): EditResult {
 
   const rel = relPath(target, cwd);
@@ -301,7 +314,10 @@ export function applyEdit(cwd: string, target: string, body: string): EditResult
   const raw = readFileSync(path, "utf8");
   const crlf = raw.includes("\r\n");
 
-  let text = raw.replace(/\r\n/g, "\n");
+  const original = raw.replace(/\r\n/g, "\n");
+
+  // pairs apply on top of each other, but that only ever exists in memory until the write below
+  let text = original;
 
   const notes: string[] = [];
   const previews: string[] = [];
@@ -313,11 +329,11 @@ export function applyEdit(cwd: string, target: string, body: string): EditResult
 
     const find = stripGutter(pair.find);
     const replace = pair.replace;
-    const label = pairs.length > 1 ? `pair ${index + 1}: ` : "";
+    const label = pairs.length > 1 ? `pair ${index + 1} of ${pairs.length}: ` : "";
 
     if (!find.trim()) {
 
-      return { ok: false, text: `${label}FIND is empty. Copy the exact lines you want to change.`, added, removed };
+      return rolledBack(rel, pairs.length, `${label}FIND is empty. Copy the exact lines you want to change.`);
 
     }
 
@@ -327,14 +343,7 @@ export function applyEdit(cwd: string, target: string, body: string): EditResult
 
       const at = exact.map((offset) => lineOf(text, offset)).slice(0, 6).join(", ");
 
-      return {
-
-        ok: false,
-        text: `${label}FIND matches ${exact.length} places in ${rel} (lines ${at}). Include more surrounding lines so it is unique.`,
-        added,
-        removed,
-
-      };
+      return rolledBack(rel, pairs.length, `${label}FIND matches ${exact.length} places in ${rel} (lines ${at}). Include more surrounding lines so it is unique.`);
 
     }
 
@@ -368,14 +377,7 @@ export function applyEdit(cwd: string, target: string, body: string): EditResult
 
       if (hits.length > 1) {
 
-        return {
-
-          ok: false,
-          text: `${label}FIND matches ${hits.length} places in ${rel} (lines ${hits.slice(0, 6).map((i) => i + 1).join(", ")}). Include more surrounding lines so it is unique.`,
-          added,
-          removed,
-
-        };
+        return rolledBack(rel, pairs.length, `${label}FIND matches ${hits.length} places in ${rel} (lines ${hits.slice(0, 6).map((i) => i + 1).join(", ")}). Include more surrounding lines so it is unique.`);
 
       }
 
@@ -409,14 +411,9 @@ export function applyEdit(cwd: string, target: string, body: string): EditResult
 
     }
 
-    return {
-
-      ok: false,
-      text: `${label}FIND is not in ${rel}.${nearest(text.split("\n"), needle)}`,
-      added,
-      removed,
-
-    };
+    // numbered against the file on disk rather than `text`: the pairs above this one have shifted
+    // the in-memory copy, and those shifts are about to be thrown away
+    return rolledBack(rel, pairs.length, `${label}FIND is not in ${rel}.${nearest(original.split("\n"), needle)}`);
 
   }
 

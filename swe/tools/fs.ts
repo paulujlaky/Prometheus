@@ -574,7 +574,11 @@ export interface GrepOptions {
 
   path?: string;
   glob?: string;
+
   max?: number;
+
+  /** Lines shown per file; the rest are counted and named, never silently dropped. */
+  perFile?: number;
 
 }
 
@@ -614,7 +618,11 @@ export function grep(cwd: string, pattern: string | string[], options: GrepOptio
 
   const matcher = toMatcher(patterns);
   const filter = options.glob ? globToRe(options.glob) : null;
-  const max = Math.max(1, Math.min(options.max ?? 60, 200));
+
+  // one whole-repo budget got spent inside the first file that mentioned the word and the walk
+  // stopped before it reached the file the search was about; per file, every file gets a turn
+  const perFile = Math.max(1, Math.min(options.perFile ?? 6, 50));
+  const max = Math.max(perFile, Math.min(options.max ?? 120, 400));
 
   const files: string[] = [];
 
@@ -628,13 +636,21 @@ export function grep(cwd: string, pattern: string | string[], options: GrepOptio
 
   }
 
+  const candidates = filter ? files.filter((file) => filter.test(file)) : files;
+
   const groups: string[] = [];
+
   let hits = 0;
-  let capped = false;
+  let shown = 0;
 
-  for (const file of files) {
+  /** Files the budget ran out before reaching — named, so a capped grep never hides what it skipped. */
+  const unsearched: string[] = [];
 
-    if (filter && !filter.test(file)) {
+  for (const file of candidates) {
+
+    if (shown >= max) {
+
+      unsearched.push(file);
 
       continue;
 
@@ -661,6 +677,8 @@ export function grep(cwd: string, pattern: string | string[], options: GrepOptio
     const lines = text.split("\n");
     const found: string[] = [];
 
+    let inFile = 0;
+
     for (let i = 0; i < lines.length; i += 1) {
 
       if (!matcher.test(lines[i])) {
@@ -669,30 +687,28 @@ export function grep(cwd: string, pattern: string | string[], options: GrepOptio
 
       }
 
-      hits += 1;
+      inFile += 1;
 
-      if (hits > max) {
+      if (found.length < perFile) {
 
-        capped = true;
-        break;
+        found.push(`  ${String(i + 1).padStart(5)}  ${lines[i].trim().slice(0, 200)}`);
 
       }
 
-      found.push(`  ${String(i + 1).padStart(5)}  ${lines[i].trim().slice(0, 200)}`);
+    }
+
+    if (!inFile) {
+
+      continue;
 
     }
 
-    if (found.length) {
+    hits += inFile;
+    shown += found.length;
 
-      groups.push(`${file}\n${found.join("\n")}`);
+    const more = inFile > found.length ? `  (${inFile} matches, first ${found.length})` : "";
 
-    }
-
-    if (capped) {
-
-      break;
-
-    }
+    groups.push(`${file}${more}\n${found.join("\n")}`);
 
   }
 
@@ -704,10 +720,14 @@ export function grep(cwd: string, pattern: string | string[], options: GrepOptio
 
   }
 
-  const total = capped ? `${max}+ matches` : `${hits} ${hits === 1 ? "match" : "matches"}`;
-  const note = capped ? "  (capped — narrow the pattern or pass a path)" : "";
+  const total = `${hits} ${hits === 1 ? "match" : "matches"} in ${groups.length} ${groups.length === 1 ? "file" : "files"}`;
+  const trimmed = hits > shown ? `  (${shown} shown, ${perFile} per file)` : "";
 
-  return `${total} in ${groups.length} ${groups.length === 1 ? "file" : "files"}${note}\n\n${groups.join("\n\n")}`;
+  const tail = unsearched.length
+    ? `\n\nnot searched — budget spent before these: ${unsearched.slice(0, 8).join(", ")}${unsearched.length > 8 ? `, +${unsearched.length - 8} more` : ""}`
+    : "";
+
+  return `${total}${trimmed}\n\n${groups.join("\n\n")}${tail}`;
 
 }
 

@@ -88,6 +88,9 @@ export interface AssistantSummary {
 
   avatarUrl?: string;
 
+  /** `chat` = catalog assistant. `agent` = custom-bot path (system prompt). */
+  kind?: "chat" | "agent";
+
   /** Provider slug from the catalog (`openai`, `anthropic`, …). */
   api?: string;
 
@@ -120,6 +123,43 @@ export interface CustomModel {
 
   contextLength?: number;
   maxTokens?: number;
+
+  premiumCategory?: string;
+
+}
+
+export interface CustomBotDraft {
+
+  id: string;
+  name: string;
+
+  currentVersionId?: string;
+
+  description?: string;
+  instructions?: string | null;
+  welcome?: string | null;
+
+  alias?: string;
+
+  allowRemix?: boolean;
+
+}
+
+export interface CustomBotGroup {
+
+  chatId: string;
+  botBuilderChatId: string;
+
+  draft: CustomBotDraft;
+
+  published: { id: string; name: string } | null;
+
+}
+
+export interface ProvisionedAgentBot {
+
+  draftId: string;
+  assistantId: string;
 
 }
 

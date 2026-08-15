@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 import type { AgentEvent } from "./agent";
+import type { Answer, Question } from "./tools/ask";
+import type { Plan, PlanDecision } from "./tools/plan";
 import type { AssistantSummary } from "../sdk/types";
+import type { Preferences } from "./settings";
 import type { UndoMark } from "./tools/snapshot";
 import type { UsageFile } from "./usage";
 
@@ -30,6 +33,11 @@ contextBridge.exposeInMainWorld("swe", {
   openProject: (cwd: string): Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null> => ipcRenderer.invoke("settings:open-project", cwd),
 
   usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
+
+  prefs: (): Promise<Preferences> => ipcRenderer.invoke("prefs:get"),
+
+  /** Patch one or more preferences; resolves with the full resolved set after clamping. */
+  setPrefs: (patch: Partial<Preferences>): Promise<Preferences> => ipcRenderer.invoke("prefs:set", patch),
 
   undos: (chatId: string): Promise<UndoMark[]> => ipcRenderer.invoke("rollback:list", chatId),
   undo: (chatId: string, commit: string): Promise<{ ok: boolean; files: string[]; text: string }> =>
@@ -87,9 +95,16 @@ contextBridge.exposeInMainWorld("swe", {
   /** Inject a user message into the active run (queued until the next model turn). */
   interject: (options: { runId: string; text: string; imagePaths?: string[] }): Promise<void> => ipcRenderer.invoke("interject", options),
 
+  /** Interrupt the in-flight turn and tell the model to wrap up. */
+  speedUp: (runId: string): Promise<void> => ipcRenderer.invoke("speed-up", runId),
+
   stop: (runId: string): Promise<void> => ipcRenderer.invoke("stop", runId),
 
   approve: (id: number, ok: boolean): Promise<void> => ipcRenderer.invoke("approve", { id, ok }),
+
+  answer: (id: number, answer: Answer): Promise<void> => ipcRenderer.invoke("answer", { id, answer }),
+
+  decide: (id: number, decision: PlanDecision): Promise<void> => ipcRenderer.invoke("decide", { id, decision }),
 
   onEvent: (handler: (message: { runId: string; event: AgentEvent }) => void) => {
 
@@ -100,6 +115,18 @@ contextBridge.exposeInMainWorld("swe", {
   onApproval: (handler: (request: { runId: string; id: number; command: string; reason: string | null }) => void) => {
 
     ipcRenderer.on("approval", (_e, request) => handler(request));
+
+  },
+
+  onAsk: (handler: (request: { runId: string; id: number; question: Question }) => void) => {
+
+    ipcRenderer.on("ask", (_e, request) => handler(request));
+
+  },
+
+  onPlan: (handler: (request: { runId: string; id: number; plan: Plan }) => void) => {
+
+    ipcRenderer.on("plan", (_e, request) => handler(request));
 
   },
 

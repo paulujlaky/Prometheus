@@ -1,5 +1,8 @@
+import { parseAsk, type Question } from "./ask";
 import { applyEdit } from "./edit";
 import { deleteFiles, grep, listDir, parseReadSpec, readFiles, writeFile } from "./fs";
+import { parsePlan, type Plan } from "./plan";
+import { parseSpawn, type SubagentTask } from "./subagent";
 
 import type { Action, Result, Verb } from "../protocol";
 
@@ -7,6 +10,14 @@ export type Outcome =
 
   | { kind: "result"; result: Result }
   | { kind: "run"; command: string }
+
+  /** Parked rather than executed: spawning needs the client and the parent's own loop. */
+  | { kind: "spawn"; tasks: SubagentTask[] }
+
+  | { kind: "ask"; question: Question }
+
+  /** Parked too: the user decides whether it gets built, and which model builds it. */
+  | { kind: "plan"; plan: Plan }
   | { kind: "say"; text: string }
   | { kind: "done"; summary: string };
 
@@ -70,6 +81,32 @@ export function execute(action: Action, cwd: string): Outcome {
   if (action.verb === "done") {
 
     return { kind: "done", summary: action.body.trim() || "Task complete." };
+
+  }
+
+  if (action.verb === "ask") {
+
+    return { kind: "ask", question: parseAsk(action) };
+
+  }
+
+  if (action.verb === "plan") {
+
+    return { kind: "plan", plan: parsePlan(action) };
+
+  }
+
+  // the loop swaps retry for the held blocks before dispatch ever sees it; reaching here means
+  // there were none to swap in
+  if (action.verb === "retry") {
+
+    throw new Error("retry replays the blocks a failed batch held, and none are held right now. Send the block itself.");
+
+  }
+
+  if (action.verb === "spawn") {
+
+    return { kind: "spawn", tasks: parseSpawn(action) };
 
   }
 

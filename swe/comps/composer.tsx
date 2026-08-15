@@ -1,5 +1,6 @@
-import { Component, createRef, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUpIcon, ChevronDownIcon, PaperclipIcon, SquareIcon, UploadIcon, XIcon } from "lucide-react";
+import { Component, createRef, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
+import { ArrowUpIcon, ChevronDownIcon, FastForwardIcon, PaperclipIcon, SquareIcon, UploadIcon, XIcon } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, } from "@/comps/ui/dropdown";
 
@@ -28,6 +29,10 @@ interface ComposerProps {
   onModelChange: (id: string) => void;
   onSend: (task: string, imagePaths: string[]) => void;
   onStop: () => void;
+  onSpeedUp?: () => void;
+
+  /** Wall-clock start of the live run; Speed Up appears after SPEED_UP_AFTER_MS. */
+  startedAt?: number | null;
 
   /** Open a multi-file picker; return absolute paths. */
   onPickImages?: () => Promise<string[]>;
@@ -48,9 +53,21 @@ interface ComposerState {
   /** Paths added by the last drop/paste; animated in, then cleared. */
   landed: string[];
 
+  now: number;
+
+  /** When Speed Up was last pressed; gates the cooldown. */
+  spedUpAt: number | null;
+
+  /** Bumped per press to remount the icon and replay its nudge. */
+  pulse: number;
+
 }
 
 const MAX_HEIGHT = 190;
+
+const SPEED_UP_AFTER_MS = 150_000;
+
+const SPEED_UP_COOLDOWN_MS = 60_000;
 
 /** Circular progress around the Stop control — track is always visible; arc fills with context use. */
 function ContextRing({ ratio, used, limit, onStop, canSend }: { ratio: number; used?: number; limit?: number; onStop: () => void; canSend: boolean }) {
@@ -108,7 +125,7 @@ function fileLabel(path: string): string {
 
 export class Composer extends Component<ComposerProps, ComposerState> {
 
-  state: ComposerState = { text: "", attachments: [], dragging: false, landed: [] };
+  state: ComposerState = { text: "", attachments: [], dragging: false, landed: [], now: Date.now(), spedUpAt: null, pulse: 0 };
 
   private input = createRef<HTMLTextAreaElement>();
 
@@ -116,6 +133,14 @@ export class Composer extends Component<ComposerProps, ComposerState> {
   private dragDepth = 0;
 
   private landTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private clock: ReturnType<typeof setInterval> | null = null;
+
+  componentDidMount() {
+
+    this.syncClock();
+
+  }
 
   componentWillUnmount() {
 
@@ -125,13 +150,51 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
     }
 
+    if (this.clock) {
+
+      clearInterval(this.clock);
+
+    }
+
   }
 
-  componentDidUpdate(_prev: ComposerProps, prev: ComposerState) {
+  componentDidUpdate(prev: ComposerProps, prevState: ComposerState) {
 
-    if (prev.text !== this.state.text) {
+    if (prevState.text !== this.state.text) {
 
       this.resize();
+
+    }
+
+    if (prev.busy !== this.props.busy || prev.startedAt !== this.props.startedAt) {
+
+      this.syncClock();
+
+    }
+
+    if (prev.startedAt !== this.props.startedAt && this.state.spedUpAt != null) {
+
+      this.setState({ spedUpAt: null });
+
+    }
+
+  }
+
+  private syncClock() {
+
+    const need = this.props.busy && this.props.startedAt != null && Boolean(this.props.onSpeedUp);
+
+    if (need && !this.clock) {
+
+      this.setState({ now: Date.now() });
+      this.clock = setInterval(() => this.setState({ now: Date.now() }), 1000);
+
+    }
+
+    if (!need && this.clock) {
+
+      clearInterval(this.clock);
+      this.clock = null;
 
     }
 
@@ -182,6 +245,24 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
     this.props.onSend(payload, attachments);
     this.setState({ text: "", attachments: [], landed: [] });
+
+  };
+
+  private speedUp = (event: MouseEvent<HTMLButtonElement>) => {
+
+    event.stopPropagation();
+
+    const { spedUpAt } = this.state;
+
+    if (spedUpAt != null && Date.now() - spedUpAt < SPEED_UP_COOLDOWN_MS) {
+
+      return;
+
+    }
+
+    this.setState((prev) => ({ spedUpAt: Date.now(), pulse: prev.pulse + 1, now: Date.now() }));
+
+    this.props.onSpeedUp?.();
 
   };
 
@@ -327,15 +408,26 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
   render() {
 
-    const { assistants, assistantId, busy, disabled, placeholder, disabledPlaceholder, contextRatio = 0, contextUsed, contextLimit, onModelChange, onStop, onPickImages } = this.props;
+    const { assistants, assistantId, busy, disabled, placeholder, disabledPlaceholder, contextRatio = 0, contextUsed, contextLimit, startedAt, onModelChange, onStop, onSpeedUp, onPickImages } = this.props;
 
-    const { text, attachments, dragging, landed } = this.state;
+    const { text, attachments, dragging, landed, now, spedUpAt, pulse } = this.state;
 
     const model = assistants.find((assistant) => assistant.id === assistantId);
     const groups = groupAssistants(assistants);
     const provider = model ? providerOf(model) : null;
 
     const canSend = !disabled && (text.trim().length > 0 || attachments.length > 0);
+
+    const showSpeedUp = Boolean(
+      onSpeedUp &&
+      busy &&
+      !canSend &&
+      startedAt != null &&
+      now - startedAt >= SPEED_UP_AFTER_MS,
+    );
+
+    const cooldownLeft = spedUpAt != null ? Math.max(0, SPEED_UP_COOLDOWN_MS - (now - spedUpAt)) : 0;
+    const cooling = cooldownLeft > 0;
 
     return (
 
@@ -413,7 +505,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
                   <span className="max-w-56 truncate">
 
-                    {model ? provider ? `${provider} · ${displayName(model.name)}` : displayName(model.name) : "Model"}
+                    {model ? `${provider ? `${provider} · ` : ""}${displayName(model.name)}${model.kind === "agent" ? " · Agent" : ""}` : "Model"}
 
                   </span>
 
@@ -437,23 +529,55 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
                     <DropdownMenuSubContent className="w-72 text-sm">
 
-                      <DropdownMenuLabel className="text-sm">{group.provider}</DropdownMenuLabel>
+                      {group.chat.length > 0 ? (
 
-                      <DropdownMenuSeparator />
+                        <>
 
-                      <DropdownMenuRadioGroup value={assistantId ?? undefined} onValueChange={onModelChange}>
+                          <DropdownMenuLabel className="text-sm">Chat-Native</DropdownMenuLabel>
 
-                        {group.models.map((assistant) => (
+                          <DropdownMenuRadioGroup value={assistantId ?? undefined} onValueChange={onModelChange}>
 
-                          <DropdownMenuRadioItem key={assistant.id} value={assistant.id}>
+                            {group.chat.map((assistant) => (
 
-                            {displayName(assistant.name)}
+                              <DropdownMenuRadioItem key={assistant.id} value={assistant.id}>
 
-                          </DropdownMenuRadioItem>
+                                {displayName(assistant.name)}
 
-                        ))}
+                              </DropdownMenuRadioItem>
 
-                      </DropdownMenuRadioGroup>
+                            ))}
+
+                          </DropdownMenuRadioGroup>
+
+                        </>
+
+                      ) : null}
+
+                      {group.chat.length > 0 && group.agent.length > 0 ? <DropdownMenuSeparator /> : null}
+
+                      {group.agent.length > 0 ? (
+
+                        <>
+
+                          <DropdownMenuLabel className="text-sm">Agent-Native</DropdownMenuLabel>
+
+                          <DropdownMenuRadioGroup value={assistantId ?? undefined} onValueChange={onModelChange}>
+
+                            {group.agent.map((assistant) => (
+
+                              <DropdownMenuRadioItem key={assistant.id} value={assistant.id}>
+
+                                {displayName(assistant.name)}
+
+                              </DropdownMenuRadioItem>
+
+                            ))}
+
+                          </DropdownMenuRadioGroup>
+
+                        </>
+
+                      ) : null}
 
                     </DropdownMenuSubContent>
 
@@ -476,6 +600,37 @@ export class Composer extends Component<ComposerProps, ComposerState> {
                 </button>
 
               ) : null}
+
+              <AnimatePresence initial={false}>
+
+                {showSpeedUp ? (
+
+                  <motion.button
+                    key="speed-up"
+                    type="button"
+                    aria-label="Speed up"
+                    disabled={cooling}
+                    onClick={this.speedUp}
+                    initial={{ opacity: 0, scale: 0.86, x: 8 }}
+                    animate={{ opacity: 1, scale: 1, x: 0 }}
+                    exit={{ opacity: 0, scale: 0.86, x: 8 }}
+                    transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                    whileTap={cooling ? undefined : { scale: 0.88 }}
+                    className="flex size-8 shrink-0 items-center justify-center rounded-control text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40"
+                    title={cooling ? `Speed up available in ${Math.ceil(cooldownLeft / 1000)}s` : "Speed up — tell the agent this is taking too long"}
+                  >
+
+                    <motion.span key={pulse} initial={{ x: -2.5 }} animate={{ x: 0 }} transition={{ type: "spring", stiffness: 520, damping: 13 }} className="flex items-center justify-center">
+
+                      <FastForwardIcon className="size-4 translate-x-[0.5px]" strokeWidth={2.2} />
+
+                    </motion.span>
+
+                  </motion.button>
+
+                ) : null}
+
+              </AnimatePresence>
 
               {busy ? (
 

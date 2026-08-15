@@ -33,6 +33,7 @@ export type HistoryEntry =
     }
 
   | { id: string; kind: "task"; text: string; attachments?: string[] }
+  | { id: string; kind: "say"; text: string }
   | { id: string; kind: "done"; text: string }
   | { id: string; kind: "error"; text: string };
 
@@ -225,10 +226,31 @@ export function entriesFromChatDetail(detail: ChatDetail): HistoryEntry[] {
 
     actions.forEach((action, index) => {
 
-      const { tool, desc } = parseReply(action.raw);
-
       // the reply's prose belongs to the first row it produced, not to every one of them
       const own = index === 0 ? thought : "";
+
+      // say is a plain bubble in live; emit the same shape here so replay matches
+      if (action.verb === "say") {
+
+        if (own) {
+
+          push({ kind: "step", tool: null, desc: "", thinking: own, thoughtMs: thoughtMsOf(own), command: null, output: "", exitCode: null, streaming: false });
+
+        }
+
+        const text = action.body.trim();
+
+        if (text) {
+
+          push({ kind: "say", text });
+
+        }
+
+        return;
+
+      }
+
+      const { tool, desc } = parseReply(action.raw);
 
       const step = push({
 

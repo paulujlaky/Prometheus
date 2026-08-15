@@ -2,7 +2,9 @@ import { Component, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { CheckIcon, ChevronDownIcon, FolderOpenIcon, PlayIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 
+import { AskCard } from "@/comps/ask-card";
 import { Composer } from "@/comps/composer";
+import { PlanCard } from "@/comps/plan-card";
 import type { UsageFile } from "@/comps/heatmap";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/comps/ui/dropdown";
 
@@ -11,12 +13,17 @@ import { usageOf } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 
 import { Sidebar, type SweChat } from "./sidebar";
-import { fileEdits } from "./parse";
-import { cleanSummary, parseReply, streamStep, Transcript, type Entry, type UndoInfo } from "./transcript";
+import { fileEdits, inferTool } from "./parse";
+import { cleanSummary, parseReply, streamStep, Transcript, type Entry, type Step, type SubagentEntry, type UndoInfo } from "./transcript";
 
 import type { AgentEvent } from "./agent";
+import type { Answer, Question } from "./tools/ask";
+import type { Plan, PlanDecision } from "./tools/plan";
 import type { UndoMark } from "./tools/snapshot";
 import type { AssistantSummary } from "../sdk/types";
+
+import { PrefsPanel } from "./prefs-panel";
+import type { Preferences } from "./lib/prefs";
 
 import "./index.css";
 
@@ -31,6 +38,9 @@ interface SweBridge {
   openProject: (cwd: string) => Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null>;
 
   usage: () => Promise<UsageFile>;
+
+  prefs: () => Promise<Preferences>;
+  setPrefs: (patch: Partial<Preferences>) => Promise<Preferences>;
 
   undos: (chatId: string) => Promise<UndoMark[]>;
   undo: (chatId: string, commit: string) => Promise<{ ok: boolean; files: string[]; text: string }>;
@@ -63,13 +73,18 @@ interface SweBridge {
   }) => Promise<void>;
 
   interject: (options: { runId: string; text: string; imagePaths?: string[] }) => Promise<void>;
+  speedUp: (runId: string) => Promise<void>;
 
   stop: (runId: string) => Promise<void>;
 
   approve: (id: number, ok: boolean) => Promise<void>;
+  answer: (id: number, answer: Answer) => Promise<void>;
+  decide: (id: number, decision: PlanDecision) => Promise<void>;
 
   onEvent: (handler: (message: { runId: string; event: AgentEvent }) => void) => void;
   onApproval: (handler: (request: Approval & { runId: string }) => void) => void;
+  onAsk: (handler: (request: Ask & { runId: string }) => void) => void;
+  onPlan: (handler: (request: PlanRequest & { runId: string }) => void) => void;
   onRunEnded: (handler: (message: { runId: string }) => void) => void;
 
 }
@@ -82,6 +97,20 @@ interface Approval {
   command: string;
 
   reason: string | null;
+
+}
+
+interface Ask {
+
+  id: number;
+  question: Question;
+
+}
+
+interface PlanRequest {
+
+  id: number;
+  plan: Plan;
 
 }
 
@@ -184,6 +213,100 @@ function closeOpenSteps(entries: Entry[]): Entry[] {
 
 }
 
+/** Same close as above, for the step list a subagent card owns. */
+function closeSteps(steps: Step[]): Step[] {
+
+  return steps.map((step) => (step.output === null ? { ...step, output: "", streaming: false } : step));
+
+}
+
+/** Fold one forwarded child event into its card. Deltas never arrive here — only settled blocks. */
+function applyToSubagent(entry: SubagentEntry, inner: AgentEvent, nextId: () => string): SubagentEntry {
+
+  if (inner.type === "status") {
+
+    return { ...entry, note: inner.text };
+
+  }
+
+  if (inner.type === "command") {
+
+    const { tool, desc } = parseReply(inner.command);
+
+    return {
+
+      ...entry,
+
+      steps: [...closeSteps(entry.steps), {
+
+        id: nextId(),
+        kind: "step",
+
+        tool,
+        desc,
+        thinking: "",
+
+        command: inner.command,
+
+        output: null,
+        exitCode: null,
+
+        streaming: false,
+
+      }],
+
+    };
+
+  }
+
+  if (inner.type === "observation" || inner.type === "say") {
+
+    const exitCode = inner.type === "say" ? 0 : inner.exitCode;
+    const last = entry.steps[entry.steps.length - 1];
+
+    if (last && last.output === null) {
+
+      return { ...entry, steps: [...entry.steps.slice(0, -1), { ...last, output: inner.text, exitCode }] };
+
+    }
+
+    return {
+
+      ...entry,
+
+      steps: [...entry.steps, {
+
+        id: nextId(),
+        kind: "step",
+
+        tool: inner.type === "say" ? "say" : null,
+        desc: "",
+        thinking: "",
+
+        command: inner.type === "say" ? `<say>\n${inner.text}\n</say>` : null,
+
+        output: inner.text,
+        exitCode,
+
+        streaming: false,
+
+      }],
+
+    };
+
+  }
+
+  return entry;
+
+}
+
+/** The row a spawn's cards hang from — matched the same way live and rebuilt from history. */
+function isSpawnStep(entry: Entry): boolean {
+
+  return entry.kind === "step" && (entry.tool === "spawn" || inferTool(entry.command) === "spawn");
+
+}
+
 /** Cumulative +/- from apply_patch / write commands in the transcript (and live stream). */
 function lineStatsFromEntries(entries: Entry[]): { added: number; removed: number } {
 
@@ -224,13 +347,26 @@ interface AppState {
   running: boolean;
   startedAt: number | null;
 
-  status: string;
+  /** Live text from the agent ("Step 2 · Drafting"). Only meaningful while running. */
+  agentStatus: string;
+
+  /** Duration of the run that produced a verdict, keyed to it so a chat switch cannot mismatch. */
+  lastRun: { id: string; ms: number } | null;
+
+  /** One-off line that outlives its run (an undo reporting its outcome). */
+  notice: string | null;
 
   stream: string | null;
 
   toggled: Set<string>;
 
   approval: Approval | null;
+
+  /** The question this run is parked on, until the user answers or skips it. */
+  ask: Ask | null;
+
+  /** The plan this run is parked on, until the user builds it or waves it off. */
+  plan: PlanRequest | null;
 
   /** Estimated cumulative tokens for this run (local; Boodlebox does not report usage). */
   tokensUsed: number;
@@ -242,6 +378,10 @@ interface AppState {
   chatsLoading: boolean;
   activeChatId: string | null;
   recentProjects: { dir: string; count: number }[];
+
+  /** Resolved preferences, or null until the first load lands. */
+  prefs: Preferences | null;
+  prefsOpen: boolean;
 
   /** Rollback marks for this chat, oldest first — one per verdict row that has a snapshot. */
   undos: UndoMark[];
@@ -266,13 +406,17 @@ export class App extends Component<{}, AppState> {
     running: false,
     startedAt: null,
 
-    status: "Idle",
+    agentStatus: "",
+    lastRun: null,
+    notice: null,
 
     stream: null,
 
     toggled: new Set<string>(),
 
     approval: null,
+    ask: null,
+    plan: null,
 
     tokensUsed: 0,
 
@@ -283,12 +427,32 @@ export class App extends Component<{}, AppState> {
     activeChatId: null,
     recentProjects: [],
 
+    prefs: null,
+    prefsOpen: false,
+
     undos: [],
     undoBusy: null,
 
     };
 
   private seq = 0;
+
+  /** Step ids inside subagent cards, kept off `seq` so the two never collide. */
+  private subSeq = 0;
+
+  /**
+   * Subagent cards by chat id. They live here rather than in `entries` because a child's own chat is
+   * deleted the moment it finishes: the server keeps no record of it, so navigating away and
+   * rebuilding from history would leave the spawn row with nothing under it. Instance state, so
+   * selectChat cannot clear it.
+   */
+  private subsByChat = new Map<string, SubagentEntry[]>();
+
+  /** Spawn calls seen so far per run — the ordinal each card is anchored by. */
+  private spawnSeen = new Map<string, number>();
+
+  /** Runs mid-batch: every child of one spawn starts before any of them reports a step. */
+  private inSpawnBatch = new Set<string>();
 
   /** Snapshot taken at the top of the live run; pinned to a mark once a verdict lands. */
   private pendingSnapshot: string | null = null;
@@ -316,12 +480,87 @@ export class App extends Component<{}, AppState> {
   private runByChat = new Map<string, { runId: string; startedAt: number }>();
   private chatByRun = new Map<string, string>();
   private approvalsByRun = new Map<string, Approval>();
+  private asksByRun = new Map<string, Ask>();
+  private plansByRun = new Map<string, PlanRequest>();
+
+  /**
+   * The one place a live entry id is minted. Resolves eagerly: a deferred read of
+   * `this.seq` inside a setState updater is how two rows used to land on one id.
+   */
+  private nextId(): string {
+
+    return `e${(this.seq += 1)}`;
+
+  }
+
+  /**
+   * The pill is a view of run state, recomputed every paint. A late event could strand a
+   * stored string on "Drafting" forever; there is nothing here for it to strand.
+   */
+  private statusLine(): string {
+
+    const { running, agentStatus, notice, lastRun, entries } = this.state;
+
+    if (running) {
+
+      return agentStatus || "Starting";
+
+    }
+
+    // an undo reports its own outcome and outlives the run it rolled back
+    if (notice) {
+
+      return notice;
+
+    }
+
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+
+      const entry = entries[index];
+
+      if (entry.kind === "error") {
+
+        return "Error";
+
+      }
+
+      if (entry.kind === "done") {
+
+        // the timing belongs to one verdict; a resumed chat has the row but not the clock
+        return lastRun && lastRun.id === entry.id
+          ? `Done in ${formatElapsed(lastRun.ms)}`
+          : "Done";
+
+      }
+
+    }
+
+    return "Idle";
+
+  }
+
+  /** Raise the floor past rows already on screen, so a resumed chat cannot re-mint over them. */
+  private syncSeq(entries: Entry[]) {
+
+    for (const entry of entries) {
+
+      const n = entry.id.startsWith("e") ? Number(entry.id.slice(1)) : 0;
+
+      if (Number.isFinite(n) && n > this.seq) {
+
+        this.seq = n;
+
+      }
+
+    }
+
+  }
 
   private ensureStreamId(): string {
 
     if (this.streamEntryId == null) {
 
-      this.streamEntryId = `e${(this.seq += 1)}`;
+      this.streamEntryId = this.nextId();
 
     }
 
@@ -332,7 +571,23 @@ export class App extends Component<{}, AppState> {
   componentDidMount() {
 
     window.swe.onEvent(({ runId, event }) => {
-      if (runId === this.activeRunId) this.onEvent(event);
+
+      if (runId === this.activeRunId) {
+
+        this.onEvent(event);
+
+        return;
+
+      }
+
+      // a run the user has navigated away from still has children working; dropping their events
+      // here is what used to leave the cards frozen (and then missing) on the way back
+      if (event.type === "subagent:start" || event.type === "subagent:event" || event.type === "subagent:end") {
+
+        this.onSubagentEvent(runId, event);
+
+      }
+
     });
 
     window.swe.onApproval((approval) => {
@@ -340,27 +595,47 @@ export class App extends Component<{}, AppState> {
       if (approval.runId === this.activeRunId) this.setState({ approval });
     });
 
+    window.swe.onAsk((ask) => {
+      this.asksByRun.set(ask.runId, ask);
+      if (ask.runId === this.activeRunId) this.setState({ ask });
+    });
+
+    window.swe.onPlan((plan) => {
+      this.plansByRun.set(plan.runId, plan);
+      if (plan.runId === this.activeRunId) this.setState({ plan });
+    });
+
     window.swe.onRunEnded(({ runId }) => {
       const chatId = this.chatByRun.get(runId);
+
+      // a hard stop can leave a card mid-step, and nothing else is coming to settle it
+      if (chatId) this.settleStragglers(chatId);
+
       if (chatId) this.runByChat.delete(chatId);
+
+      this.spawnSeen.delete(runId);
+      this.inSpawnBatch.delete(runId);
       this.chatByRun.delete(runId);
       this.approvalsByRun.delete(runId);
+      this.asksByRun.delete(runId);
+      this.plansByRun.delete(runId);
 
       if (runId === this.activeRunId) {
         this.activeRunId = null;
-        this.setState({ running: false, startedAt: null, approval: null, stream: null });
+        this.setState({ running: false, startedAt: null, approval: null, ask: null, plan: null, stream: null });
       }
     });
 
     void this.refreshChats();
 
-    void Promise.all([window.swe.models(), window.swe.preferredModel()]).then(([assistants, preferredModelId]) => {
+    void Promise.all([window.swe.models(), window.swe.preferredModel(), window.swe.prefs()]).then(([assistants, preferredModelId, prefs]) => {
 
-      const preferred = assistants.some((assistant) => assistant.id === preferredModelId)
-        ? preferredModelId
-        : null;
+      // a stored default that no longer exists on the account is ignored rather than stranding selection
+      const known = (id: string | null) => (id && assistants.some((assistant) => assistant.id === id) ? id : null);
 
-      this.setState((prev) => ({ assistants, assistantId: prev.assistantId ?? preferred ?? assistants[0]?.id ?? null }));
+      const chosen = known(prefs.defaultModelId) ?? known(preferredModelId) ?? assistants[0]?.id ?? null;
+
+      this.setState((prev) => ({ assistants, prefs, assistantId: prev.assistantId ?? chosen }));
 
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
@@ -406,9 +681,9 @@ export class App extends Component<{}, AppState> {
 
   private push(entry: NewEntry) {
 
-    this.seq += 1;
+    const id = this.nextId();
 
-    this.setState((prev) => ({ entries: [...prev.entries, { ...entry, id: `e${this.seq}` } as Entry] }));
+    this.setState((prev) => ({ entries: [...prev.entries, { ...entry, id } as Entry] }));
 
   }
 
@@ -471,7 +746,7 @@ export class App extends Component<{}, AppState> {
       this.setState((prev) => ({
 
         undos: prev.undos.map((mark) => (mark.commit === commit ? { ...mark, undone: true } : mark)),
-        status: report.text,
+        notice: report.text,
 
       }));
 
@@ -509,11 +784,249 @@ export class App extends Component<{}, AppState> {
 
   };
 
+  /** Chat a run is writing into; a fresh run has one by the time any child starts. */
+  private chatForRun(runId: string): string | null {
+
+    return this.chatByRun.get(runId) ?? (runId === this.activeRunId ? this.state.activeChatId : null);
+
+  }
+
+  private writeCards(chatId: string, cards: SubagentEntry[]) {
+
+    this.subsByChat.set(chatId, cards);
+
+    // the store is instance state, so the transcript only repaints when the user is looking at it
+    if (chatId === this.state.activeChatId) {
+
+      this.forceUpdate();
+
+    }
+
+  }
+
+  /** Fold one child's event into the store, live run or background run alike. */
+  private onSubagentEvent(runId: string, event: AgentEvent) {
+
+    const chatId = this.chatForRun(runId);
+
+    if (!chatId) {
+
+      return;
+
+    }
+
+    const cards = this.subsByChat.get(chatId) ?? [];
+
+    if (event.type === "subagent:start") {
+
+      // every child of one spawn starts before any of them reports, so a run of starts is one call
+      if (!this.inSpawnBatch.has(runId)) {
+
+        this.spawnSeen.set(runId, (this.spawnSeen.get(runId) ?? 0) + 1);
+        this.inSpawnBatch.add(runId);
+
+      }
+
+      this.subSeq += 1;
+
+      this.writeCards(chatId, [...cards, {
+
+        id: `sub${this.subSeq}`,
+        kind: "subagent",
+
+        subId: event.id,
+        spawnIndex: Math.max(0, (this.spawnSeen.get(runId) ?? 1) - 1),
+
+        name: event.name,
+        task: event.task,
+
+        steps: [],
+        note: "",
+
+        status: "working",
+        summary: "",
+
+      }]);
+
+      return;
+
+    }
+
+    this.inSpawnBatch.delete(runId);
+
+    if (event.type === "subagent:event") {
+
+      this.writeCards(chatId, cards.map((card) => (
+        card.subId === event.id
+          ? applyToSubagent(card, event.event, () => `${card.id}-s${(this.subSeq += 1)}`)
+          : card
+      )));
+
+      return;
+
+    }
+
+    if (event.type === "subagent:end") {
+
+      const status: SubagentEntry["status"] = event.ok ? "done" : "failed";
+
+      this.writeCards(chatId, cards.map((card) => (
+        card.subId === event.id
+          ? { ...card, steps: closeSteps(card.steps), note: "", status, summary: cleanSummary(event.summary) }
+          : card
+      )));
+
+    }
+
+  }
+
+  /** Nothing is going to report for these now — settle them rather than leave a card pulsing. */
+  private settleStragglers(chatId: string) {
+
+    const cards = this.subsByChat.get(chatId);
+
+    if (cards?.some((card) => card.status === "working")) {
+
+      this.writeCards(chatId, cards.map((card) => (
+        card.status === "working"
+          ? { ...card, steps: closeSteps(card.steps), note: "", status: "failed" as const, summary: card.summary || "The run ended before this subagent reported back." }
+          : card
+      )));
+
+    }
+
+    // top-level steps with no observation would otherwise keep the "Working" tail on until reload
+    if (chatId !== this.state.activeChatId) {
+
+      return;
+
+    }
+
+    this.setState((prev) => {
+
+      if (!prev.entries.some((entry) => entry.kind === "step" && (entry.streaming || entry.output === null))) {
+
+        return null;
+
+      }
+
+      return {
+
+        entries: prev.entries.map((entry) => (
+          entry.kind === "step" && (entry.streaming || entry.output === null)
+            ? { ...entry, output: entry.output ?? "", streaming: false }
+            : entry
+        )),
+        stream: null,
+
+      };
+
+    });
+
+  }
+
+  /**
+   * Drop each spawn's cards in behind the row that opened it. The nth spawn row gets the cards
+   * tagged with ordinal n, which is why this works on a transcript rebuilt from history too.
+   */
+  private withSubagents(rows: Entry[]): Entry[] {
+
+    const cards = this.state.activeChatId ? this.subsByChat.get(this.state.activeChatId) : null;
+
+    if (!cards?.length) {
+
+      return rows;
+
+    }
+
+    const out: Entry[] = [];
+    const placed = new Set<string>();
+
+    let ordinal = 0;
+
+    for (const row of rows) {
+
+      out.push(row);
+
+      if (!isSpawnStep(row)) {
+
+        continue;
+
+      }
+
+      for (const card of cards) {
+
+        if (card.spawnIndex === ordinal) {
+
+          out.push(card);
+          placed.add(card.id);
+
+        }
+
+      }
+
+      ordinal += 1;
+
+    }
+
+    // children whose spawn row has not streamed in yet: better trailing than missing
+    for (const card of cards) {
+
+      if (!placed.has(card.id)) {
+
+        out.push(card);
+
+      }
+
+    }
+
+    return out;
+
+  }
+
+  /** Live children as temporary sidebar rows, derived so a chat refresh cannot wipe them. */
+  private sidebarChats(chats: SweChat[]): SweChat[] {
+
+    const rows: SweChat[] = [];
+
+    for (const [chatId, cards] of this.subsByChat) {
+
+      for (const card of cards) {
+
+        if (card.status !== "working") {
+
+          continue;
+
+        }
+
+        rows.push({
+
+          id: `sub:${card.subId}`,
+
+          name: card.name,
+          title: card.name,
+
+          modified: Date.now(),
+          project: this.state.cwd ?? null,
+
+          parentId: chatId,
+          subagent: true,
+
+        });
+
+      }
+
+    }
+
+    return rows.length ? [...chats, ...rows] : chats;
+
+  }
+
   private onEvent = (event: AgentEvent) => {
 
     if (event.type === "status") {
 
-      this.setState({ status: event.text });
+      this.setState({ agentStatus: event.text });
 
       return;
 
@@ -529,6 +1042,19 @@ export class App extends Component<{}, AppState> {
     if (event.type === "usage") {
 
       this.setState({ tokensUsed: event.used });
+
+      return;
+
+    }
+
+    if (event.type === "subagent:start" || event.type === "subagent:event" || event.type === "subagent:end") {
+
+      // cards never enter `entries` — they outlive the rebuild that selectChat does
+      if (this.activeRunId) {
+
+        this.onSubagentEvent(this.activeRunId, event);
+
+      }
 
       return;
 
@@ -641,7 +1167,7 @@ export class App extends Component<{}, AppState> {
           : null;
 
       // reuse the live stream id so the row stays mounted (no slide-up re-animation)
-      const id = this.streamEntryId ?? `e${(this.seq += 1)}`;
+      const id = this.streamEntryId ?? this.nextId();
 
       this.streamStartedAt = null;
       this.thinkEndedAt = null;
@@ -692,7 +1218,9 @@ export class App extends Component<{}, AppState> {
         // a later block in a batched reply: it carries its own label, so re-derive rather than blanking the row
         const { tool, desc } = parseReply(event.command);
 
-        return { entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "step", tool, desc, thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
+        const id = this.nextId();
+
+      return { entries: [...closeOpenSteps(prev.entries), { id, kind: "step", tool, desc, thinking: "", command: event.command, output: null, exitCode: null, streaming: false }] };
 
       });
 
@@ -704,15 +1232,34 @@ export class App extends Component<{}, AppState> {
 
       this.setState((prev) => {
 
-        const last = prev.entries[prev.entries.length - 1];
+        // a spawn's cards sit between its row and its result, so the open step is not always last
+        for (let index = prev.entries.length - 1; index >= 0; index -= 1) {
 
-        if (last?.kind === "step" && last.output === null) {
+          const entry = prev.entries[index];
 
-          return { entries: [...prev.entries.slice(0, -1), { ...last, output: event.text, exitCode: event.exitCode }] };
+          if (entry.kind === "subagent") {
+
+            continue;
+
+          }
+
+          if (entry.kind === "step" && entry.output === null) {
+
+            const entries = [...prev.entries];
+
+            entries[index] = { ...entry, output: event.text, exitCode: event.exitCode };
+
+            return { entries };
+
+          }
+
+          break;
 
         }
 
-        return { entries: [...prev.entries, { id: `e${(this.seq += 1)}`, kind: "step", tool: null, desc: "", thinking: "", command: null, output: event.text, exitCode: event.exitCode, streaming: false }] };
+        const id = this.nextId();
+
+      return { entries: [...prev.entries, { id, kind: "step", tool: null, desc: "", thinking: "", command: null, output: event.text, exitCode: event.exitCode, streaming: false }] };
 
       });
 
@@ -747,7 +1294,7 @@ export class App extends Component<{}, AppState> {
 
         }
 
-        return { entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "say", text: event.text }] };
+        return { entries: [...closeOpenSteps(prev.entries), { id: this.nextId(), kind: "say", text: event.text }] };
 
       });
 
@@ -759,11 +1306,13 @@ export class App extends Component<{}, AppState> {
 
       const commit = this.pendingSnapshot;
       const project = this.state.cwd ?? "";
+      const doneId = this.nextId();
 
       this.setState((prev) => ({
 
-        entries: [...closeOpenSteps(prev.entries), { id: `e${(this.seq += 1)}`, kind: "done", text: cleanSummary(event.summary) }],
-        status: `Done in ${formatElapsed(Date.now() - (prev.startedAt ?? Date.now()))}`,
+        entries: [...closeOpenSteps(prev.entries), { id: doneId, kind: "done", text: cleanSummary(event.summary) }],
+        lastRun: { id: doneId, ms: Date.now() - (prev.startedAt ?? Date.now()) },
+        stream: null,
 
         // main persists the same mark; mirroring it here keeps the control live without a round trip
         undos: commit ? [...prev.undos, { commit, project, summary: event.summary, at: Date.now() }] : prev.undos,
@@ -774,8 +1323,8 @@ export class App extends Component<{}, AppState> {
 
     }
 
+    // the row itself is the error state now — nothing to set
     this.push({ kind: "error", text: event.message });
-    this.setState({ status: "Error" });
 
   };
 
@@ -814,8 +1363,13 @@ export class App extends Component<{}, AppState> {
       stream: null,
       toggled: new Set(),
       approval: null,
+      ask: null,
       tokensUsed: 0,
-      status: this.state.running ? this.state.status : "Idle",
+
+      // a run in another project is still reporting; its text stays until it ends
+      agentStatus: this.state.running ? this.state.agentStatus : "",
+      lastRun: null,
+      notice: null,
 
     }, () => {
 
@@ -840,22 +1394,91 @@ export class App extends Component<{}, AppState> {
 
   }
 
+  private answerAsk = (answer: Answer) => {
+
+    const ask = this.state.ask;
+
+    if (!ask) {
+
+      return;
+
+    }
+
+    void window.swe.answer(ask.id, answer);
+
+    if (this.activeRunId) {
+
+      this.asksByRun.delete(this.activeRunId);
+
+    }
+
+    this.setState({ ask: null });
+
+  };
+
+  private dismissAsk = () => {
+
+    this.answerAsk({ picked: [], text: "", dismissed: true });
+
+  };
+
+  private decidePlan = (decision: PlanDecision) => {
+
+    const plan = this.state.plan;
+
+    if (!plan) {
+
+      return;
+
+    }
+
+    void window.swe.decide(plan.id, decision);
+
+    if (this.activeRunId) {
+
+      this.plansByRun.delete(this.activeRunId);
+
+    }
+
+    // the loop sends as the new model from here; the composer should say so too
+    const switched = decision.build && decision.assistantId && decision.assistantId !== this.state.assistantId;
+
+    this.setState(switched ? { plan: null, assistantId: decision.assistantId } : { plan: null });
+
+  };
+
+  private dismissPlan = () => {
+
+    this.decidePlan({ build: false, assistantId: "", modelLabel: "", note: "", dismissed: true });
+
+  };
+
   private newSession = () => {
     this.activeRunId = null;
     this.seq = 0;
     this.streamEntryId = null;
     this.streamReasoning = "";
+
+    // a fresh session is the one place the stored default applies; restored chats keep their own model
+    const { prefs, assistants, assistantId } = this.state;
+    const stored = prefs?.defaultModelId ?? null;
+    const nextAssistant = stored && assistants.some((a) => a.id === stored) ? stored : assistantId;
+
     this.setState({
 
+      assistantId: nextAssistant,
       entries: [],
       stream: null,
       toggled: new Set(),
       approval: null,
+      ask: null,
       tokensUsed: 0,
       activeChatId: null,
       running: false,
       startedAt: null,
-      status: "Idle",
+      agentStatus: "",
+      lastRun: null,
+      notice: null,
       undos: [],
       undoBusy: null,
 
@@ -870,10 +1493,13 @@ export class App extends Component<{}, AppState> {
     this.setState({
 
       activeChatId: chat.id,
-      status: "Loading...",
+      agentStatus: "",
+      lastRun: null,
+      notice: null,
       stream: null,
       toggled: new Set(),
       approval: null,
+      ask: null,
       tokensUsed: 0,
       running: false,
       startedAt: null,
@@ -914,8 +1540,9 @@ export class App extends Component<{}, AppState> {
       const live = this.runByChat.get(detail.id);
       this.activeRunId = live?.runId ?? null;
 
-      // keep seq ahead of loaded ids so live steps don't collide
-      this.seq = entries.length + 100;
+      // exact rather than a guessed gap — the old "+ 100" is what a collision looked like
+      this.seq = 0;
+      this.syncSeq(entries);
       this.streamEntryId = null;
 
       this.setState((prev) => ({
@@ -928,7 +1555,12 @@ export class App extends Component<{}, AppState> {
         running: Boolean(live),
         startedAt: live?.startedAt ?? null,
         approval: live ? this.approvalsByRun.get(live.runId) ?? null : null,
-        status: live ? "Working" : "Idle",
+        ask: live ? this.asksByRun.get(live.runId) ?? null : null,
+
+        agentStatus: live ? "Working" : "",
+        // the verdict row is restored but its clock is not; statusLine falls back to a bare "Done"
+        lastRun: null,
+        notice: null,
         chats: prev.chats.map((c) => (
           c.id === detail.id
             ? { ...c, title: detail.title || c.title, project, name: detail.name || c.name }
@@ -942,7 +1574,9 @@ export class App extends Component<{}, AppState> {
       this.setState({
 
         entries: [],
-        status: "Idle",
+        agentStatus: "",
+        lastRun: null,
+        notice: null,
 
       });
 
@@ -1076,13 +1710,15 @@ export class App extends Component<{}, AppState> {
 
     if (followUp) {
 
-      this.seq = Math.max(this.seq, entries.length) + 1;
+      this.syncSeq(entries);
+
+      const taskId = this.nextId();
 
       this.setState((prev) => ({
 
         entries: [...prev.entries, {
 
-          id: `e${this.seq}`,
+          id: taskId,
           kind: "task" as const,
 
           text: task,
@@ -1093,7 +1729,8 @@ export class App extends Component<{}, AppState> {
         running: true,
 
         startedAt: Date.now(),
-        status: "Starting",
+        agentStatus: "Starting",
+        notice: null,
 
         stream: null,
         approval: null,
@@ -1102,13 +1739,13 @@ export class App extends Component<{}, AppState> {
 
     } else {
 
-      this.seq = 1;
+      this.seq = 0;
 
       this.setState({
 
         entries: [{
 
-          id: "e1",
+          id: this.nextId(),
           kind: "task",
 
           text: task,
@@ -1119,7 +1756,9 @@ export class App extends Component<{}, AppState> {
         running: true,
 
         startedAt: Date.now(),
-        status: "Starting",
+        agentStatus: "Starting",
+        notice: null,
+        lastRun: null,
 
         toggled: new Set<string>(),
         tokensUsed: 0,
@@ -1157,13 +1796,15 @@ export class App extends Component<{}, AppState> {
       if (this.activeRunId === runId) {
         this.activeRunId = null;
         this.streamEntryId = null;
-        this.setState({ running: false, startedAt: null, approval: null, stream: null });
+        this.setState({ running: false, startedAt: null, approval: null, ask: null, stream: null });
       }
 
       const finishedChat = this.chatByRun.get(runId);
       if (finishedChat) this.runByChat.delete(finishedChat);
       this.chatByRun.delete(runId);
       this.approvalsByRun.delete(runId);
+      this.asksByRun.delete(runId);
+      this.plansByRun.delete(runId);
       void this.refreshChats();
       void this.refreshUsage();
 
@@ -1173,16 +1814,18 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const { entries, assistants, assistantId, cwd, mode, running, startedAt, status, stream, approval, tokensUsed, usage: dailyUsage, chats, chatsLoading, activeChatId, undoBusy } = this.state;
+    const { entries, assistants, assistantId, cwd, mode, running, startedAt, stream, approval, ask, plan, tokensUsed, usage: dailyUsage, chats, chatsLoading, activeChatId, undoBusy } = this.state;
+
+    const status = this.statusLine();
 
     const model = assistants.find((a) => a.id === assistantId);
     const liveThought = this.streamStartedAt != null && this.thinkEndedAt != null ? this.thinkEndedAt - this.streamStartedAt : null;
 
     // include a synthetic stream row when only platform reasoning has arrived (no answer tokens yet)
     const liveStream = stream ?? (this.streamReasoning && running ? "" : null);
-    const rows = liveStream === null
+    const rows = this.withSubagents(liveStream === null
       ? entries
-      : [...entries, streamStep(liveStream, liveThought, this.streamReasoning, this.streamEntryId ?? "stream")];
+      : [...entries, streamStep(liveStream, liveThought, this.streamReasoning, this.streamEntryId ?? "stream")]);
 
     const activeMode = MODES.find((m) => m.value === mode) ?? MODES[1];
     const ModeIcon = activeMode.icon;
@@ -1201,8 +1844,11 @@ export class App extends Component<{}, AppState> {
 
         <Sidebar
 
-          chats={chats}
+          chats={this.sidebarChats(chats)}
           activeId={activeChatId}
+
+          // a row the user has switched away from still shows a pulse where its options button sits
+          runningIds={[...this.runByChat.keys()]}
 
           loading={chatsLoading}
 
@@ -1212,8 +1858,19 @@ export class App extends Component<{}, AppState> {
           onRename={(chat, name) => void this.renameChat(chat, name)}
           onDelete={(chat) => void this.deleteChat(chat)}
           onNew={this.newSession}
+          onOpenSettings={() => this.setState({ prefsOpen: true })}
 
         />
+
+        {this.state.prefsOpen && (
+
+          <PrefsPanel
+            models={assistants}
+            onClose={() => this.setState({ prefsOpen: false })}
+            onSaved={(prefs) => this.setState({ prefs })}
+          />
+
+        )}
 
         <div className="flex min-w-0 flex-1 flex-col">
 
@@ -1380,6 +2037,38 @@ export class App extends Component<{}, AppState> {
 
           )}
 
+          {ask && (
+
+            <div className="mx-auto w-full max-w-3xl px-5 pb-2">
+
+              <AskCard key={ask.id} question={ask.question} onAnswer={this.answerAsk} onDismiss={this.dismissAsk} />
+
+            </div>
+
+          )}
+
+          {plan && (
+
+            <div className="mx-auto w-full max-w-3xl px-5 pb-2">
+
+              <PlanCard
+
+                key={plan.id}
+
+                plan={plan.plan}
+
+                assistants={assistants}
+                assistantId={assistantId}
+
+                onBuild={this.decidePlan}
+                onDismiss={this.dismissPlan}
+
+              />
+
+            </div>
+
+          )}
+
           <div className="flex justify-center pt-1 pb-4">
 
             <div className="flex w-fit items-center gap-2.5 rounded-full bg-field px-3.5 py-1.5 shadow-hairline">
@@ -1437,6 +2126,8 @@ export class App extends Component<{}, AppState> {
             placeholder={running ? "Interject while working..." : activeChatId ? "Follow up on this session..." : "Describe what to build..."}
             disabledPlaceholder="Choose a working folder first..."
 
+            startedAt={startedAt}
+
             onModelChange={(id) => {
 
               this.setState({ assistantId: id });
@@ -1448,6 +2139,9 @@ export class App extends Component<{}, AppState> {
             onFiles={(files) => window.swe.importImages(files)}
             onStop={() => {
               if (this.activeRunId) void window.swe.stop(this.activeRunId);
+            }}
+            onSpeedUp={() => {
+              if (this.activeRunId) void window.swe.speedUp(this.activeRunId);
             }}
 
           />

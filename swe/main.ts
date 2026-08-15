@@ -4,21 +4,28 @@ import { dirname, join, resolve } from "node:path";
 
 import { MiniAgent, riskReason, type AgentEvent } from "./agent";
 import { entriesFromChatDetail } from "./history";
+import { mergeModelLists } from "./lib/models";
 import {
   ensureProjectChats,
   forgetChatId,
   loadLastCwd,
+  loadPreferences,
   loadRecentProjects,
   loadSettings,
   normalizeProjectPath,
   rememberChatId,
   rememberChatSettings,
   rememberRecentProject,
+  savePreferences,
   settingsForChat,
   UNASSIGNED_PROJECT,
+  type Preferences,
 } from "./settings";
 import { forgetMarks, loadMarks, markUndone, recordMark, restoreSnapshot, snapshotsAvailable } from "./tools/snapshot";
 import { loadUsage } from "./usage";
+
+import type { Answer } from "./tools/ask";
+import type { Plan, PlanDecision } from "./tools/plan";
 
 import type { ChatDetail } from "../sdk/types";
 
@@ -64,6 +71,20 @@ let client: BoodleClient | null = null;
 const approvals = new Map<number, { runId: string; resolve: (ok: boolean) => void }>();
 
 let approvalSeq = 0;
+
+const asks = new Map<number, { runId: string; resolve: (answer: Answer) => void }>();
+
+let askSeq = 0;
+
+const plans = new Map<number, { runId: string; resolve: (decision: PlanDecision) => void }>();
+
+let planSeq = 0;
+
+/** A question the user never answered — the model is told to decide for itself rather than stall. */
+const DISMISSED: Answer = { picked: [], text: "", dismissed: true };
+
+/** A plan the user never decided — nothing gets built off a card that was never answered. */
+const UNDECIDED: PlanDecision = { build: false, assistantId: "", modelLabel: "", note: "", dismissed: true };
 
 // electron is launched by node rather than bun, so the project .env is not picked up for free
 const rootEnv = resolve(here, "../../.env");
@@ -135,6 +156,23 @@ function send(runId: string, event: AgentEvent) {
 
 }
 
+/**
+ * The chat name is the title, so the body's only job is to name the action the user owes the run.
+ * These used to pass the payload through — a raw question, a plan title, the shell command itself —
+ * which reads as noise in a banner and puts command text on screen for anyone walking past.
+ */
+const NOTICES = {
+
+  done: "Agent has finished",
+
+  approval: "Waiting on approval to run a command",
+  approvalRisky: "Waiting on approval — flagged command",
+
+  ask: "Waiting on your input",
+  plan: "Waiting on your review of a plan",
+
+} as const;
+
 function alertUser(title: string, body: string) {
 
   if (window?.isFocused()) return;
@@ -170,10 +208,32 @@ function createWindow() {
 }
 
 // the renderer groups these with the same picker the web app uses
-ipcMain.handle("models", async () => getClient().listAssistants());
+ipcMain.handle("models", async () => {
+
+  const client = getClient();
+  const [assistants, custom] = await Promise.all([client.listAssistants(), client.listCustomModels()]);
+
+  return mergeModelLists(assistants, custom);
+
+});
 ipcMain.handle("models:preferred", () => getClient().preferredAssistantId);
 
 ipcMain.handle("settings:get", () => loadSettings());
+
+ipcMain.handle("prefs:get", () => loadPreferences());
+
+// the panel sends only what changed; clamping lives in savePreferences so a hand-edited file is caught too
+ipcMain.handle("prefs:set", (_event, patch: Partial<Preferences>) => {
+
+  if (!patch || typeof patch !== "object") {
+
+    return loadPreferences();
+
+  }
+
+  return savePreferences(patch);
+
+});
 
 ipcMain.handle("settings:last-cwd", () => loadLastCwd());
 ipcMain.handle("settings:recent-projects", () => loadRecentProjects());
@@ -303,7 +363,7 @@ async function triageUnassignedChats(limit = 12): Promise<void> {
 
         if (project) {
 
-          rememberChatId(id, project);
+          rememberChatId(id, project, false);
 
         }
 
@@ -384,7 +444,7 @@ ipcMain.handle("chats:list", async (_event, _projectDir?: string | null) => {
       name: chat?.name ?? "",
       title: chat ? chatTitle(chat.name) : "Untitled",
       modified: chat
-        ? (chat.modified ?? chat.lastMessage ?? chat.created ?? 0)
+        ? (chat.lastMessage ?? chat.modified ?? chat.created ?? 0)
         : 0,
       project: saved.dir ?? project,
       modelId: saved.modelId,
@@ -430,7 +490,7 @@ ipcMain.handle("chats:get", async (_event, chatId: string) => {
 
   if (project) {
 
-    rememberChatId(chatId, project);
+    rememberChatId(chatId, project, false);
 
   }
 
@@ -463,7 +523,7 @@ ipcMain.handle("chats:claim", (_event, chatId: string, projectDir: string) => {
 
   }
 
-  rememberChatId(chatId, projectDir);
+  rememberChatId(chatId, projectDir, false);
 
 });
 
@@ -558,12 +618,19 @@ ipcMain.handle("start", async (_event, options: {
   let snapshotCommit: string | null = null;
   let markChatId = options.chatId ?? null;
 
+  // read per run, not at startup, so a change in the panel lands on the next task without a restart
+  const prefs = loadPreferences();
+
   const agent = new MiniAgent({
 
     client: getClient(),
     cwd: options.cwd,
 
+    maxSteps: prefs.maxSteps,
+    commandTimeoutMs: prefs.commandTimeoutMs,
+
     assistantId: options.assistantId,
+    botAssistantId: options.chatId ? settingsForChat(options.chatId).botAssistantId ?? undefined : undefined,
     modelLabel: options.modelLabel,
 
     onEvent: (event) => {
@@ -585,7 +652,7 @@ ipcMain.handle("start", async (_event, options: {
         markChatId = event.chatId;
 
         rememberChatId(event.chatId, options.cwd);
-        rememberChatSettings(event.chatId, options.cwd, options.assistantId ?? null);
+        rememberChatSettings(event.chatId, options.cwd, options.assistantId ?? null, event.botAssistantId ?? null);
 
         if (event.title.trim() && event.title.trim().toLowerCase() !== "new chat") {
 
@@ -596,7 +663,7 @@ ipcMain.handle("start", async (_event, options: {
       }
 
       send(options.runId, event);
-      if (event.type === "done") alertUser(notifyTitle, "Done.");
+      if (event.type === "done") alertUser(notifyTitle, NOTICES.done);
 
     },
 
@@ -618,7 +685,39 @@ ipcMain.handle("start", async (_event, options: {
 
         flushDeltas(options.runId);
         window?.webContents.send("approval", { runId: options.runId, id, command, reason });
-        alertUser(notifyTitle, reason ?? command);
+        alertUser(notifyTitle, reason ? NOTICES.approvalRisky : NOTICES.approval);
+
+      });
+
+    },
+
+    ask: (question) => {
+
+      const id = (askSeq += 1);
+
+      return new Promise<Answer>((resolve) => {
+
+        asks.set(id, { runId: options.runId, resolve });
+
+        flushDeltas(options.runId);
+        window?.webContents.send("ask", { runId: options.runId, id, question });
+        alertUser(notifyTitle, NOTICES.ask);
+
+      });
+
+    },
+
+    plan: (plan: Plan) => {
+
+      const id = (planSeq += 1);
+
+      return new Promise<PlanDecision>((resolve) => {
+
+        plans.set(id, { runId: options.runId, resolve });
+
+        flushDeltas(options.runId);
+        window?.webContents.send("plan", { runId: options.runId, id, plan });
+        alertUser(notifyTitle, NOTICES.plan);
 
       });
 
@@ -633,7 +732,7 @@ ipcMain.handle("start", async (_event, options: {
     if (options.chatId) {
 
       rememberChatId(options.chatId, options.cwd);
-      rememberChatSettings(options.chatId, options.cwd, options.assistantId ?? null);
+      rememberChatSettings(options.chatId, options.cwd, options.assistantId ?? null, settingsForChat(options.chatId).botAssistantId);
 
     }
 
@@ -654,6 +753,18 @@ ipcMain.handle("start", async (_event, options: {
       approvals.delete(id);
     }
 
+    for (const [id, pending] of asks) {
+      if (pending.runId !== options.runId) continue;
+      pending.resolve(DISMISSED);
+      asks.delete(id);
+    }
+
+    for (const [id, pending] of plans) {
+      if (pending.runId !== options.runId) continue;
+      pending.resolve(UNDECIDED);
+      plans.delete(id);
+    }
+
     flushDeltas(options.runId);
     window?.webContents.send("run-ended", { runId: options.runId });
 
@@ -670,16 +781,60 @@ ipcMain.handle("approve", (_event, { id, ok }: { id: number; ok: boolean }) => {
 
 });
 
+ipcMain.handle("answer", (_event, { id, answer }: { id: number; answer: Answer }) => {
+
+  const pending = asks.get(id);
+
+  asks.delete(id);
+  pending?.resolve(answer);
+
+});
+
+ipcMain.handle("decide", (_event, { id, decision }: { id: number; decision: PlanDecision }) => {
+
+  const pending = plans.get(id);
+
+  plans.delete(id);
+  pending?.resolve(decision);
+
+});
+
 ipcMain.handle("stop", (_event, runId: string) => {
 
-  // a run parked on an approval prompt would otherwise never see the stop
+  // a run parked on an approval prompt or an unanswered question would otherwise never see the stop
   for (const [id, pending] of approvals) {
     if (pending.runId !== runId) continue;
     pending.resolve(false);
     approvals.delete(id);
   }
 
+  for (const [id, pending] of asks) {
+    if (pending.runId !== runId) continue;
+    pending.resolve(DISMISSED);
+    asks.delete(id);
+  }
+
+  for (const [id, pending] of plans) {
+    if (pending.runId !== runId) continue;
+    pending.resolve(UNDECIDED);
+    plans.delete(id);
+  }
+
   agents.get(runId)?.stop();
+
+});
+
+ipcMain.handle("speed-up", (_event, runId: string) => {
+
+  const agent = agents.get(runId);
+
+  if (!agent) {
+
+    throw new Error("No run in progress");
+
+  }
+
+  agent.speedUp();
 
 });
 

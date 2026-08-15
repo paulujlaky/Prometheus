@@ -1,5 +1,5 @@
 import { Component, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, MessageSquareIcon, PencilLineIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, ListChecksIcon, ListTodoIcon, MessageSquareIcon, PencilLineIcon, RotateCcwIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon, UsersIcon } from "lucide-react";
 
 import { UsageHeatmap, type UsageFile } from "@/comps/heatmap";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/comps/ui/scroller";
@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 
 import { Code, FileWriteView } from "./code";
 import { Md } from "./md";
-import { cleanSummary, sayTextOf, fileEdits, inferTool, isDoneStep, parseReply, parseWrites, runCommandOf, summarizeCall, type FileEdit, type ParsedReply, type Tool } from "./parse";
+import { cleanSummary, extractFinishedSummary, sayTextOf, fileEdits, inferTool, isDoneStep, parseReply, parseWrites, runCommandOf, summarizeCall, type FileEdit, type ParsedReply, type Tool } from "./parse";
 
 export { cleanSummary, parseReply };
 export type { ParsedReply };
@@ -40,8 +40,37 @@ export interface Step {
 
 }
 
+/** One spawned child: its own card, its own steps, settled by the summary it reports back. */
+export interface SubagentEntry {
+
+  id: string;
+  kind: "subagent";
+
+  /** Id from the agent event stream; the card is addressed by this, not by the entry id. */
+  subId: string;
+
+  /**
+   * Which spawn call opened this card, counted from the top of the transcript. Entry ids differ
+   * between a live run and one rebuilt from history, but the ordinal is the same either way.
+   */
+  spawnIndex: number;
+
+  name: string;
+  task: string;
+
+  steps: Step[];
+
+  /** Live status line from the child's loop — replaced by the summary once it settles. */
+  note: string;
+
+  status: "working" | "done" | "failed";
+  summary: string;
+
+}
+
 export type Entry =
   | Step
+  | SubagentEntry
   | { id: string; kind: "task"; text: string; attachments?: string[] }
   | { id: string; kind: "say"; text: string }
   | { id: string; kind: "done"; text: string }
@@ -180,6 +209,52 @@ export function Pixels({ className, cell = 5 }: { className?: string; cell?: num
 
 }
 
+/** Perimeter of the same nine-pixel grid, clockwise from the top-left. */
+const ORBIT_ORDER = [0, 1, 2, 5, 8, 7, 6, 3];
+
+const ORBIT_DELAYS = Array.from({ length: 9 }, (_, index) => {
+
+  const step = ORBIT_ORDER.indexOf(index);
+
+  // the centre is off the track: null parks it dim instead of lighting it
+  return step === -1 ? null : step * 110;
+
+});
+
+/** A comet lapping the grid — the same cells as Pixels, lit in a circuit rather than a wavefront. */
+export function Orbit({ className, cell = 3 }: { className?: string; cell?: number }) {
+
+  return (
+
+    <span aria-hidden className={cn("grid", className)} style={{ gridTemplateColumns: `repeat(3, ${cell}px)`, gap: cell <= 3 ? 1.5 : 2 }}>
+
+      {ORBIT_DELAYS.map((delay, index) => (
+
+        <span
+
+          key={index}
+          className="rounded-[1px] bg-ink"
+
+          style={{
+
+            width: cell,
+            height: cell,
+
+            opacity: delay === null ? 0.07 : 0.15,
+            animation: delay === null ? "none" : `pixel-on 950ms ease-in-out ${delay}ms infinite`,
+
+          }}
+
+        />
+
+      ))}
+
+    </span>
+
+  );
+
+}
+
 /** Stable, quiet placeholder while the model has not labeled a step yet. Not a dropdown. */
 export function Working() {
 
@@ -204,6 +279,10 @@ const TOOL_ICONS: Record<Tool, typeof FileTextIcon> = {
   edit: PencilLineIcon,
   delete: Trash2Icon,
   run: TerminalIcon,
+  spawn: UsersIcon,
+  plan: ListTodoIcon,
+  ask: ListChecksIcon,
+  retry: RotateCcwIcon,
   say: MessageSquareIcon,
   done: CheckIcon,
 
@@ -287,6 +366,9 @@ interface StepRowProps {
   /** False once a later call exists (or the run ended) — kills a stuck shimmer. */
   pending?: boolean;
 
+  /** Replaces the exit-code status on rows that know more about themselves than the exit code does. */
+  note?: ReactNode;
+
 }
 
 interface StepRowState {
@@ -304,7 +386,7 @@ class StepRow extends Component<StepRowProps, StepRowState> {
 
   render() {
 
-    const { step, open, onToggle, pending = true } = this.props;
+    const { step, open, onToggle, pending = true, note } = this.props;
     const { thinkOpen } = this.state;
 
     const thinking = step.thinking.trim();
@@ -405,7 +487,7 @@ class StepRow extends Component<StepRowProps, StepRowState> {
 
     );
 
-    const trailing = hasLineCounts ? (
+    const computed = hasLineCounts ? (
 
       <span className="flex shrink-0 items-center gap-1.5 font-mono text-[12px] tabular-nums" title={failed ? `Exit code ${step.exitCode}` : undefined}>
 
@@ -423,6 +505,9 @@ class StepRow extends Component<StepRowProps, StepRowState> {
       </span>
 
     );
+
+    // a spawn row reports how many children are still out; its exit code says nothing until they land
+    const trailing = note ?? computed;
 
     return (
 
@@ -549,15 +634,30 @@ function editsOf(steps: Step[]): FileEdit[] {
 
 }
 
+/** Cards from one spawn block, pinned to the step that opened them. */
+export interface SwarmGroup {
+
+  after: string;
+  subs: SubagentEntry[];
+
+}
+
 interface RunProps {
 
   steps: Step[];
 
-  /** The whole session is done — mid-run the summary would flash in between every step. */
+  /** Subagent cards to drop directly beneath their spawn row. */
+  swarms?: SwarmGroup[];
+
+  /** This run is settled — mid-run the summary would flash in between every step. */
   finished: boolean;
 
   /** Between steps: show Working inside this run (gap-1) instead of as a separate block. */
   showWorking?: boolean;
+
+  /** Final <done> for this run, folded in so it paints with the already-mounted row. */
+  verdict?: Extract<Entry, { kind: "done" }>;
+  verdictAction?: ReactNode;
 
   isOpen: (entry: Entry) => boolean;
   onToggle: (entry: Entry) => void;
@@ -573,7 +673,7 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
 
   render() {
 
-    const { steps, finished, showWorking, isOpen, onToggle } = this.props;
+    const { steps, swarms, finished, showWorking, verdict, verdictAction, isOpen, onToggle } = this.props;
     const { allEdits } = this.state;
 
     const visible = steps.filter((step) => !isDoneStep(step));
@@ -586,23 +686,42 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
 
         <div className="flex flex-col gap-1">
 
-          {visible.map((step, index) => (
+          {visible.map((step, index) => {
 
-            <div key={step.id} style={{ animation: `fade-up 300ms var(--ease-glide) ${Math.min(index, 8) * 45}ms both` }}>
+            const group = swarms?.find((one) => one.after === step.id);
+            const live = group ? group.subs.filter((sub) => sub.status === "working").length : 0;
 
-              <StepRow
+            return (
 
-                step={step}
-                open={isOpen(step)}
-                onToggle={() => onToggle(step)}
+              <div key={step.id} style={{ animation: `fade-up 300ms var(--ease-glide) ${Math.min(index, 8) * 45}ms both` }}>
 
-                pending={!finished && index === visible.length - 1 && !showWorking}
+                <StepRow
 
-              />
+                  step={step}
+                  open={isOpen(step)}
+                  onToggle={() => onToggle(step)}
 
-            </div>
+                  pending={!finished && index === visible.length - 1 && !showWorking}
 
-          ))}
+                  note={live ? <span className="shrink-0 text-[12.5px] text-ink-3 animate-fade-in">{live} running</span> : undefined}
+
+                />
+
+                {group ? (
+
+                  <div className="mt-1.5 mb-1 flex flex-col gap-2">
+
+                    {group.subs.map((sub) => <SubagentCard key={sub.id} entry={sub} />)}
+
+                  </div>
+
+                ) : null}
+
+              </div>
+
+            );
+
+          })}
 
           {showWorking ? <Working /> : null}
 
@@ -639,11 +758,169 @@ class Run extends Component<RunProps, { allEdits: boolean }> {
 
         ) : null}
 
+        {verdict ? (
+
+          <div className="mt-6">
+
+            <Verdict tone="green" icon={<CheckIcon className="size-3.5" strokeWidth={3.5} />} action={verdictAction}>
+
+              <Md className="max-w-[42rem] text-[14px] text-ink">{cleanSummary(verdict.text)}</Md>
+
+            </Verdict>
+
+          </div>
+
+        ) : null}
+
       </div>
 
     );
 
   }
+
+}
+
+interface SubagentCardState {
+
+  open: boolean;
+  openSteps: Set<string>;
+
+}
+
+/**
+ * A child's work, folded into one card. It owns its own open state rather than borrowing the
+ * transcript's: these rows come and go with the run, and a stale id in the shared set outlives them.
+ */
+class SubagentCard extends Component<{ entry: SubagentEntry }, SubagentCardState> {
+
+  state: SubagentCardState = { open: false, openSteps: new Set<string>() };
+
+  private toggleStep = (step: Step) => {
+
+    this.setState((prev) => {
+
+      const openSteps = new Set(prev.openSteps);
+
+      if (openSteps.has(step.id)) {
+
+        openSteps.delete(step.id);
+
+      } else {
+
+        openSteps.add(step.id);
+
+      }
+
+      return { openSteps };
+
+    });
+
+  };
+
+  render() {
+
+    const { entry } = this.props;
+    const { open, openSteps } = this.state;
+
+    const working = entry.status === "working";
+    const failed = entry.status === "failed";
+
+    const count = entry.steps.length;
+    const subtitle = working ? entry.note || entry.task : entry.task;
+
+    return (
+
+      <div className={cn("overflow-hidden rounded-card border bg-surface animate-fade-up", failed ? "border-red/40" : "border-line")}>
+
+        <button type="button" aria-expanded={open} onClick={() => this.setState((prev) => ({ open: !prev.open }))} className="flex w-full min-w-0 cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left" >
+
+          <span className="flex size-4 shrink-0 items-center justify-center">
+
+            {working ? (
+
+              <Orbit cell={3} />
+
+            ) : failed ? (
+
+              <TriangleAlertIcon className="size-4 text-red" strokeWidth={2.5} />
+
+            ) : (
+
+              <CheckIcon className="size-4 text-green" strokeWidth={3} />
+
+            )}
+
+          </span>
+
+          <span className="flex min-w-0 flex-1 flex-col">
+
+            <span className={cn("truncate text-[13.5px] font-medium", failed ? "text-red" : "text-ink")}>{entry.name}</span>
+
+            <span className="truncate text-[12px] text-ink-3">{subtitle}</span>
+
+          </span>
+
+          <span className="shrink-0 font-mono text-[12px] tabular-nums text-ink-3">
+
+            {count === 1 ? "1 step" : `${count} steps`}
+
+          </span>
+
+          <ChevronDownIcon className={cn("size-4 shrink-0 text-ink-3 transition-transform duration-150", open ? "" : "-rotate-90")} />
+
+        </button>
+
+        <Reveal open={open}>
+
+          <div className="flex flex-col gap-1 border-t border-line px-3 py-2">
+
+            {count ? entry.steps.map((step) => (
+
+              <StepRow key={step.id} step={step} open={openSteps.has(step.id)} onToggle={() => this.toggleStep(step)} pending={working} />
+
+            )) : (
+
+              <p className="py-1 text-[12.5px] text-ink-3">Nothing yet.</p>
+
+            )}
+
+          </div>
+
+        </Reveal>
+
+        {entry.summary ? (
+
+          <div className="border-t border-line bg-inset px-3 py-2.5">
+
+            <Md className="text-[13px] leading-[1.7] text-ink-2">{entry.summary}</Md>
+
+          </div>
+
+        ) : null}
+
+      </div>
+
+    );
+
+  }
+
+}
+
+/**
+ * Children with no step row to hang off — a replayed transcript, or a spawn whose row was pruned.
+ * The count that used to sit here now rides on the spawn row itself.
+ */
+function Swarm({ subs }: { subs: SubagentEntry[] }) {
+
+  return (
+
+    <div className="flex w-full flex-col gap-2">
+
+      {subs.map((sub) => <SubagentCard key={sub.id} entry={sub} />)}
+
+    </div>
+
+  );
 
 }
 
@@ -786,7 +1063,12 @@ interface TranscriptProps {
 }
 
 /** Rows collapse into blocks: contiguous steps become one run, everything else stands alone. */
-type Block = { key: string; kind: "run"; steps: Step[] } | { key: string; kind: "entry"; entry: Exclude<Entry, Step> };
+type DoneEntry = Extract<Entry, { kind: "done" }>;
+
+type Block =
+  | { key: string; kind: "run"; steps: Step[]; swarms?: SwarmGroup[]; verdict?: DoneEntry }
+  | { key: string; kind: "swarm"; subs: SubagentEntry[] }
+  | { key: string; kind: "entry"; entry: Exclude<Entry, Step | SubagentEntry> };
 
 function asSayStep(entry: Extract<Entry, { kind: "say" }>): Step {
 
@@ -809,19 +1091,134 @@ function asSayStep(entry: Extract<Entry, { kind: "say" }>): Step {
 
 }
 
+function doneTextFromStep(step: Step): string {
+
+  const fromOutput = step.output?.trim() ?? "";
+
+  if (fromOutput) {
+
+    return fromOutput;
+
+  }
+
+  return extractFinishedSummary(step.command ?? "") ?? "";
+
+}
+
+type RunBlock = Extract<Block, { kind: "run" }>;
+type EntryBlock = Extract<Block, { kind: "entry" }>;
+
+/**
+ * Where the turn in flight parks its verdict. Held as a reference to the block itself,
+ * so the paired `kind:"done"` writes through it regardless of what landed in between —
+ * that is what the old backwards walk was reaching for.
+ */
+type VerdictSlot =
+  | { on: "run"; run: RunBlock }
+  | { on: "row"; row: EntryBlock };
+
+/**
+ * One rule: a verdict closes the run that opened it, and the `kind:"done"` following a
+ * done step is that same verdict refined — never a second row.
+ */
+function placeVerdict(blocks: Block[], verdict: DoneEntry, slot: VerdictSlot | null): VerdictSlot {
+
+  // the turn already has a verdict; this is the paired half, so write through it in place
+  if (slot) {
+
+    if (slot.on === "run") {
+
+      slot.run.verdict = verdict;
+
+    } else {
+
+      slot.row.entry = verdict;
+
+    }
+
+    return slot;
+
+  }
+
+  const last = blocks[blocks.length - 1];
+
+  if (last?.kind === "run") {
+
+    last.verdict = verdict;
+
+    return { on: "run", run: last };
+
+  }
+
+  // no run to close (a verdict straight after a task or a swarm) — it stands alone.
+  // the key stays the first verdict's id so refining it never remounts the row.
+  const row: EntryBlock = { key: verdict.id, kind: "entry", entry: verdict };
+
+  blocks.push(row);
+
+  return { on: "row", row };
+
+}
+
 function toBlocks(entries: Entry[]): Block[] {
 
   const blocks: Block[] = [];
+
+  // open for the turn in flight, closed by the next task — see placeVerdict
+  let slot: VerdictSlot | null = null;
 
   for (const entry of entries) {
 
     if (entry.kind === "step" && isDoneStep(entry)) {
 
+      const text = doneTextFromStep(entry) || "Task complete.";
+
+      slot = placeVerdict(blocks, { id: entry.id, kind: "done", text }, slot);
+
       continue;
 
     }
 
-    // echoes sit in the run (gap-1) so they line up with other tool calls
+    // children of one spawn arrive back to back, so they collect against the row that opened them
+    if (entry.kind === "subagent") {
+
+      const last = blocks[blocks.length - 1];
+
+      if (last?.kind === "run") {
+
+        // the spawn row is the newest step when its children start, and stays their anchor after
+        const anchor = last.steps[last.steps.length - 1]?.id ?? "";
+        const groups = last.swarms ?? (last.swarms = []);
+        const group = groups.find((one) => one.after === anchor);
+
+        if (group) {
+
+          group.subs.push(entry);
+
+        } else {
+
+          groups.push({ after: anchor, subs: [entry] });
+
+        }
+
+        continue;
+
+      }
+
+      if (last?.kind === "swarm") {
+
+        last.subs.push(entry);
+        continue;
+
+      }
+
+      blocks.push({ key: `swarm-${entry.id}`, kind: "swarm", subs: [entry] });
+      continue;
+
+    }
+
+    // echoes sit in the run (gap-1) so they line up with other tool calls;
+    // the slot is left alone — a step after a done step is still the same turn
     if (entry.kind === "say" || entry.kind === "step") {
 
       const step = entry.kind === "say" ? asSayStep(entry) : entry;
@@ -836,6 +1233,21 @@ function toBlocks(entries: Entry[]): Block[] {
 
       blocks.push({ key: `run-${step.id}`, kind: "run", steps: [step] });
       continue;
+
+    }
+
+    if (entry.kind === "done") {
+
+      slot = placeVerdict(blocks, entry, slot);
+      continue;
+
+    }
+
+    // a new task is the only thing that ends a turn; an error is a sibling of the
+    // verdict, not a separator, so it leaves the slot open
+    if (entry.kind !== "error") {
+
+      slot = null;
 
     }
 
@@ -866,7 +1278,17 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle, u
   };
 
   // between steps nothing is streaming and no row is pending, so the transcript would look idle
-  const busy = entries.some((entry) => entry.kind === "step" && !isDoneStep(entry) && (entry.streaming || entry.output === null));
+  const busy = entries.some((entry) => (
+    (entry.kind === "step" && !isDoneStep(entry) && (entry.streaming || entry.output === null))
+    || (entry.kind === "subagent" && entry.status === "working")
+  ));
+
+  const tail = blocks[blocks.length - 1];
+  const lastSettled = tail?.kind === "run"
+    ? Boolean(tail.verdict)
+    : tail?.kind === "swarm"
+      ? false
+      : tail?.entry.kind === "done" || tail?.entry.kind === "error";
 
   return (
 
@@ -893,8 +1315,9 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle, u
             {blocks.map((block, index) => {
 
               const last = index === blocks.length - 1;
+              const runVerdict = block.kind === "run" ? block.verdict : undefined;
               // keep Working inside the run's gap-1 so it sits closer than a block-level gap-6
-              const workInRun = running && !busy && last && block.kind === "run";
+              const workInRun = running && !busy && last && block.kind === "run" && !runVerdict;
 
               return (
 
@@ -902,7 +1325,22 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle, u
 
                   {block.kind === "run" ? (
 
-                    <Run steps={block.steps} finished={!running} showWorking={workInRun} isOpen={isOpen} onToggle={onToggle} />
+                    <Run
+
+                      steps={block.steps}
+                      swarms={block.swarms}
+                      finished={!running || !last || Boolean(runVerdict)}
+                      showWorking={workInRun}
+                      verdict={runVerdict}
+                      verdictAction={runVerdict ? undoNode(runVerdict) : undefined}
+                      isOpen={isOpen}
+                      onToggle={onToggle}
+
+                    />
+
+                  ) : block.kind === "swarm" ? (
+
+                    <Swarm subs={block.subs} />
 
                   ) : block.entry.kind === "task" ? (
 
@@ -936,9 +1374,9 @@ export function Transcript({ entries, running, empty, usage, isOpen, onToggle, u
 
             })}
 
-            {running && !busy && (blocks.length === 0 || blocks[blocks.length - 1]?.kind !== "run") ? (
+            {running && !busy && !lastSettled && (blocks.length === 0 || blocks[blocks.length - 1]?.kind !== "run") ? (
 
-              <MessageScrollerItem messageId="working">
+              <MessageScrollerItem key="working" messageId="working">
 
                 <div className="-mt-2">
 

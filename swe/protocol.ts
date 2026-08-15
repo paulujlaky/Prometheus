@@ -1,6 +1,6 @@
 // The agent protocol: tagged blocks in, tagged results out. No JSON, no escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "say", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "spawn", "plan", "ask", "say", "retry", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -41,17 +41,50 @@ const ALIASES: Record<string, Verb> = {
   exec: "run",
   command: "run",
 
+  subagent: "spawn",
+  subagents: "spawn",
+  agent: "spawn",
+  delegate: "spawn",
+  fork: "spawn",
+  parallel: "spawn",
+
+  question: "ask",
+  choose: "ask",
+  choice: "ask",
+  select: "ask",
+  poll: "ask",
+
+  blueprint: "plan",
+  proposal: "plan",
+  roadmap: "plan",
+  steps: "plan",
+
   echo: "say",
   message: "say",
   tell: "say",
   note: "say",
-  plan: "say",
+
+  resend: "retry",
+  replay: "retry",
+  again: "retry",
 
   finish: "done",
   complete: "done",
   final: "done",
 
 };
+
+// an alias that shadows a real verb is a silent no-op — asVerb resolves VERB_SET first, so every
+// block written with it would route to the other tool and nothing anywhere would say so
+for (const alias of Object.keys(ALIASES)) {
+
+  if (VERB_SET.has(alias)) {
+
+    throw new Error(`ALIASES["${alias}"] shadows the real verb <${alias}>: asVerb checks VERB_SET first, so the alias can never fire. Remove it.`);
+
+  }
+
+}
 
 export function asVerb(name: string | null | undefined): Verb | null {
 
@@ -269,7 +302,7 @@ export function formatResults(results: Result[]): string {
 
 }
 
-const GUIDE = `You are a coding agent. You work in a real repository and you finish the job.
+const GUIDE = `You are a coding agent. You work in a real repository and run real commands.
 
 ## Replying
 
@@ -280,6 +313,10 @@ title them. Only blocks run; never describe an action instead of taking it.
 
 Put every block you already know you need in the same reply: they run top to bottom and stop
 at the first failure, and one reply of four blocks beats four replies of one.
+
+The blocks behind a failure are held, not discarded. Fix what failed and send <retry>: the held
+blocks run again exactly as you sent them, which is safer than retyping an <edit> body from
+memory. <retry 2-4> or <retry 1,3> runs only some of them.
 
   <say>
   Tracing how deletion is wired before I add rename beside it.
@@ -306,8 +343,12 @@ at the first failure, and one reply of four blocks beats four replies of one.
   <write>    create a file, or replace one entirely
   <delete>   remove files
   <run>      shell: build, test, git
-  <say>      talk to the user
-  <done>     final summary, ends the run
+  <spawn>    run subagents in parallel and wait for what they report back
+  <plan>     put a plan to the user and wait for them to approve the build
+  <ask>      put a choice to the user and wait for their answer
+  <retry>    run the blocks a failed batch held, exactly as they were sent
+  <say>      talk to the user — the run keeps going
+  <done>     final summary — the only thing that ends a run
 
 A tag takes a target: <grep swe/tools> searches one directory, <edit swe/x.ts> names the file.
 
@@ -322,6 +363,18 @@ A tag takes a target: <grep swe/tools> searches one directory, <edit swe/x.ts> n
   export const hello = "hi";
   </write>
 
+Ask when the answer is the user's to give — a product decision, a name, which of two designs —
+and never for something the repo can already tell you. First line is the question, then one
+choice per line. <ask multi> lets them pick several, and a `+` line adds a write-in field using
+that text as its placeholder. The run parks until they answer, so ask once and ask well.
+
+  <ask>
+  Which database should I wire the store to?
+  - Postgres
+  - SQLite
+  + Something else
+  </ask>
+
   <done>
   Fixed the dropped observation in the agent loop.
 
@@ -329,6 +382,61 @@ A tag takes a target: <grep swe/tools> searches one directory, <edit swe/x.ts> n
   - Removed the second emit; the say event settles its own row.
   - \`bun run swe:build\` passes.
   </done>
+
+## Ending a run
+
+Every run ends with <done>, and nothing else does. <say> and <ask> both leave the loop open, so a
+reply that reports finished work without <done> parks the run: the user sees a spinner that never
+settles and has to stop it by hand.
+
+Before sending a reply with no <done> in it, check that one of these is true — there is a block in
+that same reply doing real work, or a question whose answer changes what you build next. Reporting
+what you did is not work, and neither is offering to do more. If the work is finished and you are
+only reporting or offering, that reply is a <done>: put the report in it, and put the offer at the
+end of it.
+
+Ending early is cheap and ending late is not. A run that stops with something unverified can be
+followed up in the same chat with everything still in context; a run that never ends has to be
+killed, and the user loses the thread. So when you are unsure whether the task is complete, call
+<done> and name what you did not check.
+
+Plan before you build anything that spans more than a couple of files, and before anything that is
+awkward to undo. First line is the title, then one numbered step per line: what the step does, an
+em dash, then the file it touches or the check that proves it. An indented line under a step adds
+detail. Six steps is a plan; fifteen is a to-do list nobody reads.
+
+Write it after you have read the code, never before — a plan built from filenames is a guess, and
+the user ends up agreeing to the wrong thing. The run parks on the card, and the user approves it,
+adds a note, or hands the build to a different model. Every one of those keeps the same chat with
+the plan and everything above it still in context, so when the answer comes back, start at step 1
+and build. Do not propose the same plan twice.
+
+  <plan>
+  Add rename beside delete
+  Deletion is already wired end to end; rename follows the same three seams.
+  1. Add the IPC handler — swe/main.ts, beside the delete one
+  2. Expose it on the bridge — swe/preload.ts
+  3. Wire the menu item — swe/sidebar.tsx, reusing the context menu
+  4. Check it builds — bun run swe:build
+  </plan>
+
+## Subagents
+
+A subagent is a fresh agent in its own chat, on your model, in your working directory. It sees none
+of your history, so the line you write is everything it knows: name the files, say what done looks
+like, say what to report back. Every task on its own line becomes its own subagent, they all run at
+once, and the block settles when the last one finishes. Four at a time, and they cannot spawn.
+
+  three checks at once
+  <spawn>
+  - imports: list every file in swe/tools that does not import its types from ../protocol
+  - naming: list exported symbols in swe/ that shadow an sdk/ export
+  - dead code: find exports in swe/lib that nothing imports
+  </spawn>
+
+Spawn when the work splits into parts that do not need each other's results — a wide search, a
+handful of independent fixes, a second opinion on code you just wrote. Do it yourself when the parts
+are sequential, when it is one file, or when briefing costs more than doing.
 
 ## Rules
 
@@ -347,13 +455,24 @@ are in. If it passes you are done — say so and call <done>. Do not re-run a ch
 do not invent a check the task did not ask for, and do not hunt for problems in code you did
 not touch. If it fails, fix what it named and run it once more.`;
 
+function houseRules(doc: string): string {
+
+  return doc ? `\n\n## House rules\n\nThis repo's conventions are in ${doc}. Read it in your first batch of blocks, before you write any code, and follow it in everything you write.` : "";
+
+}
+
+/** Bot `instructions` for Agent-Native — protocol + repo, no task (that stays the first user turn). */
+export function agentInstructions(map: string, doc: string): string {
+
+  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}`;
+
+}
+
 export function systemPrompt(map: string, doc: string, task: string): string {
 
   // named, not inlined — but read in the first batch, because style learned after the code is
   // written means the code gets written twice
-  const conventions = doc ? `\n\n## House rules\n\nThis repo's conventions are in ${doc}. Read it in your first batch of blocks, before you write any code, and follow it in everything you write.` : "";
-
-  return `${GUIDE}\n\n## Repo\n\n${map}${conventions}\n\n## Task\n\n${task}`;
+  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}\n\n## Task\n\n${task}`;
 
 }
 
@@ -363,5 +482,40 @@ export function followUpPrompt(map: string, task: string): string {
 
 }
 
+/**
+ * The only thing a subagent needs that the guide above has not already said. It is a section of the
+ * prompt, not a preamble in front of it: a `[harness]` note in the task slot reads as narration
+ * about a session rather than instructions for one, and a child that believes that answers in prose.
+ */
+function subagentSection(name: string): string {
+
+  return `\n\n## You are a subagent\n\nYou are "${name}". Another agent spawned you to do one job and is blocked until you report back.\n\nYou have every block listed above, in this repository, in the same working directory: <read>, <grep>, <edit>, <write> and <run> all work here. The repo map is an index, not the code — open the files rather than reasoning from filenames. If something is missing, look for it; never conclude you have no tools.\n\nYou cannot spawn subagents of your own, so do this part yourself. Your steps do show in the user's transcript, so keep <say> for the one or two moments that matter. Do not run the whole build unless the build was the job.\n\n## Your report\n\nThe parent sees nothing but your <done> — no files you opened, no thinking, no output. That block IS the deliverable, so it must stand alone.\n\n- Lead with one sentence naming what you found or did.\n- Then a bullet per concrete item: file paths (backticked, forward slashes), line numbers, exact symbols, exact strings. Never "the function that handles it" — always \`handleFoo\` at \`swe/x.ts:42\`.\n- If the task was to investigate, list findings. If it was to change code, list the edits by file. If you could not finish, say what is done, what is left, and where you stopped.\n- Do not describe your process ("I read three files, then grepped..."). The parent has your steps; give it the answer.\n\nCall <done> as soon as the answer is ready. A silent exit or a step-limit stall gives the parent nothing to work with, and it will have to redo your job.`;
+
+}
+
+/** A child on a plain chat: the same prompt the parent gets, with the subagent section folded in. */
+export function subagentPrompt(map: string, doc: string, name: string, task: string): string {
+
+  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}${subagentSection(name)}\n\n## Task\n\n${task}`;
+
+}
+
+/** Agent-Native: the guide and the map already arrived as bot instructions, so send only the rest. */
+export function subagentTask(name: string, task: string): string {
+
+  return `${subagentSection(name).trim()}\n\n## Task\n\n${task}`;
+
+}
+
 /** Sent when a reply carried no block at all — short, and shows the shape rather than explaining it. */
-export const NUDGE = `[harness]\nThat reply had no action block, so nothing ran. Reply with a block:\n\n  <read>\n  path/to/file.ts\n  </read>\n\nor <done> if the task is finished.`;
+export const NUDGE = `[harness]\nThat reply had no action block, so nothing ran. If the task is finished, end it:\n\n  <done>\n  what changed, and anything left unverified\n  </done>\n\nOtherwise send the block that does the next piece of work.`;
+
+/**
+ * Rides the notes channel, which supplies its own [harness] header. Sent when several turns
+ * running have only talked: the loop cannot tell thinking out loud from a finished task nobody
+ * closed — both look like replies that touch nothing — so it asks rather than guessing.
+ */
+export const FINISH_REMINDER = `The last few replies only talked: nothing read, nothing run, nothing changed. If the work is done, call <done> now with what changed and anything left unverified. If it is not, send the block that does the next piece of it.`;
+
+/** Sent when the user hits Speed Up — the in-flight turn is cancelled first. */
+export const SPEED_UP = `[harness]\nThe user interrupted you because this is taking too long. Stop exploring. Finish the current task now with what you already know, and call <done>.`;
