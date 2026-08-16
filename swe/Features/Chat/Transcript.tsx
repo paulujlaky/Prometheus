@@ -814,31 +814,35 @@ class SubagentCard extends Component<{ entry: SubagentEntry }, SubagentCardState
 
         <Reveal open={open}>
 
-          <div className="flex flex-col gap-1 border-t border-line px-3 py-2">
+          <div className="border-t border-line">
 
-            {count ? entry.steps.map((step) => (
+            <div className="flex flex-col gap-1 px-3 py-2">
 
-              <StepRow key={step.id} step={step} open={openSteps.has(step.id)} onToggle={() => this.toggleStep(step)} pending={working} />
+              {count ? entry.steps.map((step) => (
 
-            )) : (
+                <StepRow key={step.id} step={step} open={openSteps.has(step.id)} onToggle={() => this.toggleStep(step)} pending={working} />
 
-              <p className="py-1 text-[12.5px] text-ink-3">Nothing yet.</p>
+              )) : (
 
-            )}
+                <p className="py-1 text-[12.5px] text-ink-3">Nothing yet.</p>
+
+              )}
+
+            </div>
+
+            {entry.summary ? (
+
+              <div className="border-t border-line bg-inset px-3 py-2.5">
+
+                <Md className="text-[13px] leading-[1.7] text-ink-2">{entry.summary}</Md>
+
+              </div>
+
+            ) : null}
 
           </div>
 
         </Reveal>
-
-        {entry.summary ? (
-
-          <div className="border-t border-line bg-inset px-3 py-2.5">
-
-            <Md className="text-[13px] leading-[1.7] text-ink-2">{entry.summary}</Md>
-
-          </div>
-
-        ) : null}
 
       </div>
 

@@ -66,7 +66,7 @@ export class App extends Component<{}, AppState> {
 
             if (chatId === this.state.activeChatId) this.forceUpdate();
 
-          });
+          }, this.state.entries);
 
         }
 

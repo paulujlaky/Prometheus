@@ -1,4 +1,4 @@
-import { applyToSubagent, closeSteps, placeSubagents } from "@/Features/Chat/Session";
+import { applyToSubagent, closeSteps, isSpawnStep, placeSubagents } from "@/Features/Chat/Session";
 import { cleanSummary } from "@/Features/Chat/Transcript";
 
 import type { AgentEvent } from "@/Agent/Agent";
@@ -67,7 +67,7 @@ export class SubagentStore {
 
   }
 
-  apply(runId: string, event: AgentEvent, chatId: string | null, onWrite: (chatId: string) => void) {
+  apply(runId: string, event: AgentEvent, chatId: string | null, onWrite: (chatId: string) => void, rows?: Entry[]) {
 
     if (!chatId) {
 
@@ -81,7 +81,10 @@ export class SubagentStore {
 
       if (!this.inSpawnBatch.has(runId)) {
 
-        this.spawnSeen.set(runId, (this.spawnSeen.get(runId) ?? 0) + 1);
+        const transcriptIndex = rows ? rows.filter(isSpawnStep).length - 1 : -1;
+        const previousIndex = cards.reduce((last, card) => Math.max(last, card.spawnIndex), -1);
+
+        this.spawnSeen.set(runId, Math.max(0, transcriptIndex >= 0 ? transcriptIndex : previousIndex + 1));
         this.inSpawnBatch.add(runId);
 
       }
@@ -94,7 +97,7 @@ export class SubagentStore {
         kind: "subagent",
 
         subId: event.id,
-        spawnIndex: Math.max(0, (this.spawnSeen.get(runId) ?? 1) - 1),
+        spawnIndex: this.spawnSeen.get(runId) ?? 0,
 
         name: event.name,
         task: event.task,

@@ -1004,10 +1004,29 @@ export class MiniAgent {
       }
 
       const count = outcome.tasks.length;
+      let remaining = count;
 
       onEvent({ type: "status", text: count === 1 ? "Running 1 subagent" : `Running ${count} subagents` });
 
-      const reports = await Promise.all(outcome.tasks.map((task) => this.runSubagent(task, timeoutMs)));
+      const reports = await Promise.all(outcome.tasks.map(async (task) => {
+
+        try {
+
+          return await this.runSubagent(task, timeoutMs);
+
+        } finally {
+
+          remaining -= 1;
+
+          if (remaining > 0) {
+
+            onEvent({ type: "status", text: remaining === 1 ? "Running 1 subagent" : `Running ${remaining} subagents` });
+
+          }
+
+        }
+
+      }));
 
       const text = formatReports(reports);
       const ok = reports.every((report) => report.ok);
