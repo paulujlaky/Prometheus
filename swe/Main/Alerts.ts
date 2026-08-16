@@ -1,6 +1,6 @@
 import { Notification } from "electron";
 
-import { APP_ICON, getWindow } from "./Window";
+import { getAppIcon, getWindow } from "./Window";
 
 export const NOTICES = {
 
@@ -19,7 +19,7 @@ export function alertUser(title: string, body: string) {
   const window = getWindow();
 
   if (window?.isFocused()) return;
-  if (Notification.isSupported()) new Notification({ title, body, icon: APP_ICON }).show();
+  if (Notification.isSupported()) new Notification({ title, body, icon: getAppIcon() }).show();
 
   window?.flashFrame(true);
 

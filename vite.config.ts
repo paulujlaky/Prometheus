@@ -26,10 +26,14 @@ export default defineConfig({
 
   },
 
+  publicDir: path.resolve(root, "swe/assets"),
+
   build: {
 
     outDir: "dist",
-    emptyOutDir: true,
+    emptyOutDir: false,
+    target: "chrome140",
+    reportCompressedSize: false,
 
   },
 

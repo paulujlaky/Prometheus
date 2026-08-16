@@ -1,7 +1,6 @@
 import { Component } from "react";
-import type { ThemedToken } from "shiki";
 
-import { langOf, tokenize } from "@/Utils/Highlight";
+import { langOf, tokenize, type ThemedToken } from "@/Utils/Highlight";
 import { cn } from "@/Utils/Class";
 
 import type { FileWrite, WriteLine } from "@/Agent/Parse";

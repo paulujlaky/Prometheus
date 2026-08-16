@@ -9,8 +9,9 @@
     ".": "./sdk/index.ts"
   },
   "scripts": {
-    "swe:build": "vite build --config vite.config.ts && bun build swe/main.ts --target=node --format=cjs --external electron --outfile swe/dist/main.cjs && bun build swe/preload.ts --target=node --format=cjs --external electron --outfile swe/dist/preload.cjs && bun -e \"import { cpSync, mkdirSync } from 'node:fs'; mkdirSync('swe/dist/assets', { recursive: true }); cpSync('swe/assets/icon.png', 'swe/dist/assets/icon.png')\"",
-    "swe": "bun run swe:build && electron swe/dist/main.cjs"
+    "swe:compile": "bun swe/scripts/compile.ts",
+    "swe:build": "bun run swe:compile && electron-builder --publish never",
+    "swe": "bun run swe:compile && electron swe/dist/main.cjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -19,6 +20,7 @@
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
     "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
     "playwright": "^1.62.1",
     "shadcn": "^4.16.2",
     "tailwindcss": "^4.3.3",
@@ -45,5 +47,54 @@
   },
   "trustedDependencies": [
     "@ast-grep/cli"
-  ]
+  ],
+  "build": {
+    "appId": "com.boombox.agent",
+    "productName": "Boombox",
+    "icon": "swe/assets/icon.ico",
+    "electronLanguages": ["en-US"],
+    "directories": {
+      "app": "swe/dist",
+      "output": "swe/release"
+    },
+    "files": [
+      "**/*",
+      "!**/node_modules/**",
+      "!**/.env",
+      "!**/.env.*"
+    ],
+    "extraResources": [
+      {
+        "from": "swe/assets/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "swe/assets/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "win": {
+      "icon": "swe/assets/icon.ico",
+      "target": ["portable"],
+      "extraResources": [
+        {
+          "from": "node_modules/@ast-grep/cli-win32-x64-msvc/sg.exe",
+          "to": "bin/sg.exe"
+        }
+      ]
+    },
+    "mac": {
+      "icon": "swe/assets/icon.png",
+      "target": ["dmg"]
+    },
+    "linux": {
+      "icon": "swe/assets/icon.png",
+      "target": ["AppImage"]
+    },
+    "portable": {
+      "artifactName": "Boombox.exe"
+    }
+  }
 }

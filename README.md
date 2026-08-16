@@ -26,6 +26,8 @@ bun run swe
 
 That builds the renderer (Vite) and the process (Bun), then launches Electron.
 
+`bun run swe:build` packages a standalone executable into `swe/release`.
+
 ### Using The Agent
 
 1. Choose a **working folder** (last path is remembered).

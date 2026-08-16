@@ -1,26 +1,67 @@
-import { createHighlighter, type BundledLanguage, type Highlighter, type ThemedToken } from "shiki";
+import { createHighlighterCore, type HighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import type { LanguageRegistration, ThemeRegistrationAny, ThemedToken } from "@shikijs/types";
+
+import bash from "@shikijs/langs/bash";
+import githubDark from "@shikijs/themes/github-dark-default";
+
+export type { ThemedToken };
 
 const THEME = "github-dark-default";
 
-let ready: Promise<Highlighter> | null = null;
+type LangModule = { default: LanguageRegistration | LanguageRegistration[] };
 
-function highlighter(): Promise<Highlighter> {
+const LOADERS: Record<string, () => Promise<LangModule>> = {
 
-  ready ??= createHighlighter({
+  typescript: () => import("@shikijs/langs/typescript"),
+  tsx: () => import("@shikijs/langs/tsx"),
+  jsx: () => import("@shikijs/langs/jsx"),
+  javascript: () => import("@shikijs/langs/javascript"),
 
-    themes: [THEME],
-    langs: ["bash"],
+  json: () => import("@shikijs/langs/json"),
+  jsonc: () => import("@shikijs/langs/jsonc"),
+  yaml: () => import("@shikijs/langs/yaml"),
+  toml: () => import("@shikijs/langs/toml"),
+  xml: () => import("@shikijs/langs/xml"),
 
-    engine: createJavaScriptRegexEngine({ forgiving: true }),
+  css: () => import("@shikijs/langs/css"),
+  scss: () => import("@shikijs/langs/scss"),
+  less: () => import("@shikijs/langs/less"),
+  html: () => import("@shikijs/langs/html"),
+  svelte: () => import("@shikijs/langs/svelte"),
+  vue: () => import("@shikijs/langs/vue"),
 
-  });
+  markdown: () => import("@shikijs/langs/markdown"),
+  mdx: () => import("@shikijs/langs/mdx"),
 
-  return ready;
+  python: () => import("@shikijs/langs/python"),
+  ruby: () => import("@shikijs/langs/ruby"),
+  go: () => import("@shikijs/langs/go"),
+  rust: () => import("@shikijs/langs/rust"),
+  java: () => import("@shikijs/langs/java"),
+  kotlin: () => import("@shikijs/langs/kotlin"),
+  c: () => import("@shikijs/langs/c"),
+  cpp: () => import("@shikijs/langs/cpp"),
+  csharp: () => import("@shikijs/langs/csharp"),
+  php: () => import("@shikijs/langs/php"),
+  swift: () => import("@shikijs/langs/swift"),
+  lua: () => import("@shikijs/langs/lua"),
+  r: () => import("@shikijs/langs/r"),
+  dart: () => import("@shikijs/langs/dart"),
+  zig: () => import("@shikijs/langs/zig"),
 
-}
+  fish: () => import("@shikijs/langs/fish"),
+  powershell: () => import("@shikijs/langs/powershell"),
 
-const EXTENSIONS: Record<string, BundledLanguage> = {
+  sql: () => import("@shikijs/langs/sql"),
+  graphql: () => import("@shikijs/langs/graphql"),
+  proto: () => import("@shikijs/langs/proto"),
+  docker: () => import("@shikijs/langs/docker"),
+  make: () => import("@shikijs/langs/make"),
+
+};
+
+const EXTENSIONS: Record<string, string> = {
 
   ts: "typescript", mts: "typescript", cts: "typescript",
   tsx: "tsx", jsx: "jsx",
@@ -42,6 +83,23 @@ const EXTENSIONS: Record<string, BundledLanguage> = {
   dockerfile: "docker", makefile: "make",
 
 };
+
+let ready: Promise<HighlighterCore> | null = null;
+
+function highlighter(): Promise<HighlighterCore> {
+
+  ready ??= createHighlighterCore({
+
+    themes: [githubDark as ThemeRegistrationAny],
+    langs: [bash],
+
+    engine: createJavaScriptRegexEngine({ forgiving: true }),
+
+  });
+
+  return ready;
+
+}
 
 /** Shiki language id for a path, falling back to plain text. */
 export function langOf(file: string): string {
@@ -79,9 +137,19 @@ export async function tokenize(code: string, lang: string): Promise<ThemedToken[
 
   if (resolved !== "text" && !shiki.getLoadedLanguages().includes(resolved)) {
 
+    const load = LOADERS[resolved];
+
     try {
 
-      await shiki.loadLanguage(resolved as BundledLanguage);
+      if (load) {
+
+        await shiki.loadLanguage((await load()).default);
+
+      } else {
+
+        resolved = "text";
+
+      }
 
     } catch {
 
@@ -91,6 +159,6 @@ export async function tokenize(code: string, lang: string): Promise<ThemedToken[
 
   }
 
-  return shiki.codeToTokens(code, { lang: resolved as BundledLanguage, theme: THEME }).tokens;
+  return shiki.codeToTokens(code, { lang: resolved, theme: THEME }).tokens;
 
 }

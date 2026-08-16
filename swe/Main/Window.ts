@@ -1,15 +1,24 @@
 import { BrowserWindow } from "electron";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
-const here = resolve(dirname(process.argv[1] ?? ""));
+import { APP_ID, APP_NAME, bundleDir, resourcePath } from "./Bundle";
+
+const here = bundleDir();
 
 export function resolveIcon(): string | undefined {
 
   const candidates = [
 
+    resourcePath("icon.ico"),
+    join(here, "icon.ico"),
+    resourcePath("icon.png"),
+    join(here, "icon.png"),
+    join(here, "assets", "icon.ico"),
     join(here, "assets", "icon.png"),
+    resolve(here, "../assets/icon.ico"),
     resolve(here, "../assets/icon.png"),
+    resolve(here, "../../swe/assets/icon.ico"),
     resolve(here, "../../swe/assets/icon.png"),
 
   ];
@@ -28,7 +37,7 @@ export function resolveIcon(): string | undefined {
 
 }
 
-export const APP_ICON = resolveIcon();
+export const getAppIcon = resolveIcon;
 
 let window: BrowserWindow | null = null;
 
@@ -40,6 +49,8 @@ export function getWindow(): BrowserWindow | null {
 
 export function createWindow(): BrowserWindow {
 
+  const icon = resolveIcon();
+
   window = new BrowserWindow({
 
     width: 1096,
@@ -48,7 +59,7 @@ export function createWindow(): BrowserWindow {
     backgroundColor: "#111318",
     title: "Boombox Agent",
 
-    ...(APP_ICON ? { icon: APP_ICON } : {}),
+    ...(icon ? { icon } : {}),
 
     webPreferences: {
 
@@ -60,6 +71,28 @@ export function createWindow(): BrowserWindow {
     },
 
   });
+
+  if (icon) {
+
+    window.setIcon(icon);
+
+  }
+
+  if (process.platform === "win32") {
+
+    const portable = process.env.PORTABLE_EXECUTABLE_FILE;
+    const launch = portable || process.execPath;
+
+    window.setAppDetails({
+
+      appId: APP_ID,
+      relaunchDisplayName: APP_NAME,
+      relaunchCommand: `"${launch}"`,
+      ...(icon ? { appIconPath: icon } : {}),
+
+    });
+
+  }
 
   void window.loadFile(join(here, "index.html"));
 

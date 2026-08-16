@@ -330,23 +330,24 @@ export function resolveToolBinDirs(bundleDir: string): string[] {
   const dirs: string[] = [];
 
   // electron runs swe/dist/main.cjs → project root is ../..
-  const rootCandidates = [
+  const binCandidates = [
 
-    resolve(bundleDir, "../.."),
-    resolve(bundleDir, "../../.."),
+    process.resourcesPath ? join(process.resourcesPath, "bin") : "",
+    process.resourcesPath ? join(process.resourcesPath, "node_modules", "@ast-grep", "cli") : "",
+    process.resourcesPath ? join(process.resourcesPath, "node_modules", ".bin") : "",
 
-    process.cwd(),
+    join(bundleDir, "node_modules", ".bin"),
+    resolve(bundleDir, "../..", "node_modules", ".bin"),
+    resolve(bundleDir, "../../..", "node_modules", ".bin"),
+    join(process.cwd(), "node_modules", ".bin"),
 
   ];
 
-  for (const root of rootCandidates) {
+  for (const dir of binCandidates) {
 
-    const nm = join(root, "node_modules", ".bin");
+    if (dir && existsSync(dir)) {
 
-    if (existsSync(nm)) {
-
-      dirs.push(nm);
-      break;
+      dirs.push(dir);
 
     }
 
