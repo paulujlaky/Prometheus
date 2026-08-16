@@ -54,7 +54,7 @@ Blocks are forgiving where it costs nothing: verb synonyms (`list`, `search`, `b
 `<edit path="x">` and `<edit x>` are the same, an unclosed block still runs, and `<<<<<<< SEARCH` works
 wherever `@@ FIND` does. Edits match exactly first, then ignoring trailing space, then ignoring
 indentation — and a stale FIND comes back with the nearest real lines attached, so it is fixed in one
-turn instead of three. `swe/protocol.test.ts` pins all of it.
+turn instead of three.
 
 ---
 
