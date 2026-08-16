@@ -573,7 +573,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
           {loading && empty && (
 
-            <p className="px-2.5 py-2 text-[13px] text-ink-3">Loading…</p>
+            <p className="px-2.5 py-2 text-[13px] text-ink-3">Loading...</p>
 
           )}
 

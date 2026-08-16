@@ -228,7 +228,7 @@ export class ResponseStream {
 
       const section = this.sections.get(index);
 
-      // keep non-reasoning sections (Text, WebSearch, CodeExecution, …); drop chain-of-thought
+      // keep non-reasoning sections (Text, WebSearch, CodeExecution, ...); drop chain-of-thought
       if (!section?.text || isReasoningSection(section.sectionType)) {
 
         continue;

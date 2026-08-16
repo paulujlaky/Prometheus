@@ -26,6 +26,9 @@ export interface Settings {
   /** Settings-panel choices. Partial on disk; {@link loadPreferences} fills the gaps. */
   prefs?: Partial<Preferences>;
 
+  /** BoodleBox browser cookie used to authenticate the SDK. */
+  boodleCookie?: string;
+
   /** @deprecated Working directories now belong to individual chats. */
   cwd?: string | null;
 
@@ -180,6 +183,24 @@ export function saveSettings(patch: Partial<Settings>): Settings {
   writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 
   return next;
+
+}
+
+export function loadBoodleCookie(): string | null {
+
+  const value = loadSettings().boodleCookie;
+
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+
+}
+
+export function saveBoodleCookie(cookie: string): string {
+
+  const value = cookie.trim();
+
+  saveSettings({ boodleCookie: value });
+
+  return value;
 
 }
 

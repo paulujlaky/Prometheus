@@ -39,6 +39,9 @@ contextBridge.exposeInMainWorld("swe", {
 
   prefs: (): Promise<Preferences> => ipcRenderer.invoke("prefs:get"),
 
+  cookie: (): Promise<string | null> => ipcRenderer.invoke("cookie:get"),
+  setCookie: (cookie: string): Promise<string> => ipcRenderer.invoke("cookie:set", cookie),
+
   /** Patch one or more preferences; resolves with the full resolved set after clamping. */
   setPrefs: (patch: Partial<Preferences>): Promise<Preferences> => ipcRenderer.invoke("prefs:set", patch),
 

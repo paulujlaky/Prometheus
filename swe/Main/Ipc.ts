@@ -1,6 +1,6 @@
 import { ipcMain } from "electron";
 
-import { getClient } from "./Client";
+import { getBoodleCookie, getClient, setBoodleCookie } from "./Client";
 import { registerChatIpc } from "./Chats";
 import { registerFileIpc } from "./Files";
 import { loadRecaps } from "./Recap";
@@ -36,6 +36,19 @@ export function registerIpc() {
   ipcMain.handle("models:preferred", () => getClient().preferredAssistantId);
 
   ipcMain.handle("settings:get", () => loadSettings());
+
+  ipcMain.handle("cookie:get", () => getBoodleCookie());
+  ipcMain.handle("cookie:set", (_event, cookie: string) => {
+
+    if (typeof cookie !== "string") {
+
+      throw new Error("BoodleBox cookie is required");
+
+    }
+
+    return setBoodleCookie(cookie);
+
+  });
 
   ipcMain.handle("prefs:get", () => loadPreferences());
 

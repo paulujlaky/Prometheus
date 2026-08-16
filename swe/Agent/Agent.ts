@@ -156,11 +156,11 @@ function titleFromPrompt(task: string): string {
 
   if (title.length > 60) {
 
-    return `${title.slice(0, 57).trimEnd()}…`;
+    return `${title.slice(0, 57).trimEnd()}...`;
 
   }
 
-  return words.length > 8 ? `${title}…` : title;
+  return words.length > 8 ? `${title}...` : title;
 
 }
 
@@ -173,7 +173,7 @@ function isUntitled(name: string): boolean {
 
 }
 
-/** MSYS/Git-Bash path so `export PATH=…` works under bash on Windows. */
+/** MSYS/Git-Bash path so `export PATH=...` works under bash on Windows. */
 function toBashPath(p: string): string {
 
   const n = p.replace(/\\/g, "/");

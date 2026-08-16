@@ -230,7 +230,7 @@ export class BoodleClient {
 
   /**
    * Full upload: init → PUT bytes to S3 → confirm Success.
-   * `data` is the raw file body (image/png, text, …).
+   * `data` is the raw file body (image/png, text, ...).
    */
   async uploadKnowledge(
     file: { name: string; data: ArrayBuffer | Uint8Array | Buffer; context?: string },

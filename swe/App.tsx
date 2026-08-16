@@ -190,21 +190,46 @@ export class App extends Component<{}, AppState> {
 
     void this.refreshChats();
 
-    void Promise.all([window.swe.models(), window.swe.preferredModel(), window.swe.prefs()]).then(([assistants, preferredModelId, prefs]) => {
+    void window.swe.cookie().then((cookie) => {
 
-      const known = (id: string | null) => (id && assistants.some((assistant) => assistant.id === id) ? id : null);
+      if (!cookie) {
 
-      const chosen = known(prefs.defaultModelId) ?? known(preferredModelId) ?? assistants[0]?.id ?? null;
+        this.setState({ prefsOpen: true });
 
-      this.setState((prev) => ({ assistants, prefs, assistantId: prev.assistantId ?? chosen }));
+      }
 
-    }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
+    });
+
+    void this.loadModels();
 
     void this.refreshUsage();
     void this.refreshRecaps();
     void window.swe.recentProjects().then((recentProjects) => this.setState({ recentProjects }));
 
   }
+
+  private loadModels = async () => {
+
+    try {
+
+      const [assistants, preferredModelId, prefs] = await Promise.all([
+        window.swe.models(),
+        window.swe.preferredModel(),
+        window.swe.prefs(),
+      ]);
+
+      const known = (id: string | null) => (id && assistants.some((assistant) => assistant.id === id) ? id : null);
+      const chosen = known(prefs.defaultModelId) ?? known(preferredModelId) ?? assistants[0]?.id ?? null;
+
+      this.setState((prev) => ({ assistants, prefs, assistantId: prev.assistantId ?? chosen }));
+
+    } catch (err) {
+
+      this.push({ kind: "error", text: `Could not load models: ${String(err)}` });
+
+    }
+
+  };
 
   private refreshUsage = async () => {
 
@@ -916,6 +941,7 @@ export class App extends Component<{}, AppState> {
 
         onOpenSettings={() => this.setState({ prefsOpen: true })}
         onCloseSettings={() => this.setState({ prefsOpen: false })}
+        onCookieSaved={() => void this.loadModels()}
 
         onOpenRecap={() => this.setState({ view: "recap" }, () => void this.refreshRecaps())}
         onOpenRecapChat={(recap) => void this.openRecapChat(recap)}

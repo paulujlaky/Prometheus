@@ -73,7 +73,7 @@ function describe(action: Action): string {
 
     const one = action.body.replace(/\s+/g, " ").trim();
 
-    return one.length > 60 ? `${one.slice(0, 57)}…` : one;
+    return one.length > 60 ? `${one.slice(0, 57)}...` : one;
 
   }
 

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { BoodleClient } from "../../sdk/index";
 
 import { bundleDir } from "./Bundle";
+import { loadBoodleCookie, saveBoodleCookie } from "./Settings";
 
 export const ROOT_ENV = resolve(bundleDir(), "../../.env");
 
@@ -43,15 +44,21 @@ export function loadRootEnv(): void {
 
 let client: BoodleClient | null = null;
 
+export function getBoodleCookie(): string | null {
+
+  return loadBoodleCookie() ?? process.env.BOODLE_COOKIE?.trim() ?? null;
+
+}
+
 export function getClient(): BoodleClient {
 
   if (!client) {
 
-    const cookie = process.env.BOODLE_COOKIE;
+    const cookie = getBoodleCookie();
 
     if (!cookie) {
 
-      throw new Error("BOODLE_COOKIE is not set — put it in the environment, next to the app as .env, or in ~/.bbx/.env");
+      throw new Error("BoodleBox cookie is not set — add it in Settings");
 
     }
 
@@ -60,5 +67,24 @@ export function getClient(): BoodleClient {
   }
 
   return client;
+
+}
+
+export function setBoodleCookie(cookie: string): string {
+
+  const value = cookie.trim();
+
+  if (!value) {
+
+    throw new Error("BoodleBox cookie is required");
+
+  }
+
+  const next = new BoodleClient({ cookie: value });
+
+  saveBoodleCookie(value);
+  client = next;
+
+  return value;
 
 }

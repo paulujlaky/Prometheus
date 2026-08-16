@@ -91,10 +91,10 @@ export interface AssistantSummary {
   /** `chat` = catalog assistant. `agent` = custom-bot path (system prompt). */
   kind?: "chat" | "agent";
 
-  /** Provider slug from the catalog (`openai`, `anthropic`, …). */
+  /** Provider slug from the catalog (`openai`, `anthropic`, ...). */
   api?: string;
 
-  /** Upstream model id (`claude-4.6-sonnet`, `gpt-5.6-sol`, …). */
+  /** Upstream model id (`claude-4.6-sonnet`, `gpt-5.6-sol`, ...). */
   model?: string;
 
   contextLength?: number;
@@ -558,7 +558,7 @@ export type StreamChange =
       text: string;
       sectionKey: string;
 
-      /** Section this delta belongs to (`Reasoning`, `Text`, …). */
+      /** Section this delta belongs to (`Reasoning`, `Text`, ...). */
       sectionType: string;
 
     }

@@ -86,8 +86,10 @@ export function createWindow(): BrowserWindow {
     window.setAppDetails({
 
       appId: APP_ID,
+
       relaunchDisplayName: APP_NAME,
       relaunchCommand: `"${launch}"`,
+
       ...(icon ? { appIconPath: icon } : {}),
 
     });

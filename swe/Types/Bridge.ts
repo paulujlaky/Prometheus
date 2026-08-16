@@ -51,6 +51,9 @@ export interface SweBridge {
   prefs: () => Promise<Preferences>;
   setPrefs: (patch: Partial<Preferences>) => Promise<Preferences>;
 
+  cookie: () => Promise<string | null>;
+  setCookie: (cookie: string) => Promise<string>;
+
   undos: (chatId: string) => Promise<UndoMark[]>;
   undo: (chatId: string, commit: string) => Promise<{ ok: boolean; files: string[]; text: string }>;
 

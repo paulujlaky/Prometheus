@@ -16,19 +16,23 @@ interface PrefsPanelProps {
 
   onClose: () => void;
   onSaved: (prefs: Preferences) => void;
+  onCookieSaved: () => void;
 
 }
 
 interface PrefsPanelState {
 
   prefs: Preferences | null;
+  cookie: string;
+  editingCookie: boolean;
+  savingCookie: boolean;
   error: string | null;
 
 }
 
 export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
-  state: PrefsPanelState = { prefs: null, error: null };
+  state: PrefsPanelState = { prefs: null, cookie: "", editingCookie: false, savingCookie: false, error: null };
 
   private card = createRef<HTMLDivElement>();
   private restoreFocus: HTMLElement | null = null;
@@ -39,12 +43,12 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
     this.restoreFocus = document.activeElement as HTMLElement | null;
     this.live = true;
 
-    void window.swe.prefs()
-      .then((loaded) => {
+    void Promise.all([window.swe.prefs(), window.swe.cookie()])
+      .then(([prefs, cookie]) => {
 
         if (this.live) {
 
-          this.setState({ prefs: loaded });
+          this.setState({ prefs, cookie: cookie ?? "" });
 
         }
 
@@ -98,10 +102,34 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
   };
 
+  private saveCookie = async () => {
+
+    this.setState({ savingCookie: true, error: null });
+
+    try {
+
+      const cookie = await window.swe.setCookie(this.state.cookie);
+
+      this.setState({ cookie });
+      this.props.onCookieSaved();
+
+    } catch (err) {
+
+      this.setState({ error: err instanceof Error ? err.message : String(err) });
+
+    } finally {
+
+      this.setState({ savingCookie: false });
+
+    }
+
+  };
+
   render(): ReactNode {
 
     const { models, onClose } = this.props;
-    const { prefs, error } = this.state;
+    const { prefs, cookie, editingCookie, savingCookie, error } = this.state;
+    const visibleCookie = editingCookie || cookie.length <= 6 ? cookie : `${"•".repeat(Math.min(cookie.length - 6, 56))}${cookie.slice(-6)}`;
 
     return (
 
@@ -167,11 +195,61 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
           {!prefs ? (
 
-            <p className="px-5 py-8 text-center text-[13px] text-ink-3">Loading…</p>
+            <p className="px-5 py-8 text-center text-[13px] text-ink-3">Loading...</p>
 
           ) : (
 
             <div className="flex flex-col gap-6 px-5 py-5">
+
+              <section className="flex flex-col gap-2.5">
+
+                <div className="flex items-baseline gap-2">
+
+                  <h3 className="shrink-0 text-[11px] font-medium tracking-wide text-ink-3">BOODLEBOX COOKIE</h3>
+
+                </div>
+
+                <div className="flex items-center gap-2">
+
+                  <input className="h-9 min-w-0 flex-1 rounded-chip border border-line bg-field px-2.5 text-[13.5px] text-ink outline-none transition-colors focus:border-brand"
+
+                    type="text"
+                    value={visibleCookie}
+                    aria-label="BoodleBox cookie"
+                    placeholder="Paste your browser cookie"
+
+                    onFocus={() => this.setState({ editingCookie: true })}
+                    onBlur={() => this.setState({ editingCookie: false })}
+                    onChange={(event) => this.setState({ cookie: event.target.value })}
+                    onKeyDown={(event) => {
+
+                      if (event.key === "Enter") {
+
+                        event.preventDefault();
+                        void this.saveCookie();
+
+                      }
+
+                    }}
+
+                  />
+
+                  <button className="h-9 shrink-0 rounded-chip bg-field px-3 text-[12.5px] font-medium text-ink-2 transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+
+                    type="button"
+                    disabled={savingCookie || !cookie.trim()}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => void this.saveCookie()}
+
+                  >
+
+                    {savingCookie ? "Saving..." : "Save"}
+
+                  </button>
+
+                </div>
+
+              </section>
 
               <section className="flex flex-col gap-2.5">
 
@@ -207,7 +285,7 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
                   hint={`Turns before a run stops on its own (${MAX_STEPS_RANGE.min}–${MAX_STEPS_RANGE.max}).`}
 
                   value={prefs.maxSteps}
-                  suffix=""
+                  suffix="steps"
 
                   min={MAX_STEPS_RANGE.min}
                   max={MAX_STEPS_RANGE.max}
@@ -222,7 +300,7 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
                   hint={`A single command is killed after this long (${CMD_TIMEOUT_RANGE.min / 1000}–${CMD_TIMEOUT_RANGE.max / 1000}).`}
 
                   value={Math.round(prefs.commandTimeoutMs / 1000)}
-                  suffix="s"
+                  suffix="seconds"
 
                   min={CMD_TIMEOUT_RANGE.min / 1000}
                   max={CMD_TIMEOUT_RANGE.max / 1000}

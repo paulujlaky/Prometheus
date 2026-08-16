@@ -43,6 +43,7 @@ export interface WorkspaceProps {
   onOpenSettings: () => void;
   onCloseSettings: () => void;
   onSavedPrefs: (prefs: Preferences) => void;
+  onCookieSaved: () => void;
 
   onOpenRecap: () => void;
   onOpenRecapChat: (recap: RunRecap) => void;
@@ -123,8 +124,9 @@ export function Workspace(props: WorkspaceProps) {
 
             onClose={props.onCloseSettings}
             onSaved={props.onSavedPrefs}
+            onCookieSaved={props.onCookieSaved}
 
-          />
+            />
 
         ) : null}
 

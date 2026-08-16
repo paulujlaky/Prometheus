@@ -75,7 +75,7 @@ export function Header({ cwd, recentProjects, mode, onOpenProject, onPickFolder,
           <DropdownMenuItem onSelect={onPickFolder}>
 
             <FolderOpenIcon className="size-4 text-ink-3" />
-            Open new folder…
+            Open new folder...
 
           </DropdownMenuItem>
 
