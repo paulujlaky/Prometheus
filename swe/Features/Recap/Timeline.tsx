@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { ChevronRightIcon, FolderIcon, PlusIcon } from "lucide-react";
 
 import { cn } from "@/Utils/Class";
+import { shortModelName } from "@/Utils/Models";
 import { folderLabel, sameDir } from "@/Utils/Paths";
 import { formatElapsed, relativeTime } from "@/Utils/Time";
 
@@ -122,7 +123,7 @@ export class RecapView extends Component<RecapViewProps, RecapViewState> {
             <span aria-hidden>·</span>
             <span>{formatElapsed(recap.durationMs)}</span>
             <span aria-hidden>·</span>
-            <span className="truncate">{recap.model}</span>
+            <span className="truncate">{shortModelName(recap.model)}</span>
 
             {recap.added || recap.removed ? (
 

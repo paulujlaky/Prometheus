@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 
 import { ChatSession } from "../../sdk/index";
 
-import { agentInstructions, FINISH_REMINDER, followUpPrompt, formatResults, NUDGE, parseActions, SPEED_UP, subagentPrompt, subagentTask, systemPrompt, type Action, type Result } from "./Protocol";
+import { agentInstructions, agentTask, FINISH_REMINDER, followUpPrompt, formatResults, NUDGE, parseActions, SPEED_UP, subagentPrompt, subagentTask, systemPrompt, type Action, type Result } from "./Protocol";
 import { formatRecap } from "../Tools/Recap";
 
 import type { RecapDraft } from "../Types/Recap";
@@ -647,6 +647,9 @@ export class MiniAgent {
   /** Blocks a failed batch left unrun, kept whole so <retry> can replay them without a retype. */
   private cancelled: Action[] = [];
 
+  /** Last recap this run accepted — used to close if the model recapped and forgot <done>. */
+  private lastRecap: RecapDraft | null = null;
+
   /** User notes queued while a turn or command is in flight; drained before the next send. */
   private pending: Interjection[] = [];
 
@@ -953,6 +956,8 @@ export class MiniAgent {
     }
 
     if (outcome.kind === "recap") {
+
+      this.lastRecap = outcome.draft;
 
       onEvent({ type: "recap", draft: outcome.draft });
 
@@ -1416,7 +1421,9 @@ export class MiniAgent {
 
       let message = followUp ? followUpPrompt(map, task) : subName
           ? agentNative ? subagentTask(subName, task): subagentPrompt(map, projectDoc(this.cwd), subName, task)
-          : agentNative ? task : systemPrompt(map, projectDoc(this.cwd), task);
+          : agentNative ? agentTask(task) : systemPrompt(map, projectDoc(this.cwd), task);
+
+      this.lastRecap = null;
 
       let misses = 0;
       let quiet = 0;
@@ -1604,6 +1611,18 @@ export class MiniAgent {
         }
 
         const skipped = actions.length - results.length;
+
+        // recap means the model thinks the run is over; don't spend another turn asking for <done>
+        const recapped = results.some((result) => result.verb === "recap" && result.ok);
+        const wrapping = recapped && batch.every((action) => action.verb === "say" || action.verb === "recap");
+
+        if (wrapping) {
+
+          onEvent({ type: "done", summary: this.lastRecap?.headline || "Task complete." });
+
+          return;
+
+        }
 
         // held rather than dropped: the harness still has them, so retyping them is pure risk
         this.cancelled = actions.slice(results.length);

@@ -373,25 +373,9 @@ that text as its placeholder. The run parks until they answer, so ask once and a
 
 ## Ending a run
 
-Every run ends with <done>, and nothing else does. <say> and <ask> both leave the loop open, so a
-reply that reports finished work without <done> parks the run: the user sees a spinner that never
-settles and has to stop it by hand.
-
-Before sending a reply with no <done> in it, check that one of these is true — there is a block in
-that same reply doing real work, or a question whose answer changes what you build next. Reporting
-what you did is not work, and neither is offering to do more. If the work is finished and you are
-only reporting or offering, that reply is a <done>: put the report in it, and put the offer at the
-end of it.
-
-Ending early is cheap and ending late is not. A run that stops with something unverified can be
-followed up in the same chat with everything still in context; a run that never ends has to be
-killed, and the user loses the thread. So when you are unsure whether the task is complete, call
-<done> and name what you did not check.
-
-Send a <recap> in the same reply, just before <done>. It is what the user sees on the Recap
-screen days later, beside every other run in that repo, so write it for someone who was not
-watching. First line is the headline — one sentence naming what now works. Then one field per
-line, in any order:
+The Task is finished the first time you would otherwise report it, offer more, or wait. Do not
+wait to be asked. Every finished run is this pair in the same reply, recap then done — nothing
+else ends the loop:
 
   <recap>
   headline: Rename now works from the sidebar context menu
@@ -401,9 +385,27 @@ line, in any order:
   risk: Renaming a session the agent is writing to may race
   </recap>
 
-Only headline is required. <recap> never replaces <done> — the run carries straight on after it.
-Do not count lines or list every file: the harness stamps the diff, the model, the timing and the
-project onto the card for you. Spend the block on what a person would want to remember.
+  <done>
+  Fixed the dropped observation in the agent loop.
+
+  - \`say\` emitted an observation the renderer had no row for.
+  - Removed the second emit; the say event settles its own row.
+  - \`bun run swe:build\` passes.
+  </done>
+
+<say>, <ask> and <recap> all leave the loop open. A reply that reports finished work without
+<done> parks the run: the user sees a spinner and has to stop it by hand. Before sending a reply
+with no <done>, check that a block in that same reply is still doing real work, or that a
+question's answer changes what you build next. Reporting, offering, or wrapping up is not work.
+
+Ending early is cheap and ending late is not. A run that stops with something unverified can be
+followed up in the same chat; a run that never ends has to be killed. When you are unsure, call
+<done> and name what you did not check.
+
+<recap> is what the user sees on the Recap screen days later, so write it for someone who was
+not watching. Headline names the Task, not a side-quest. Only headline is required. Do not
+count lines or list every file: the harness stamps the diff, the model, the timing and the
+project onto the card. Spend the block on what a person would want to remember.
 
 Write each unverified line as the next action, imperative and short: the card renders it as
 "Next up: view the running app and inspect", so "Did not view the running app" reads wrong there.
@@ -448,6 +450,8 @@ are sequential, when it is one file, or when briefing costs more than doing.
 
 ## Rules
 
+  The Task is the whole job. Do not expand it, refactor neighbours, or start a second feature.
+  Leftovers go in <done> as unverified — do not do them now.
   The user sees only <say> and <done>. Open with a <say> naming your plan, <say> again when
   you learn something that changes it or finish a piece of the work, and never go more than
   a few blocks without one — silence reads as a hang. Both render as markdown: lead <done>
@@ -459,9 +463,9 @@ are sequential, when it is one file, or when briefing costs more than doing.
   Use <read> and <grep> to look at code. <run> is for building, testing and git.
 
 Checking your work is one step, not a phase. Run the build or the tests once, after the edits
-are in. If it passes you are done — say so and call <done>. Do not re-run a check that passed,
-do not invent a check the task did not ask for, and do not hunt for problems in code you did
-not touch. If it fails, fix what it named and run it once more.`;
+are in. If it passes you are done — <recap> then <done> in that reply. Do not re-run a check
+that passed, do not invent a check the Task did not ask for, and do not hunt for problems in
+code you did not touch. If it fails, fix what it named and run it once more.`;
 
 function houseRules(doc: string): string {
 
@@ -469,22 +473,31 @@ function houseRules(doc: string): string {
 
 }
 
+const CLOSE_OUT = `Do this Task and only this Task. When it is done, end the run in that same reply with <recap> then <done> — do not wait to be asked, and do not start extra work.`;
+
 /** Bot `instructions` for Agent-Native — protocol + repo, no task (that stays the first user turn). */
 export function agentInstructions(map: string, doc: string): string {
 
-  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}`;
+  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}\n\n${CLOSE_OUT}`;
 
 }
 
 export function systemPrompt(map: string, doc: string, task: string): string {
 
-  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}\n\n## Task\n\n${task}`;
+  return `${GUIDE}\n\n## Repo\n\n${map}${houseRules(doc)}\n\n## Task\n\n${task}\n\n${CLOSE_OUT}`;
 
 }
 
 export function followUpPrompt(map: string, task: string): string {
 
-  return `Continue in the same repository, same protocol.\n\n## Repo\n\n${map}\n\n## Task\n\n${task}`;
+  return `Continue in the same repository, same protocol. Stay on this message — do not reopen finished work or start extra work it does not ask for.\n\n## Repo\n\n${map}\n\n## Task\n\n${task}\n\n${CLOSE_OUT}`;
+
+}
+
+/** Agent-Native first user turn: the Task plus the close-out the bot instructions do not carry. */
+export function agentTask(task: string): string {
+
+  return `${task}\n\n${CLOSE_OUT}`;
 
 }
 
@@ -509,8 +522,8 @@ export function subagentTask(name: string, task: string): string {
 
 }
 
-export const NUDGE = `[harness]\nThat reply had no action block, so nothing ran. If the task is finished, end it:\n\n  <done>\n  what changed, and anything left unverified\n  </done>\n\nOtherwise send the block that does the next piece of work.`;
+export const NUDGE = `[harness]\nThat reply had no action block, so nothing ran. If the task is finished, end it in this reply:\n\n  <recap>\n  headline: what the Task asked for, now working\n  </recap>\n\n  <done>\n  what changed, and anything left unverified\n  </done>\n\nOtherwise send the block that does the next piece of the Task.`;
 
-export const FINISH_REMINDER = `The last few replies only talked: nothing read, nothing run, nothing changed. If the work is done, call <done> now with what changed and anything left unverified. If it is not, send the block that does the next piece of it.`;
+export const FINISH_REMINDER = `The last few replies only talked: nothing read, nothing run, nothing changed. If the Task is done, send <recap> then <done> in this reply. If it is not, send the block that does the next piece of it — not extra work.`;
 
-export const SPEED_UP = `[harness]\nThe user interrupted you because this is taking too long. Stop exploring. Finish the current task now with what you already know, and call <done>.`;
+export const SPEED_UP = `[harness]\nThe user interrupted you because this is taking too long. Stop exploring. Finish the current Task now with what you already know, then <recap> and <done>.`;

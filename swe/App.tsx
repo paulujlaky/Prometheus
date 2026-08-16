@@ -337,10 +337,10 @@ export class App extends Component<{}, AppState> {
 
   };
 
-  private openProject = async (dir: string) => {
+  private openProject = async (dir: string): Promise<string | null> => {
 
     const opened = await window.swe.openProject(dir);
-    if (!opened) return;
+    if (!opened) return null;
 
     this.live.seq = 0;
     this.live.resetStream();
@@ -379,6 +379,8 @@ export class App extends Component<{}, AppState> {
       void this.refreshChats();
 
     });
+
+    return opened.dir;
 
   };
 
@@ -455,7 +457,7 @@ export class App extends Component<{}, AppState> {
 
   };
 
-  private newSession = () => {
+  private newSession = async () => {
 
     this.activeRunId = null;
     this.live.seq = 0;
@@ -910,7 +912,7 @@ export class App extends Component<{}, AppState> {
         onSelect={(chat) => void this.selectChat(chat)}
         onRename={(chat, name) => void this.renameChat(chat, name)}
         onDelete={(chat) => void this.deleteChat(chat)}
-        onNew={this.newSession}
+        onNew={() => void this.newSession()}
 
         onOpenSettings={() => this.setState({ prefsOpen: true })}
         onCloseSettings={() => this.setState({ prefsOpen: false })}

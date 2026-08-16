@@ -68,7 +68,19 @@ export function displayName(name: string): string {
 
 }
 
-/** Card-sized name: drops the provider segment only, so "Anthropic · Claude 5 Opus" reads "Claude 5 Opus". */
+const FAMILIES = new Set(["opus", "sonnet", "haiku", "sol", "luna"]);
+
+const BRANDS = new Set(["claude", "chatgpt", "gpt", "gemini", "grok", "llama"]);
+
+const VERSION = /^\d+(\.\d+)*$/;
+
+function titleWord(word: string): string {
+
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+
+}
+
+/** Family-first card label: "Anthropic · Claude 5 Opus" and "5 Opus" both read "Opus 5". */
 export function shortModelName(label: string | null | undefined): string {
 
   if (!label) {
@@ -82,9 +94,27 @@ export function shortModelName(label: string | null | undefined): string {
   const parts = displayName(label).split("·").map((part) => part.trim()).filter(Boolean);
   const named = parts.filter((part) => part.toLowerCase() !== "agent" && !providers.has(part.toLowerCase()));
 
-  const core = named[named.length - 1] ?? parts[0] ?? "";
+  const words = (named[named.length - 1] ?? parts[0] ?? "").split(/\s+/).filter(Boolean);
 
-  return core.replace(/\s+/g, " ").trim() || "Unknown";
+  if (!words.length) {
+
+    return "Unknown";
+
+  }
+
+  const hasFamily = words.some((word) => FAMILIES.has(word.toLowerCase()));
+
+  const kept = hasFamily ? words.filter((word) => !BRANDS.has(word.toLowerCase())) : words;
+
+  if (kept.length >= 2 && VERSION.test(kept[0]) && FAMILIES.has(kept[1].toLowerCase())) {
+
+    const [version, family, ...rest] = kept;
+
+    return [titleWord(family), version, ...rest].join(" ");
+
+  }
+
+  return kept.join(" ") || "Unknown";
 
 }
 

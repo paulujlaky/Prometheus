@@ -36,9 +36,6 @@ interface SidebarProps {
   onDelete: (chat: SweChat) => void;
   onNew: () => void;
 
-  /** No repo open yet — New session picks one first instead of sitting disabled. */
-  onPickFolder: () => void;
-
   onOpenSettings: () => void;
   onOpenRecap: () => void;
 
@@ -541,7 +538,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
   render() {
 
-    const { chats, loading, onNew, onOpenSettings, onOpenRecap, onPickFolder, projectDir, recapActive } = this.props;
+    const { chats, loading, onNew, onOpenSettings, onOpenRecap, projectDir, recapActive } = this.props;
     const { menu, box } = this.state;
 
     const groups = groupChats(chats, projectDir);
@@ -556,9 +553,9 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
           type="button"
 
-          title={hasProject ? undefined : "Choose a working folder"}
+          title={hasProject ? undefined : "Pick a folder, then start a session"}
 
-          onClick={hasProject ? onNew : onPickFolder}
+          onClick={onNew}
 
         >
 

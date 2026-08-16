@@ -106,7 +106,6 @@ export function Workspace(props: WorkspaceProps) {
         onRename={props.onRename}
         onDelete={props.onDelete}
         onNew={props.onNew}
-        onPickFolder={props.onPickFolder}
         onOpenSettings={props.onOpenSettings}
         onOpenRecap={props.onOpenRecap}
 
