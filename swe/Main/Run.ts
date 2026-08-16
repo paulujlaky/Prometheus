@@ -5,13 +5,16 @@ import { getClient } from "./Client";
 import { alertUser, NOTICES } from "./Alerts";
 import { chatTitle } from "./Chats";
 import { loadPreferences, rememberChatId, rememberChatSettings, settingsForChat } from "./Settings";
+import { recordRecap } from "./Recap";
 import { flushDeltas, send } from "./Stream";
-import { recordMark } from "../Tools/Snapshot";
+import { diffStat, recordMark } from "../Tools/Snapshot";
+import { shortModelName } from "../Utils/Models";
 import { getWindow } from "./Window";
 
 import type { Answer } from "../Tools/Ask";
 import type { Plan, PlanDecision } from "../Tools/Plan";
 import type { ApprovalMode } from "../Types/Bridge";
+import type { RecapDraft } from "../Types/Recap";
 
 const agents = new Map<string, MiniAgent>();
 
@@ -88,8 +91,11 @@ export function registerRunIpc() {
 
     let notifyTitle = chatTitle(options.task.split(/\s+/).slice(0, 8).join(" "));
 
+    const startedAt = Date.now();
+
     let snapshotCommit: string | null = null;
     let markChatId = options.chatId ?? null;
+    let recapDraft: RecapDraft | null = null;
 
     const prefs = loadPreferences();
 
@@ -113,9 +119,47 @@ export function registerRunIpc() {
 
         }
 
+        if (event.type === "recap") {
+
+          recapDraft = event.draft;
+
+        }
+
         if (event.type === "done" && snapshotCommit && markChatId) {
 
           recordMark(markChatId, { commit: snapshotCommit, project: options.cwd, summary: event.summary, at: Date.now() });
+
+        }
+
+        if (event.type === "done" && recapDraft) {
+
+          const stat = snapshotCommit ? diffStat(options.cwd, snapshotCommit) : { added: 0, removed: 0 };
+
+          recordRecap({
+
+            id: options.runId,
+
+            headline: recapDraft.headline,
+
+            changed: recapDraft.changed,
+            unverified: recapDraft.unverified,
+
+            risk: recapDraft.risk,
+
+            project: options.cwd,
+            chatId: markChatId,
+
+            model: shortModelName(options.modelLabel ?? options.assistantId ?? ""),
+
+            at: Date.now(),
+            durationMs: Date.now() - startedAt,
+
+            commit: snapshotCommit,
+
+            added: stat.added,
+            removed: stat.removed,
+
+          });
 
         }
 

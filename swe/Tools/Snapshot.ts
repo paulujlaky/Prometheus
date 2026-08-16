@@ -180,6 +180,64 @@ function headOf(gitDir: string, project: string): string | null {
 
 }
 
+export interface DiffStat {
+
+  added: number;
+  removed: number;
+
+}
+
+/** Lines added and removed between a run's starting snapshot and the worktree as it stands now. */
+export function diffStat(cwd: string, commit: string): DiffStat {
+
+  const project = normalizeProjectPath(cwd);
+
+  if (!project || !commit || !existsSync(project)) {
+
+    return { added: 0, removed: 0 };
+
+  }
+
+  const gitDir = storeFor(project);
+
+  if (!gitDir) {
+
+    return { added: 0, removed: 0 };
+
+  }
+
+  try {
+
+    // untracked files are invisible to diff until they are staged, and a run's new files are all untracked
+    git(gitDir, project, ["add", "--all", "."]);
+
+    const out = git(gitDir, project, ["diff", "--numstat", commit]);
+
+    let added = 0;
+    let removed = 0;
+
+    for (const line of out.split("\n")) {
+
+      const [a, r] = line.trim().split(/\s+/);
+
+      // binary files report "-" for both counts
+      if (!a || a === "-") continue;
+
+      added += Number(a) || 0;
+      removed += Number(r) || 0;
+
+    }
+
+    return { added, removed };
+
+  } catch {
+
+    return { added: 0, removed: 0 };
+
+  }
+
+}
+
 /** Commit the current worktree to the shadow store. Returns the commit, or null when unavailable. */
 export function captureSnapshot(cwd: string, label = "snapshot"): string | null {
 

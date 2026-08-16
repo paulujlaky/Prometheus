@@ -1,6 +1,6 @@
 import { Component, createRef, type MouseEvent as ReactMouseEvent } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { EllipsisVerticalIcon, PencilIcon, PlusIcon, SettingsIcon, Trash2Icon } from "lucide-react";
+import { EllipsisVerticalIcon, HistoryIcon, PencilIcon, PlusIcon, SettingsIcon, Trash2Icon } from "lucide-react";
 
 import { cn } from "@/Utils/Class";
 import { popIn } from "@/Utils/Motion";
@@ -35,7 +35,15 @@ interface SidebarProps {
   onRename: (chat: SweChat, name: string) => void;
   onDelete: (chat: SweChat) => void;
   onNew: () => void;
+
+  /** No repo open yet — New session picks one first instead of sitting disabled. */
+  onPickFolder: () => void;
+
   onOpenSettings: () => void;
+  onOpenRecap: () => void;
+
+  /** Recap is the current view — the button reads as selected rather than as a way out. */
+  recapActive?: boolean;
 
 }
 
@@ -533,7 +541,7 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
   render() {
 
-    const { chats, loading, onNew, onOpenSettings, projectDir } = this.props;
+    const { chats, loading, onNew, onOpenSettings, onOpenRecap, onPickFolder, projectDir, recapActive } = this.props;
     const { menu, box } = this.state;
 
     const groups = groupChats(chats, projectDir);
@@ -544,28 +552,19 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
 
       <aside className="flex h-full w-64 shrink-0 flex-col gap-2 border-r border-line bg-canvas p-2.5 pt-2.5">
 
-        <button className={cn(
-
-          "flex w-full items-center gap-2 rounded-control px-2.5 py-2 text-[14px] font-medium transition-[background-color,transform,opacity] duration-100 active:scale-[0.97]",
-          hasProject ? "bg-brand-tint text-brand hover:bg-brand-tint" : "cursor-not-allowed bg-hover/60 text-ink-3 opacity-70",
-
-        )}
+        <button className="flex w-full items-center gap-2 rounded-control bg-brand-tint px-2.5 py-2 text-[14px] font-medium text-brand transition-[background-color,transform] duration-100 hover:bg-brand-tint active:scale-[0.97]"
 
           type="button"
-          disabled={!hasProject}
 
-          onClick={onNew}
+          title={hasProject ? undefined : "Choose a working folder"}
+
+          onClick={hasProject ? onNew : onPickFolder}
 
         >
 
           <span className="min-w-0 flex-1 truncate text-left">New session</span>
 
-          <span className={cn(
-
-            "flex size-5 shrink-0 items-center justify-center",
-            hasProject ? "text-brand" : "text-ink-3",
-
-          )}>
+          <span className="flex size-5 shrink-0 items-center justify-center text-brand">
 
             <PlusIcon className="size-3" strokeWidth={3} />
 
@@ -623,18 +622,42 @@ export class Sidebar extends Component<SidebarProps, SidebarState> {
         </div>
 
         {/* pinned below the scroller, so a long session list never pushes it out of reach */}
-        <button className="flex w-full shrink-0 items-center gap-2 rounded-control bg-surface px-2.5 py-2 text-[13.5px] text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink"
+        <div className="flex w-full shrink-0 items-center gap-1.5">
 
-          type="button"
+          <button className={cn(
 
-          onClick={onOpenSettings}
+            "flex shrink-0 items-center justify-center rounded-control px-2.5 py-2 text-[13.5px] transition-colors duration-100",
+            recapActive ? "bg-brand-tint text-brand" : "bg-surface text-ink-2 hover:bg-hover hover:text-ink",
 
-        >
+          )}
 
-          <SettingsIcon className="size-4 text-ink-3" />
-          <span className="min-w-0 flex-1 truncate text-left">Settings</span>
+            type="button"
 
-        </button>
+            title="Recap"
+            aria-label="Recap"
+
+            onClick={onOpenRecap}
+
+          >
+
+            <HistoryIcon className={cn("size-4", recapActive ? "text-brand" : "text-ink-3")} />
+
+          </button>
+
+          <button className="flex min-w-0 flex-1 items-center gap-2 rounded-control bg-surface px-2.5 py-2 text-[13.5px] text-ink-2 transition-colors duration-100 hover:bg-hover hover:text-ink"
+
+            type="button"
+
+            onClick={onOpenSettings}
+
+          >
+
+            <SettingsIcon className="size-4 text-ink-3" />
+            <span className="min-w-0 flex-1 truncate text-left">Settings</span>
+
+          </button>
+
+        </div>
 
         <AnimatePresence>
 

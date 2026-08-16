@@ -1,6 +1,6 @@
 // The agent protocol: tagged blocks in, tagged results out. No JSON, no escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "spawn", "plan", "ask", "say", "retry", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "spawn", "plan", "ask", "say", "retry", "recap", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -67,6 +67,10 @@ const ALIASES: Record<string, Verb> = {
   resend: "retry",
   replay: "retry",
   again: "retry",
+
+  wrap: "recap",
+  changelog: "recap",
+  digest: "recap",
 
   finish: "done",
   complete: "done",
@@ -331,6 +335,7 @@ memory. <retry 2-4> or <retry 1,3> runs only some of them.
   <ask>      put a choice to the user and wait for their answer
   <retry>    run the blocks a failed batch held, exactly as they were sent
   <say>      talk to the user — the run keeps going
+  <recap>    structured note about the run, saved to the Recap screen
   <done>     final summary — the only thing that ends a run
 
 A tag takes a target: <grep swe/Tools> searches one directory, <edit swe/x.ts> names the file.
@@ -382,6 +387,26 @@ Ending early is cheap and ending late is not. A run that stops with something un
 followed up in the same chat with everything still in context; a run that never ends has to be
 killed, and the user loses the thread. So when you are unsure whether the task is complete, call
 <done> and name what you did not check.
+
+Send a <recap> in the same reply, just before <done>. It is what the user sees on the Recap
+screen days later, beside every other run in that repo, so write it for someone who was not
+watching. First line is the headline — one sentence naming what now works. Then one field per
+line, in any order:
+
+  <recap>
+  headline: Rename now works from the sidebar context menu
+  changed: Added the rename IPC handler — swe/main.ts
+  changed: Wired the menu item — swe/Layout/Sidebar.tsx
+  unverified: Try renaming a session mid-run
+  risk: Renaming a session the agent is writing to may race
+  </recap>
+
+Only headline is required. <recap> never replaces <done> — the run carries straight on after it.
+Do not count lines or list every file: the harness stamps the diff, the model, the timing and the
+project onto the card for you. Spend the block on what a person would want to remember.
+
+Write each unverified line as the next action, imperative and short: the card renders it as
+"Next up: view the running app and inspect", so "Did not view the running app" reads wrong there.
 
 Plan before you build anything that spans more than a couple of files, and before anything that is
 awkward to undo. First line is the title, then one numbered step per line: what the step does, an

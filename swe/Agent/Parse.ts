@@ -91,7 +91,7 @@ function describe(action: Action): string {
 
   }
 
-  if (action.verb === "say" || action.verb === "done") {
+  if (action.verb === "say" || action.verb === "done" || action.verb === "recap") {
 
     return "";
 

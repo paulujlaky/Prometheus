@@ -17,6 +17,7 @@ import type { AgentEvent } from "@/Agent/Agent";
 import type { Approval, ApprovalMode, Ask, PlanRequest } from "@/Types/Bridge";
 import type { SweChat } from "@/Types/Chat";
 import type { Entry } from "@/Types/Transcript";
+import type { RunRecap } from "@/Types/Recap";
 import type { Answer } from "@/Tools/Ask";
 import type { PlanDecision } from "@/Tools/Plan";
 import type { Preferences } from "@/Utils/Prefs";
@@ -200,6 +201,7 @@ export class App extends Component<{}, AppState> {
     }).catch((err) => this.push({ kind: "error", text: `Could not load models: ${String(err)}` }));
 
     void this.refreshUsage();
+    void this.refreshRecaps();
     void window.swe.recentProjects().then((recentProjects) => this.setState({ recentProjects }));
 
   }
@@ -215,6 +217,22 @@ export class App extends Component<{}, AppState> {
     } catch {
 
       // heatmap is best-effort; leave previous totals
+
+    }
+
+  };
+
+  private refreshRecaps = async () => {
+
+    try {
+
+      const recaps = await window.swe.recaps();
+
+      this.setState({ recaps });
+
+    } catch {
+
+      // the timeline keeps whatever it already has
 
     }
 
@@ -462,6 +480,8 @@ export class App extends Component<{}, AppState> {
       tokensUsed: 0,
       activeChatId: null,
 
+      view: "chat",
+
       running: false,
       startedAt: null,
 
@@ -478,6 +498,42 @@ export class App extends Component<{}, AppState> {
 
   };
 
+  /** A card on the timeline knows its repo and its chat id, but not the chat row the sidebar holds. */
+  private openRecapChat = async (recap: RunRecap) => {
+
+    if (!recap.chatId) {
+
+      return;
+
+    }
+
+    this.setState({ view: "chat" });
+
+    try {
+
+      const chats = await window.swe.listChats(recap.project);
+      const hit = chats.find((row) => row.id === recap.chatId);
+
+      if (!hit) {
+
+        this.push({ kind: "error", text: "That session is no longer on record." });
+
+        return;
+
+      }
+
+      this.setState({ chats });
+
+      await this.selectChat(hit);
+
+    } catch (err) {
+
+      this.push({ kind: "error", text: `Could not open that session: ${String(err)}` });
+
+    }
+
+  };
+
   private selectChat = async (chat: SweChat) => {
 
     this.activeRunId = null;
@@ -486,6 +542,7 @@ export class App extends Component<{}, AppState> {
     this.setState({
 
       activeChatId: chat.id,
+      view: "chat",
       agentStatus: "",
 
       lastRun: null,
@@ -815,6 +872,7 @@ export class App extends Component<{}, AppState> {
 
       void this.refreshChats();
       void this.refreshUsage();
+      void this.refreshRecaps();
 
     }
 
@@ -856,6 +914,9 @@ export class App extends Component<{}, AppState> {
 
         onOpenSettings={() => this.setState({ prefsOpen: true })}
         onCloseSettings={() => this.setState({ prefsOpen: false })}
+
+        onOpenRecap={() => this.setState({ view: "recap" }, () => void this.refreshRecaps())}
+        onOpenRecapChat={(recap) => void this.openRecapChat(recap)}
         onSavedPrefs={(prefs: Preferences) => this.setState({ prefs })}
 
         onOpenProject={(dir) => void this.openProject(dir)}

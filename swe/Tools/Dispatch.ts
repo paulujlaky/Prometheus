@@ -2,10 +2,12 @@ import { parseAsk, type Question } from "./Ask";
 import { applyEdit } from "./Edit";
 import { deleteFiles, grep, listDir, parseReadSpec, readFiles, writeFile } from "./FS";
 import { parsePlan, type Plan } from "./Plan";
+import { parseRecap } from "./Recap";
 import { parseSpawn, type SubagentTask } from "./Subagent";
 
 import { bodyLines } from "../Agent/Lines";
 import type { Action, Result, Verb } from "../Agent/Protocol";
+import type { RecapDraft } from "../Types/Recap";
 
 export type Outcome =
 
@@ -20,6 +22,10 @@ export type Outcome =
   /** Parked too: the user decides whether it gets built, and which model builds it. */
   | { kind: "plan"; plan: Plan }
   | { kind: "say"; text: string }
+
+  /** Structured end-of-run note: the harness stores it and the loop carries straight on to <done>. */
+  | { kind: "recap"; draft: RecapDraft }
+
   | { kind: "done"; summary: string };
 
 /** The target of a block, whether the model put it on the tag or on the first line. */
@@ -74,6 +80,12 @@ export function execute(action: Action, cwd: string): Outcome {
   if (action.verb === "done") {
 
     return { kind: "done", summary: action.body.trim() || "Task complete." };
+
+  }
+
+  if (action.verb === "recap") {
+
+    return { kind: "recap", draft: parseRecap(action) };
 
   }
 

@@ -315,6 +315,12 @@ export class LiveSession {
 
     }
 
+    if (event.type === "recap") {
+
+      return;
+
+    }
+
     if (event.type === "say") {
 
       hooks.setState((prev) => {

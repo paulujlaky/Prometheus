@@ -5,6 +5,7 @@ import type { Answer, Question } from "./Tools/Ask";
 import type { Plan, PlanDecision } from "./Tools/Plan";
 import type { AssistantSummary } from "../sdk/types";
 import type { Preferences } from "./Main/Settings";
+import type { RecapFile } from "./Types/Recap";
 import type { UndoMark } from "./Tools/Snapshot";
 import type { UsageFile } from "./Main/Usage";
 
@@ -33,6 +34,8 @@ contextBridge.exposeInMainWorld("swe", {
   openProject: (cwd: string): Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null> => ipcRenderer.invoke("settings:open-project", cwd),
 
   usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
+
+  recaps: (): Promise<RecapFile> => ipcRenderer.invoke("recaps:get"),
 
   prefs: (): Promise<Preferences> => ipcRenderer.invoke("prefs:get"),
 

@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@/Agent/Agent";
 import type { Entry } from "@/Types/Transcript";
 import type { SweChat } from "@/Types/Chat";
+import type { RecapFile } from "@/Types/Recap";
 import type { UsageFile } from "@/Types/Usage";
 import type { Answer, Question } from "@/Tools/Ask";
 import type { Plan, PlanDecision } from "@/Tools/Plan";
@@ -44,6 +45,8 @@ export interface SweBridge {
   openProject: (cwd: string) => Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null>;
 
   usage: () => Promise<UsageFile>;
+
+  recaps: () => Promise<RecapFile>;
 
   prefs: () => Promise<Preferences>;
   setPrefs: (patch: Partial<Preferences>) => Promise<Preferences>;

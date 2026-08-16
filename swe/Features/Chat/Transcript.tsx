@@ -1,5 +1,5 @@
 import { Component, type ReactNode } from "react";
-import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, ListChecksIcon, ListTodoIcon, MessageSquareIcon, PencilLineIcon, RotateCcwIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon, UsersIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, FilePlus2Icon, FileTextIcon, FolderIcon, HistoryIcon, ListChecksIcon, ListTodoIcon, MessageSquareIcon, PencilLineIcon, RotateCcwIcon, SearchIcon, SparklesIcon, TerminalIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon, UsersIcon } from "lucide-react";
 
 import { UsageHeatmap, type UsageFile } from "@/Features/Usage/Heatmap";
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from "@/UI/Scroller";
@@ -223,6 +223,7 @@ const TOOL_ICONS: Record<Tool, typeof FileTextIcon> = {
   ask: ListChecksIcon,
   retry: RotateCcwIcon,
   say: MessageSquareIcon,
+  recap: HistoryIcon,
   done: CheckIcon,
 
 };

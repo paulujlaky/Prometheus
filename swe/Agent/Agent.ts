@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { ChatSession } from "../../sdk/index";
 
 import { agentInstructions, FINISH_REMINDER, followUpPrompt, formatResults, NUDGE, parseActions, SPEED_UP, subagentPrompt, subagentTask, systemPrompt, type Action, type Result } from "./Protocol";
+import { formatRecap } from "../Tools/Recap";
+
+import type { RecapDraft } from "../Types/Recap";
 
 import { isAgentModelId, llmIdFromAgentModel } from "../Utils/Models";
 import { estimateTokens } from "../Utils/Tokens";
@@ -75,7 +78,8 @@ export type AgentEvent =
   | { type: "session"; chatId: string; title: string; botAssistantId?: string } /** Worktree commit in the shadow store, taken before this run touched anything. */
   | { type: "snapshot"; commit: string }
   | { type: "interjection"; text: string } /** User message injected mid-loop (queued until the next model turn). */
-  | { type: "say"; text: string }
+  | { type: "say"; text: string } /** Structured end-of-run note; the main process stores it for the Recap view. */
+  | { type: "recap"; draft: RecapDraft }
   | { type: "done"; summary: string }
 
   | { type: "subagent:start"; id: string; name: string; task: string } /** A child opened; its blocks arrive as `subagent:event` until `subagent:end` settles the card. */
@@ -945,6 +949,14 @@ export class MiniAgent {
 
       onEvent({ type: "say", text: outcome.text });
       return { verb: "say", ok: true, text: "shown to the user" };
+
+    }
+
+    if (outcome.kind === "recap") {
+
+      onEvent({ type: "recap", draft: outcome.draft });
+
+      return { verb: "recap", ok: true, text: formatRecap(outcome.draft) };
 
     }
 

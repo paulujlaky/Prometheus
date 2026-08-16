@@ -3,6 +3,7 @@ import { MODE_KEY } from "@/Layout/Header";
 import type { Approval, ApprovalMode, Ask, PlanRequest } from "@/Types/Bridge";
 import type { SweChat } from "@/Types/Chat";
 import type { Entry, WithoutId } from "@/Types/Transcript";
+import type { RecapFile } from "@/Types/Recap";
 import type { UsageFile } from "@/Types/Usage";
 import type { UndoMark } from "@/Tools/Snapshot";
 import type { Preferences } from "@/Utils/Prefs";
@@ -10,6 +11,8 @@ import type { Preferences } from "@/Utils/Prefs";
 import type { AssistantSummary } from "../../../sdk/types";
 
 export type NewEntry = WithoutId<Entry>;
+
+export type AppView = "recap" | "chat";
 
 export interface AppState {
 
@@ -41,6 +44,10 @@ export interface AppState {
   tokensUsed: number;
 
   usage: UsageFile;
+
+  /** Recap is the home screen; selecting a chat or starting a session switches to "chat". */
+  view: AppView;
+  recaps: RecapFile;
 
   chats: SweChat[];
   chatsLoading: boolean;
@@ -85,6 +92,9 @@ export function initialAppState(): AppState {
     tokensUsed: 0,
 
     usage: {},
+
+    view: "recap",
+    recaps: {},
 
     chats: [],
     chatsLoading: true,

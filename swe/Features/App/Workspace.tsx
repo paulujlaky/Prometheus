@@ -6,6 +6,7 @@ import { Composer } from "@/Features/Chat/Composer";
 import { PlanCard } from "@/Features/Chat/PlanCard";
 import { StatusBar } from "@/Features/Chat/StatusBar";
 import { Transcript, type UndoInfo } from "@/Features/Chat/Transcript";
+import { RecapView } from "@/Features/Recap/Timeline";
 import { PrefsPanel } from "@/Features/Settings/PrefsPanel";
 import { Header } from "@/Layout/Header";
 import { Sidebar } from "@/Layout/Sidebar";
@@ -15,6 +16,7 @@ import type { AppState } from "@/Features/App/State";
 import type { ApprovalMode } from "@/Types/Bridge";
 import type { SweChat } from "@/Types/Chat";
 import type { Entry } from "@/Types/Transcript";
+import type { RunRecap } from "@/Types/Recap";
 import type { Answer } from "@/Tools/Ask";
 import type { PlanDecision } from "@/Tools/Plan";
 import type { Preferences } from "@/Utils/Prefs";
@@ -41,6 +43,9 @@ export interface WorkspaceProps {
   onOpenSettings: () => void;
   onCloseSettings: () => void;
   onSavedPrefs: (prefs: Preferences) => void;
+
+  onOpenRecap: () => void;
+  onOpenRecapChat: (recap: RunRecap) => void;
 
   onOpenProject: (dir: string) => void;
   onPickFolder: () => void;
@@ -101,9 +106,13 @@ export function Workspace(props: WorkspaceProps) {
         onRename={props.onRename}
         onDelete={props.onDelete}
         onNew={props.onNew}
+        onPickFolder={props.onPickFolder}
         onOpenSettings={props.onOpenSettings}
+        onOpenRecap={props.onOpenRecap}
 
-      />
+        recapActive={state.view === "recap"}
+
+        />
 
       <AnimatePresence>
 
@@ -121,6 +130,21 @@ export function Workspace(props: WorkspaceProps) {
         ) : null}
 
       </AnimatePresence>
+
+      {state.view === "recap" ? (
+
+        <RecapView
+
+          recaps={state.recaps}
+          projectDir={cwd}
+
+          onOpenChat={props.onOpenRecapChat}
+          onOpenProject={props.onOpenProject}
+          onNew={props.onNew}
+
+        />
+
+      ) : (
 
       <div className="flex min-w-0 flex-1 flex-col">
 
@@ -228,6 +252,8 @@ export function Workspace(props: WorkspaceProps) {
         />
 
       </div>
+
+      )}
 
     </div>
 

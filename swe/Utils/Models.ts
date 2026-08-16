@@ -68,6 +68,26 @@ export function displayName(name: string): string {
 
 }
 
+/** Card-sized name: drops the provider segment only, so "Anthropic · Claude 5 Opus" reads "Claude 5 Opus". */
+export function shortModelName(label: string | null | undefined): string {
+
+  if (!label) {
+
+    return "Unknown";
+
+  }
+
+  const providers = new Set<string>(PROVIDERS.map((provider) => provider.toLowerCase()));
+
+  const parts = displayName(label).split("·").map((part) => part.trim()).filter(Boolean);
+  const named = parts.filter((part) => part.toLowerCase() !== "agent" && !providers.has(part.toLowerCase()));
+
+  const core = named[named.length - 1] ?? parts[0] ?? "";
+
+  return core.replace(/\s+/g, " ").trim() || "Unknown";
+
+}
+
 /** Prefers catalog contextLength; falls back to family heuristics. */
 export function contextLimitOf(assistant: Pick<AssistantSummary, "name" | "alias" | "description" | "contextLength"> | string | null | undefined): number {
 

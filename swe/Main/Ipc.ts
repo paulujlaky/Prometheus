@@ -3,6 +3,7 @@ import { ipcMain } from "electron";
 import { getClient } from "./Client";
 import { registerChatIpc } from "./Chats";
 import { registerFileIpc } from "./Files";
+import { loadRecaps } from "./Recap";
 import { registerRunIpc } from "./Run";
 import {
 
@@ -75,6 +76,8 @@ export function registerIpc() {
   });
 
   ipcMain.handle("usage:get", () => loadUsage());
+
+  ipcMain.handle("recaps:get", () => loadRecaps());
 
   ipcMain.handle("rollback:list", (_event, chatId: string) => (snapshotsAvailable() ? loadMarks(chatId) : []));
 
