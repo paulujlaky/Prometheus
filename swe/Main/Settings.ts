@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { BUILTIN_CMD_TIMEOUT_MS, BUILTIN_MAX_STEPS, clamp, CMD_TIMEOUT_RANGE, MAX_STEPS_RANGE, type Preferences } from "../Utils/Prefs";
 import { folderLabel, normalizeDir } from "../Utils/Paths";
 
+import type { McpServerConfig } from "../Types/Mcp";
+
 export { CMD_TIMEOUT_RANGE, MAX_STEPS_RANGE, type Preferences };
 
 /** App data root under the user profile (`~/.bbx`). */
@@ -28,6 +30,9 @@ export interface Settings {
 
   /** BoodleBox browser cookie used to authenticate the SDK. */
   boodleCookie?: string;
+
+  /** MCP servers available in every project; a project's own config file overrides one by name. */
+  mcpServers?: Record<string, McpServerConfig>;
 
   /** @deprecated Working directories now belong to individual chats. */
   cwd?: string | null;

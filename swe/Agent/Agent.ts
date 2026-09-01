@@ -21,6 +21,9 @@ import { formatReports, type SubagentReport, type SubagentTask } from "../Tools/
 import { projectDoc, repoMap } from "../Tools/FS";
 import { captureSnapshot } from "../Tools/Snapshot";
 
+import { callTool, catalog, mcpPromptSection } from "../Main/Mcp";
+import { formatCatalog } from "../Tools/Mcp";
+
 import { recordUsage } from "../Main/Usage";
 
 import type { BoodleClient } from "../../sdk/client";
@@ -976,6 +979,44 @@ export class MiniAgent {
 
     }
 
+    if (outcome.kind === "mcp") {
+
+      const { call } = outcome;
+
+      if (call.tool && !(await this.confirm(`mcp ${call.server}.${call.tool}`))) {
+
+        const text = "The user declined that MCP call. Do something else.";
+
+        onEvent({ type: "observation", text, exitCode: 1 });
+
+        return { verb: "mcp", ok: false, text };
+
+      }
+
+      onEvent({ type: "status", text: call.tool ? `Calling ${call.server}.${call.tool}` : "Listing MCP tools" });
+
+      try {
+
+        const result = call.tool
+          ? await callTool(this.cwd, call.server, call.tool, call.args)
+          : { ok: true, text: formatCatalog(await catalog(this.cwd, call.server || undefined)) };
+
+        onEvent({ type: "observation", text: result.text, exitCode: result.ok ? 0 : 1 });
+
+        return { verb: "mcp", ok: result.ok, text: truncate(result.text) };
+
+      } catch (err) {
+
+        const text = err instanceof Error ? err.message : String(err);
+
+        onEvent({ type: "observation", text, exitCode: 1 });
+
+        return { verb: "mcp", ok: false, text };
+
+      }
+
+    }
+
     if (outcome.kind === "ask") {
 
       onEvent({ type: "status", text: "Waiting for an answer" });
@@ -1096,7 +1137,19 @@ export class MiniAgent {
   */
   private async runSubagent(task: SubagentTask, timeoutMs: number): Promise<SubagentReport> {
 
-    const { onEvent } = this.options;
+    const onEvent = (event: AgentEvent) => {
+
+      try {
+
+        this.options.onEvent(event);
+
+      } catch {
+
+        // sending to a disposed renderer must not fail the sibling
+
+      }
+
+    };
 
     const id = `sub${(this.subagentSeq += 1)}`;
 
@@ -1278,7 +1331,21 @@ export class MiniAgent {
 
   async run(task: string, runOptions: AgentRunOptions = {}): Promise<void> {
 
-    const { client, onEvent } = this.options;
+    const { client } = this.options;
+
+    const onEvent = (event: AgentEvent) => {
+
+      try {
+
+        this.options.onEvent(event);
+
+      } catch {
+
+        // sending to a disposed renderer must not unwind the websocket handler
+
+      }
+
+    };
 
     const maxSteps = this.options.maxSteps ?? DEFAULT_MAX_STEPS;
     const timeoutMs = this.options.commandTimeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
@@ -1357,6 +1424,7 @@ export class MiniAgent {
         assistantId: sendAssistantId,
         refreshOnComplete: false,
         knowledgeIds: knowledgeIds.length ? knowledgeIds : undefined,
+        reuseEmpty: this.depth === 0,
 
       });
 
@@ -1423,6 +1491,8 @@ export class MiniAgent {
       let message = followUp ? followUpPrompt(map, task) : subName
           ? agentNative ? subagentTask(subName, task): subagentPrompt(map, projectDoc(this.cwd), subName, task)
           : agentNative ? agentTask(task) : systemPrompt(map, projectDoc(this.cwd), task);
+
+      message += mcpPromptSection(this.cwd);
 
       this.lastRecap = null;
 

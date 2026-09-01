@@ -1,6 +1,6 @@
 // The agent protocol: tagged blocks in, tagged results out. No JSON, no escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "spawn", "plan", "ask", "say", "retry", "recap", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "mcp", "spawn", "plan", "ask", "say", "retry", "recap", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -47,6 +47,11 @@ const ALIASES: Record<string, Verb> = {
   delegate: "spawn",
   fork: "spawn",
   parallel: "spawn",
+
+  tool: "mcp",
+  call: "mcp",
+  server: "mcp",
+  mcp_tool: "mcp",
 
   question: "ask",
   choose: "ask",
@@ -327,6 +332,7 @@ are held — fix what failed and <retry> to run them again as sent (safer than r
   <write>    create a file, or replace one entirely
   <delete>   remove files
   <run>      shell: build, test, git
+  <mcp>      call a tool on an MCP server — bare, it lists what is available
   <spawn>    run subagents in parallel and wait for what they report back
   <plan>     put a plan to the user and wait for them to approve the build
   <ask>      put a choice to the user and wait for their answer
@@ -423,6 +429,22 @@ finishes. Four at a time; they cannot spawn.
 
 Spawn when parts do not need each other's results. Do it yourself when parts are sequential,
 it is one file, or briefing costs more than doing.
+
+## MCP servers
+
+An MCP server is a separate program that exposes tools — a Unity editor, a database, a
+browser. The tag names the server and the tool; each line is one argument.
+
+  create the launch scene
+  <mcp unity.create_scene>
+  name: Launchpad
+  path: Assets/Scenes
+  </mcp>
+
+A bare <mcp> lists every server and the tools it exposes; <mcp unity> lists one server's.
+List before your first call — tool names differ between servers, and a guessed name is a
+wasted turn. Values that look like JSON (numbers, true, lists, objects) arrive typed, and
+everything else arrives as text.
 
 ## Rules
 

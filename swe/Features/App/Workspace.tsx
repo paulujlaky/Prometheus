@@ -121,6 +121,7 @@ export function Workspace(props: WorkspaceProps) {
           <PrefsPanel
 
             models={assistants}
+            cwd={cwd}
 
             onClose={props.onCloseSettings}
             onSaved={props.onSavedPrefs}

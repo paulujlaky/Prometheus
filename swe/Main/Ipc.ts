@@ -3,6 +3,7 @@ import { ipcMain } from "electron";
 import { getBoodleCookie, getClient, setBoodleCookie } from "./Client";
 import { registerChatIpc } from "./Chats";
 import { registerFileIpc } from "./Files";
+import { catalog, refresh } from "./Mcp";
 import { loadRecaps } from "./Recap";
 import { registerRunIpc } from "./Run";
 import {
@@ -87,6 +88,20 @@ export function registerIpc() {
     return cwd.trim();
 
   });
+
+  ipcMain.handle("mcp:list", (_event, cwd: string) => {
+
+    if (typeof cwd !== "string" || !cwd.trim()) {
+
+      return [];
+
+    }
+
+    return catalog(cwd);
+
+  });
+
+  ipcMain.handle("mcp:refresh", () => refresh());
 
   ipcMain.handle("usage:get", () => loadUsage());
 

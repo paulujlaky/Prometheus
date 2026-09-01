@@ -1,6 +1,7 @@
 import { parseAsk, type Question } from "./Ask";
 import { applyEdit } from "./Edit";
 import { deleteFiles, grep, listDir, parseReadSpec, readFiles, writeFile } from "./FS";
+import { parseMcp, type McpCall } from "./Mcp";
 import { parsePlan, type Plan } from "./Plan";
 import { parseRecap } from "./Recap";
 import { parseSpawn, type SubagentTask } from "./Subagent";
@@ -16,6 +17,9 @@ export type Outcome =
 
   /** Parked rather than executed: spawning needs the client and the parent's own loop. */
   | { kind: "spawn"; tasks: SubagentTask[] }
+
+  /** Parked too: the connections live in the main process and the call is async. */
+  | { kind: "mcp"; call: McpCall }
 
   | { kind: "ask"; question: Question }
 
@@ -111,6 +115,12 @@ export function execute(action: Action, cwd: string): Outcome {
   if (action.verb === "spawn") {
 
     return { kind: "spawn", tasks: parseSpawn(action) };
+
+  }
+
+  if (action.verb === "mcp") {
+
+    return { kind: "mcp", call: parseMcp(action) };
 
   }
 

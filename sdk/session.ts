@@ -21,6 +21,9 @@ export interface ChatSessionOptions {
   /** Attach knowledge when creating a brand-new chat. */
   knowledgeIds?: string[];
 
+  /** When false, always POST /chat — parallel subagents must not share a leftover empty row. */
+  reuseEmpty?: boolean;
+
 }
 
 export interface ChatSessionState {
@@ -95,12 +98,10 @@ export class ChatSession {
 
   static async create(client: BoodleClient, options: ChatSessionOptions = {}): Promise<ChatSession> {
 
-    // prefer a recent empty chat over minting a new one every run
-    const chat = await client.createOrReuseChat({
-
-      knowledgeIds: options.knowledgeIds,
-
-    });
+    // prefer a recent empty chat over minting a new one every run, unless a parallel sibling needs isolation
+    const chat = options.reuseEmpty === false
+      ? await client.createChat({ knowledgeIds: options.knowledgeIds })
+      : await client.createOrReuseChat({ knowledgeIds: options.knowledgeIds });
 
     const session = new ChatSession(client, chat.id, options);
 
@@ -561,9 +562,22 @@ export class ChatSession {
     const data = envelope.data;
     const chatId = resolveChatId(envelope, data);
 
-    if (chatId && chatId !== this.chatId) {
+    if (chatId) {
 
-      return;
+      if (chatId !== this.chatId) {
+
+        return;
+
+      }
+
+    } else if (data.type === "MessageSubmission" || data.type === "MessageIncrementalResponse" || data.type === "MessageFinalResponse") {
+
+      // user-level socket: a generation payload with no chat id is someone else's unless we asked for a turn
+      if (!this.busy && !this.pendingFinal && !this.activeStream) {
+
+        return;
+
+      }
 
     }
 
@@ -588,8 +602,8 @@ export class ChatSession {
 
     if (!this.activeStream) {
 
-      // unsolicited stream. we should reconnect
-      if (data.type === "MessageIncrementalResponse" || data.type === "MessageSubmission") {
+      // adopt a stream that beat HTTP only while this session is waiting on a turn — siblings share the user socket
+      if ((data.type === "MessageIncrementalResponse" || data.type === "MessageSubmission") && (this.busy || this.pendingFinal)) {
 
         this.activeStream = new ResponseStream(this.chatId, submissionId);
         this.busy = true;
@@ -761,7 +775,15 @@ export class ChatSession {
 
     for (const listener of this.eventListeners) {
 
-      listener(event);
+      try {
+
+        listener(event);
+
+      } catch {
+
+        // a disposed renderer must not abort the rest of this stream
+
+      }
 
     }
 

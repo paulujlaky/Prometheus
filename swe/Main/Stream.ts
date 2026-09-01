@@ -1,4 +1,4 @@
-import { getWindow } from "./Window";
+import { sendToRenderer } from "./Window";
 
 import type { AgentEvent } from "../Agent/Agent";
 
@@ -20,7 +20,7 @@ export function flushDeltas(runId: string) {
 
   if (text) {
 
-    getWindow()?.webContents.send("agent-event", { runId, event: { type: "delta", text } });
+    sendToRenderer("agent-event", { runId, event: { type: "delta", text } });
     deltaBuffers.delete(runId);
 
   }
@@ -40,6 +40,6 @@ export function send(runId: string, event: AgentEvent) {
 
   flushDeltas(runId);
 
-  getWindow()?.webContents.send("agent-event", { runId, event });
+  sendToRenderer("agent-event", { runId, event });
 
 }

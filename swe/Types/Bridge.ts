@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@/Agent/Agent";
 import type { Entry } from "@/Types/Transcript";
 import type { SweChat } from "@/Types/Chat";
+import type { McpServerStatus } from "@/Types/Mcp";
 import type { RecapFile } from "@/Types/Recap";
 import type { UsageFile } from "@/Types/Usage";
 import type { Answer, Question } from "@/Tools/Ask";
@@ -43,6 +44,9 @@ export interface SweBridge {
   setCwd: (cwd: string) => Promise<string | null>;
   recentProjects: () => Promise<{ dir: string; count: number }[]>;
   openProject: (cwd: string) => Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null>;
+
+  mcpServers: (cwd: string) => Promise<McpServerStatus[]>;
+  refreshMcp: () => Promise<void>;
 
   usage: () => Promise<UsageFile>;
 

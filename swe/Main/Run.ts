@@ -9,7 +9,7 @@ import { recordRecap } from "./Recap";
 import { flushDeltas, send } from "./Stream";
 import { diffStat, recordMark } from "../Tools/Snapshot";
 import { shortModelName } from "../Utils/Models";
-import { getWindow } from "./Window";
+import { sendToRenderer } from "./Window";
 
 import type { Answer } from "../Tools/Ask";
 import type { Plan, PlanDecision } from "../Tools/Plan";
@@ -201,7 +201,7 @@ export function registerRunIpc() {
 
           flushDeltas(options.runId);
 
-          getWindow()?.webContents.send("approval", { runId: options.runId, id, command, reason });
+          sendToRenderer("approval", { runId: options.runId, id, command, reason });
           alertUser(notifyTitle, reason ? NOTICES.approvalRisky : NOTICES.approval);
 
         });
@@ -218,7 +218,7 @@ export function registerRunIpc() {
 
           flushDeltas(options.runId);
 
-          getWindow()?.webContents.send("ask", { runId: options.runId, id, question });
+          sendToRenderer("ask", { runId: options.runId, id, question });
           alertUser(notifyTitle, NOTICES.ask);
 
         });
@@ -235,7 +235,7 @@ export function registerRunIpc() {
 
           flushDeltas(options.runId);
 
-          getWindow()?.webContents.send("plan", { runId: options.runId, id, plan });
+          sendToRenderer("plan", { runId: options.runId, id, plan });
           alertUser(notifyTitle, NOTICES.plan);
 
         });
@@ -269,7 +269,7 @@ export function registerRunIpc() {
       rejectPending(options.runId);
 
       flushDeltas(options.runId);
-      getWindow()?.webContents.send("run-ended", { runId: options.runId });
+      sendToRenderer("run-ended", { runId: options.runId });
 
     }
 

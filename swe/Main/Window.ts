@@ -47,6 +47,29 @@ export function getWindow(): BrowserWindow | null {
 
 }
 
+/** Drop the payload when the page is gone — throwing here would tear down an in-flight run. */
+export function sendToRenderer(channel: string, payload: unknown) {
+
+  const win = window;
+
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) {
+
+    return;
+
+  }
+
+  try {
+
+    win.webContents.send(channel, payload);
+
+  } catch {
+
+    // render frame can dispose between the checks and send (reload, crash)
+
+  }
+
+}
+
 export function createWindow(): BrowserWindow {
 
   const icon = resolveIcon();

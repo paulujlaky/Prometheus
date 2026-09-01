@@ -5,6 +5,7 @@ import type { Answer, Question } from "./Tools/Ask";
 import type { Plan, PlanDecision } from "./Tools/Plan";
 import type { AssistantSummary } from "../sdk/types";
 import type { Preferences } from "./Main/Settings";
+import type { McpServerStatus } from "./Types/Mcp";
 import type { RecapFile } from "./Types/Recap";
 import type { UndoMark } from "./Tools/Snapshot";
 import type { UsageFile } from "./Main/Usage";
@@ -32,6 +33,11 @@ contextBridge.exposeInMainWorld("swe", {
   setCwd: (cwd: string): Promise<string | null> => ipcRenderer.invoke("settings:set-cwd", cwd),
   recentProjects: (): Promise<{ dir: string; count: number }[]> => ipcRenderer.invoke("settings:recent-projects"),
   openProject: (cwd: string): Promise<{ dir: string; recentProjects: { dir: string; count: number }[] } | null> => ipcRenderer.invoke("settings:open-project", cwd),
+
+  mcpServers: (cwd: string): Promise<McpServerStatus[]> => ipcRenderer.invoke("mcp:list", cwd),
+
+  /** Drop cached connections so the next call re-reads the config files. */
+  refreshMcp: (): Promise<void> => ipcRenderer.invoke("mcp:refresh"),
 
   usage: (): Promise<UsageFile> => ipcRenderer.invoke("usage:get"),
 

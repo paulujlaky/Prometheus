@@ -1,18 +1,24 @@
 import { Component, createRef, type ReactNode } from "react";
 import { motion } from "motion/react";
-import { XIcon } from "lucide-react";
+import { RotateCwIcon, XIcon } from "lucide-react";
 
 import { ModelPicker } from "@/Features/Chat/ModelPicker";
 import { NumberField } from "@/Features/Settings/NumberField";
 
+import { cn } from "@/Utils/Class";
 import { fade, popIn } from "@/Utils/Motion";
 import { CMD_TIMEOUT_RANGE, MAX_STEPS_RANGE, type Preferences } from "@/Utils/Prefs";
+
+import type { McpServerStatus } from "@/Types/Mcp";
 
 import type { AssistantSummary } from "../../../sdk/types";
 
 interface PrefsPanelProps {
 
   models: AssistantSummary[];
+
+  /** Project root the MCP section reads its config from; omitted when no project is open. */
+  cwd?: string | null;
 
   onClose: () => void;
   onSaved: (prefs: Preferences) => void;
@@ -28,11 +34,14 @@ interface PrefsPanelState {
   savingCookie: boolean;
   error: string | null;
 
+  servers: McpServerStatus[] | null;
+  loadingServers: boolean;
+
 }
 
 export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
-  state: PrefsPanelState = { prefs: null, cookie: "", editingCookie: false, savingCookie: false, error: null };
+  state: PrefsPanelState = { prefs: null, cookie: "", editingCookie: false, savingCookie: false, error: null, servers: null, loadingServers: false };
 
   private card = createRef<HTMLDivElement>();
   private restoreFocus: HTMLElement | null = null;
@@ -65,6 +74,8 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
     window.addEventListener("keydown", this.onKey);
     this.card.current?.focus();
+
+    this.loadServers();
 
   }
 
@@ -102,6 +113,50 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
   };
 
+  private loadServers = () => {
+
+    const { cwd } = this.props;
+
+    if (!cwd) {
+
+      this.setState({ servers: [] });
+
+      return;
+
+    }
+
+    this.setState({ loadingServers: true });
+
+    void window.swe.mcpServers(cwd)
+      .then((servers) => {
+
+        if (this.live) {
+
+          this.setState({ servers, loadingServers: false });
+
+        }
+
+      })
+      .catch((err: unknown) => {
+
+        if (this.live) {
+
+          this.setState({ error: err instanceof Error ? err.message : String(err), servers: [], loadingServers: false });
+
+        }
+
+      });
+
+  };
+
+  private refreshServers = async () => {
+
+    await window.swe.refreshMcp();
+
+    this.loadServers();
+
+  };
+
   private saveCookie = async () => {
 
     this.setState({ savingCookie: true, error: null });
@@ -127,8 +182,8 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
   render(): ReactNode {
 
-    const { models, onClose } = this.props;
-    const { prefs, cookie, editingCookie, savingCookie, error } = this.state;
+    const { models, cwd, onClose } = this.props;
+    const { prefs, cookie, editingCookie, savingCookie, error, servers, loadingServers } = this.state;
     const visibleCookie = editingCookie || cookie.length <= 6 ? cookie : `${"•".repeat(Math.min(cookie.length - 6, 56))}${cookie.slice(-6)}`;
 
     return (
@@ -309,9 +364,86 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
                 />
 
-              </section>
+                </section>
 
-            </div>
+                <section className="flex flex-col gap-2.5">
+
+                <div className="flex items-center gap-2">
+
+                  <h3 className="min-w-0 flex-1 text-[11px] font-medium tracking-wide text-ink-3">MCP SERVERS</h3>
+
+                  <button className="flex size-6 items-center justify-center rounded-chip text-ink-3 transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+
+                    type="button"
+                    aria-label="Reconnect MCP servers"
+
+                    disabled={loadingServers || !cwd}
+
+                    onClick={() => void this.refreshServers()}
+
+                  >
+
+                    <RotateCwIcon className={cn("size-3.5", loadingServers && "animate-spin")} />
+
+                  </button>
+
+                </div>
+
+                {!cwd ? (
+
+                  <p className="text-[12px] leading-relaxed text-ink-3">Open a project to see its MCP servers.</p>
+
+                ) : servers === null ? (
+
+                  <p className="text-[12px] leading-relaxed text-ink-3">Checking...</p>
+
+                ) : !servers.length ? (
+
+                  <p className="text-[12px] leading-relaxed text-ink-3">
+
+                    None configured. Add them to <code className="text-ink-2">.mcp.json</code> or <code className="text-ink-2">.cursor/mcp.json</code> in the project root.
+
+                  </p>
+
+                ) : (
+
+                  <div className="flex flex-col gap-2">
+
+                    {servers.map((server) => (
+
+                      <div className="flex flex-col gap-1 rounded-chip border border-line bg-field px-2.5 py-2"
+
+                        key={server.name}
+
+                      >
+
+                        <div className="flex items-center gap-2">
+
+                          <span className={cn("size-1.5 shrink-0 rounded-full", server.connected ? "bg-green" : "bg-red")} />
+
+                          <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{server.name}</span>
+
+                          <span className="shrink-0 text-[11px] text-ink-3">{server.transport}</span>
+
+                        </div>
+
+                        <p className="pl-3.5 text-[11.5px] leading-relaxed text-ink-3">
+
+                          {server.connected ? `${server.tools.length} ${server.tools.length === 1 ? "tool" : "tools"} · ${server.source}` : server.error}
+
+                        </p>
+
+                      </div>
+
+                    ))}
+
+                  </div>
+
+                )}
+
+                </section>
+
+                </div>
 
           )}
 
