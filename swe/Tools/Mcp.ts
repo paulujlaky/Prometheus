@@ -201,11 +201,20 @@ export interface CallResult {
 
 }
 
+const MAX_CALL_TEXT = 100_000;
+
 export function formatCallResult(result: CallResult): string {
 
   const parts: string[] = [];
 
   for (const item of result.content ?? []) {
+
+    if (item.type === "image" || item.type === "audio" || item.type === "resource") {
+
+      parts.push(`[${item.type} content]`);
+      continue;
+
+    }
 
     if (typeof item.text === "string" && item.text.trim()) {
 
@@ -226,12 +235,18 @@ export function formatCallResult(result: CallResult): string {
 
   const text = parts.join("\n\n").trim();
 
-  if (text) {
+  if (!text) {
+
+    return result.isError ? "The tool reported an error but returned no message." : "The tool returned no content.";
+
+  }
+
+  if (text.length <= MAX_CALL_TEXT) {
 
     return text;
 
   }
 
-  return result.isError ? "The tool reported an error but returned no message." : "The tool returned no content.";
+  return `${text.slice(0, MAX_CALL_TEXT)}\n\n... ${text.length - MAX_CALL_TEXT} characters cut ...`;
 
 }

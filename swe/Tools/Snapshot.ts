@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { BBX_DIR, normalizeProjectPath } from "../Main/Settings";
+import { commandEnv } from "../Main/Spawn";
 
 /** The worktree as it stood before one run touched it. */
 export interface UndoMark {
@@ -88,7 +89,7 @@ export function snapshotsAvailable(): boolean {
 
 function git(gitDir: string, worktree: string, args: string[]): string {
 
-  const env = { ...process.env };
+  const env = commandEnv();
 
   // an inherited GIT_* from the launching shell would silently retarget the store at the user's repo
   delete env.GIT_DIR;

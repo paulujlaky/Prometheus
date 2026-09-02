@@ -2,9 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { McpHttpTransport } from "./McpHttp";
+import { McpStdioTransport } from "./McpStdio";
 import { loadSettings } from "./Settings";
 import { formatCallResult, type CallResult } from "../Tools/Mcp";
 
@@ -166,15 +166,12 @@ async function open(entry: McpEntry, cwd: string): Promise<Client> {
   const client = new Client(CLIENT_INFO, { capabilities: {} });
 
   const transport = entry.transport === "http"
-    ? new StreamableHTTPClientTransport(new URL(entry.config.url as string), { requestInit: { headers: entry.config.headers } })
-    : new StdioClientTransport({
+    ? new McpHttpTransport(new URL(entry.config.url as string), entry.config.headers)
+    : new McpStdioTransport({
 
       command: entry.config.command as string,
       args: entry.config.args ?? [],
-
-      // the SDK's default env is deliberately minimal; a server needing PATH or HOME gets nothing without this
-      env: { ...getDefaultEnvironment(), ...(entry.config.env ?? {}) },
-
+      env: entry.config.env,
       cwd,
 
     });

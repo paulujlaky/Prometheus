@@ -4,6 +4,95 @@ import { join, resolve } from "node:path";
 
 import { APP_ID, APP_NAME, bundleDir, resourcePath } from "./Bundle";
 
+/** Chromium's IPC serializer on Windows aborts on NUL and unpaired surrogates. */
+const MAX_IPC_STRING = 200_000;
+
+function sanitizeString(text: string): string {
+
+  let out = "";
+
+  for (let i = 0; i < text.length; i += 1) {
+
+    const code = text.charCodeAt(i);
+
+    if (code === 0) {
+
+      continue;
+
+    }
+
+    if (code >= 0xD800 && code <= 0xDBFF) {
+
+      const next = text.charCodeAt(i + 1);
+
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+
+        out += text[i] + text[i + 1];
+        i += 1;
+        continue;
+
+      }
+
+      out += "\uFFFD";
+      continue;
+
+    }
+
+    if (code >= 0xDC00 && code <= 0xDFFF) {
+
+      out += "\uFFFD";
+      continue;
+
+    }
+
+    out += text[i];
+
+  }
+
+  if (out.length <= MAX_IPC_STRING) {
+
+    return out;
+
+  }
+
+  const dropped = out.length - MAX_IPC_STRING;
+
+  return `${out.slice(0, MAX_IPC_STRING)}\n\n... ${dropped} characters cut for the UI ...`;
+
+}
+
+function sanitizeIpc(value: unknown, depth = 0): unknown {
+
+  if (typeof value === "string") {
+
+    return sanitizeString(value);
+
+  }
+
+  if (value == null || typeof value !== "object" || depth > 8) {
+
+    return value;
+
+  }
+
+  if (Array.isArray(value)) {
+
+    return value.map((item) => sanitizeIpc(item, depth + 1));
+
+  }
+
+  const out: Record<string, unknown> = {};
+
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+
+    out[key] = sanitizeIpc(item, depth + 1);
+
+  }
+
+  return out;
+
+}
+
 const here = bundleDir();
 
 export function resolveIcon(): string | undefined {
@@ -60,7 +149,7 @@ export function sendToRenderer(channel: string, payload: unknown) {
 
   try {
 
-    win.webContents.send(channel, payload);
+    win.webContents.send(channel, sanitizeIpc(payload));
 
   } catch {
 

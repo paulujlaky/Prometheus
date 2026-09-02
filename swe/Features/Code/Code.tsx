@@ -74,7 +74,8 @@ export class Code extends Component<CodeProps, CodeState> {
 
     const { code, lang = "bash", streaming } = this.props;
 
-    if (streaming || !code) {
+    // shiki's JS regex engine can overflow the renderer on large dumps
+    if (streaming || !code || code.length > 32_000) {
 
       return;
 

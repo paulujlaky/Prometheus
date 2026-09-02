@@ -401,7 +401,7 @@ export class PrefsPanel extends Component<PrefsPanelProps, PrefsPanelState> {
 
                   <p className="text-[12px] leading-relaxed text-ink-3">
 
-                    None configured. Add them to <code className="text-ink-2">.mcp.json</code> or <code className="text-ink-2">.cursor/mcp.json</code> in the project root.
+                    None configured. Add them to <code className="text-ink-2">.mcp.json</code> in the project root.
 
                   </p>
 

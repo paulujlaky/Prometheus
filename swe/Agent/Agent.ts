@@ -22,6 +22,7 @@ import { projectDoc, repoMap } from "../Tools/FS";
 import { captureSnapshot } from "../Tools/Snapshot";
 
 import { callTool, catalog, mcpPromptSection } from "../Main/Mcp";
+import { commandEnv } from "../Main/Spawn";
 import { formatCatalog } from "../Tools/Mcp";
 
 import { recordUsage } from "../Main/Usage";
@@ -414,6 +415,12 @@ function killTree(child: ChildProcess) {
 
   }
 
+  if (child.pid === process.pid) {
+
+    return;
+
+  }
+
   if (process.platform === "win32") {
 
     // /t = whole tree; /f = force — needed for bun/node grandchildren of bash
@@ -502,9 +509,8 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
       // anything that prompts gets EOF and fails fast instead of hanging until the timeout. good UX
       stdio: ["ignore", "pipe", "pipe"],
 
-      env: {
+      env: commandEnv({
 
-        ...process.env,
         ...extraEnv,
 
         CI: "1",
@@ -520,7 +526,7 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
         NPM_CONFIG_AUDIT: "false",
         DEBIAN_FRONTEND: "noninteractive",
 
-      },
+      }),
 
     });
 
@@ -537,7 +543,7 @@ export function runCommand(command: string, cwd: string, timeoutMs: number, onSp
 
     const append = (chunk: unknown) => {
 
-      const text = String(chunk);
+      const text = String(chunk).replace(/\0/g, "");
 
       if (head.length < half) {
 
@@ -903,7 +909,18 @@ export class MiniAgent {
   /** One block: execute it, tell the UI, hand back what the model should see. */
   private async runAction(action: Action, timeoutMs: number): Promise<Result | "done"> {
 
-    const { onEvent } = this.options;
+    const onEvent = (event: AgentEvent) => {
+
+      try {
+
+        this.options.onEvent(event);
+
+      } catch {
+
+        // same as run(): a disposed renderer must not fail the step
+      }
+
+    };
 
     onEvent({ type: "command", command: action.raw });
 

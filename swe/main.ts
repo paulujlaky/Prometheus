@@ -6,6 +6,18 @@ import { registerIpc } from "./Main/Ipc";
 import { closeAll } from "./Main/Mcp";
 import { createWindow } from "./Main/Window";
 
+process.on("uncaughtException", (err) => {
+
+  console.error("uncaughtException", err);
+
+});
+
+process.on("unhandledRejection", (reason) => {
+
+  console.error("unhandledRejection", reason);
+
+});
+
 // Windows binds the taskbar icon to the process AUMID before ready.
 if (process.platform === "win32") {
 
@@ -30,6 +42,37 @@ void app.whenReady().then(() => {
     }
 
   });
+
+});
+
+let lastRendererReload = 0;
+
+app.on("render-process-gone", (_event, webContents, details) => {
+
+  console.error("render-process-gone", details.reason, details.exitCode);
+
+  if (details.reason === "clean-exit" || webContents.isDestroyed()) {
+
+    return;
+
+  }
+
+  const now = Date.now();
+
+  if (now - lastRendererReload < 3000) {
+
+    return;
+
+  }
+
+  lastRendererReload = now;
+  webContents.reload();
+
+});
+
+app.on("child-process-gone", (_event, details) => {
+
+  console.error("child-process-gone", details.type, details.reason, details.exitCode);
 
 });
 
