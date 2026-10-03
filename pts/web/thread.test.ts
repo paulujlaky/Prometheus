@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { buildItems } from "./thread";
+import { buildItems, describeSchedule, describeWatch } from "./thread";
 
 import type { AgentEvent } from "../Store";
 
@@ -56,5 +56,18 @@ test("a running run's unanswered steps show live; a finished run drops blocks th
   ], false);
 
   expect(held.find((item) => item.kind === "work")).toMatchObject({ live: false, steps: [{ ok: false }] });
+
+});
+
+test("schedules read as words when they are a common shape, and stay exact otherwise", () => {
+
+  expect(describeSchedule("0 9 * * 1-5")).toBe("Weekdays at 9:00");
+  expect(describeSchedule("30 7 * * *")).toBe("Every day at 7:30");
+  expect(describeSchedule("0 18 * * 5")).toBe("Fridays at 18:00");
+  expect(describeSchedule("0 10 * * 0,6")).toBe("Weekends at 10:00");
+  expect(describeSchedule("*/15 * * * *")).toBe("Every 15 min");
+  expect(describeSchedule("0 9 1 * *")).toBe("0 9 1 * *");
+  expect(describeWatch("https://example.com/", "60")).toBe("Hourly, watching example.com");
+  expect(describeWatch("cat stock.txt", "5")).toBe("Every 5 min, watching a command");
 
 });

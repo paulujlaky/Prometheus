@@ -1,9 +1,9 @@
-import { Play, Trash2 } from "lucide-react";
 import { Component } from "react";
 
-import { Bar, Button, Field, IconButton, inputClass } from "./ui";
+import { Autosave, Bar, Button, inputClass, Section, Switch } from "./ui";
 
 import { api, type Agent, type Model, type Routine } from "./api";
+import { describeSchedule, describeWatch } from "./thread";
 
 interface DetailsProps {
 
@@ -18,10 +18,10 @@ interface DetailsProps {
 interface DetailsState {
 
   persona: string;
-  modelId: string;
   memory: string;
 
   routines: Routine[];
+  open: number | null;
 
   note: string;
 
@@ -29,13 +29,16 @@ interface DetailsState {
 
 function when(routine: Routine): string {
 
-  return routine.kind === "schedule" ? routine.spec : `${routine.target} · every ${routine.spec} min`;
+  return routine.kind === "schedule" ? describeSchedule(routine.spec) : describeWatch(routine.target, routine.spec);
 
 }
 
 export class Details extends Component<DetailsProps, DetailsState> {
 
-  state: DetailsState = { persona: this.props.agent.persona, modelId: this.props.agent.modelId, memory: "", routines: [], note: "" };
+  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, note: "" };
+
+  private saver = new Autosave((note) => this.flash(note));
+  private noteTimer: ReturnType<typeof setTimeout> | undefined;
 
   async componentDidMount() {
 
@@ -45,38 +48,88 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
   }
 
+  componentWillUnmount() {
+
+    this.saver.flush();
+    clearTimeout(this.noteTimer);
+
+  }
+
+  flash = (note: string) => {
+
+    clearTimeout(this.noteTimer);
+    this.setState({ note });
+    this.noteTimer = setTimeout(() => this.setState({ note: "" }), 2000);
+
+  };
+
   loadRoutines = () => api<Routine[]>(`/agents/${this.props.agent.id}/routines`);
 
-  act = async (work: () => Promise<unknown>, done: string) => {
+  /** Routine changes refresh the list; their errors show where "Saved" would. */
+  routineAction = async (work: () => Promise<unknown>) => {
 
     try {
 
       await work();
-      this.setState({ note: done, routines: await this.loadRoutines() });
+      this.setState({ routines: await this.loadRoutines() });
 
     } catch (err) {
 
-      this.setState({ note: err instanceof Error ? err.message : String(err) });
+      this.flash(err instanceof Error ? err.message : String(err));
 
     }
 
   };
 
-  saveAgent = () => this.act(async () => {
-
-    this.props.onChanged(await api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", { persona: this.state.persona, modelId: this.state.modelId }));
-
-  }, "Saved. It takes effect on the next task.");
+  patch = (changes: Partial<Pick<Agent, "persona" | "modelId">>) => api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", changes).then(this.props.onChanged);
 
   deleteAgent = () => {
 
     if (confirm(`Delete ${this.props.agent.name}? Its chat and routines go too; its files stay on the server.`)) {
 
-      this.act(() => api(`/agents/${this.props.agent.id}`, "DELETE").then(this.props.onDeleted), "Deleted.");
+      api(`/agents/${this.props.agent.id}`, "DELETE").then(this.props.onDeleted).catch((err) => this.flash(String(err)));
 
     }
 
   };
+
+  renderRoutine(routine: Routine) {
+
+    const open = this.state.open === routine.id;
+
+    return (
+
+      <li key={routine.id} className="flex flex-col border-t border-line first:border-t-0">
+
+        <div className="flex items-center gap-4 py-3">
+
+          <button type="button" aria-expanded={open} onClick={() => this.setState({ open: open ? null : routine.id })} className="flex min-w-0 grow flex-col text-left">
+
+            <span className={`truncate text-[15px] ${routine.enabled ? "" : "text-dim"}`}>{routine.task.split("\n")[0]}</span>
+            <span className="truncate text-[13px] text-dim">{when(routine)}</span>
+
+          </button>
+
+          <Switch checked={routine.enabled} label={routine.enabled ? "Pause routine" : "Resume routine"} onChange={(enabled) => this.routineAction(() => api(`/routines/${routine.id}`, "PATCH", { enabled }))} />
+
+        </div>
+
+        {open && (
+
+          <div className="flex gap-5 pb-3 text-[14px]">
+
+            <button type="button" className="text-fg" onClick={() => this.routineAction(() => api(`/routines/${routine.id}/run`, "POST")).then(() => this.flash("Started"))}>Run now</button>
+            <button type="button" className="text-dim hover:text-fg" onClick={() => this.routineAction(() => api(`/routines/${routine.id}`, "DELETE"))}>Delete</button>
+
+          </div>
+
+        )}
+
+      </li>
+
+    );
+
+  }
 
   render() {
 
@@ -87,77 +140,47 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
       <div className="flex h-full flex-col">
 
-        <Bar back={`#/agent/${agent.id}`} title={agent.name} subtitle="Details" />
+        <Bar back={`#/agent/${agent.id}`} title={agent.name} actions={note && <span className="px-3 text-[13px] text-dim">{note}</span>} />
 
-        <div className="mx-auto flex w-full max-w-lg flex-col gap-10 overflow-y-auto px-6 py-6">
+        <div className="grow overflow-y-auto">
 
-          {note && <p className="m-0 rounded-xl bg-panel px-4 py-3 text-[14px]">{note}</p>}
+          <div className="mx-auto flex w-full max-w-lg flex-col gap-9 px-6 py-6">
 
-          <section className="flex flex-col gap-5">
+            <Section title="Who it is" description="Read before every task.">
 
-            <Field label="Who it is">
+              <textarea rows={3} value={this.state.persona} aria-label="Who it is" onChange={(event) => { const persona = event.target.value; this.setState({ persona }); this.saver.queue("persona", () => this.patch({ persona })); }} className={inputClass} />
 
-              <textarea rows={3} value={this.state.persona} onChange={(event) => this.setState({ persona: event.target.value })} className={inputClass} />
+            </Section>
 
-            </Field>
+            <Section
+              title="Model"
+              action={(
 
-            <Field label="Model">
+                <select value={agent.modelId} aria-label="Model" onChange={(event) => this.patch({ modelId: event.target.value }).then(() => this.flash("Saved"), (err) => this.flash(String(err)))} className="max-w-48 rounded-xl border border-line bg-panel px-3 py-2.5 text-[15px] text-fg">
 
-              <select value={this.state.modelId} onChange={(event) => this.setState({ modelId: event.target.value })} className={inputClass}>
+                  {(models ?? [{ id: agent.modelId, name: "Current model" }]).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
 
-                {(models ?? [{ id: agent.modelId, name: "Current model" }]).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+                </select>
 
-              </select>
+              )}
 
-            </Field>
+            />
 
-            <Button className="self-start" onClick={this.saveAgent}>Save</Button>
+            <Section title="Routines" description={routines.length ? "Tap one for more." : `None yet. Ask ${agent.name} in chat: “every weekday at 9…”.`}>
 
-          </section>
+              {routines.length > 0 && <ul className="m-0 flex list-none flex-col p-0">{routines.map((routine) => this.renderRoutine(routine))}</ul>}
 
-          <section className="flex flex-col gap-3">
+            </Section>
 
-            <h2 className="m-0 font-serif text-[21px] font-normal">Routines</h2>
+            <Section title="Memory" description={`What ${agent.name} carries between tasks. It edits this too.`}>
 
-            {!routines.length && <p className="m-0 text-[14px] text-dim">None yet. Ask {agent.name} in chat — “every weekday at 9, …”.</p>}
+              <textarea rows={8} value={this.state.memory} aria-label="Memory" onChange={(event) => { const memory = event.target.value; this.setState({ memory }); this.saver.queue("memory", () => api(`/agents/${agent.id}/memory`, "PUT", { text: memory })); }} className={`${inputClass} font-mono text-[13px]`} />
 
-            {routines.map((routine) => (
+            </Section>
 
-              <div key={routine.id} className="flex items-center gap-2 border-t border-line pt-3">
+            <Section title="Delete agent" description="Its chat and routines go; its files stay." action={<Button onClick={this.deleteAgent}>Delete</Button>} />
 
-                <span className="flex min-w-0 grow flex-col">
-
-                  <span className="truncate text-[15px]">{routine.task.split("\n")[0]}</span>
-                  <span className="truncate font-mono text-[12px] text-dim">{routine.kind === "watch" ? "watch " : ""}{when(routine)}{routine.enabled ? "" : " · paused"}</span>
-
-                </span>
-
-                <label className="flex items-center gap-2 text-[13px] text-dim">
-
-                  <input type="checkbox" checked={routine.enabled} onChange={(event) => this.act(() => api(`/routines/${routine.id}`, "PATCH", { enabled: event.target.checked }), event.target.checked ? "Routine on." : "Routine paused.")} className="size-5 accent-[#F5F5F5]" />
-                  On
-
-                </label>
-
-                <IconButton label="Run now" onClick={() => this.act(() => api(`/routines/${routine.id}/run`, "POST"), "Started.")}><Play size={16} /></IconButton>
-                <IconButton label="Delete routine" onClick={() => this.act(() => api(`/routines/${routine.id}`, "DELETE"), "Routine deleted.")}><Trash2 size={16} /></IconButton>
-
-              </div>
-
-            ))}
-
-          </section>
-
-          <section className="flex flex-col gap-3">
-
-            <h2 className="m-0 font-serif text-[21px] font-normal">Memory</h2>
-            <p className="m-0 text-[14px] text-dim">What {agent.name} carries from task to task. It edits this itself; so can you.</p>
-            <textarea rows={8} value={this.state.memory} onChange={(event) => this.setState({ memory: event.target.value })} aria-label="Memory" className={`${inputClass} font-mono text-[13px]`} />
-            <Button className="self-start" onClick={() => this.act(() => api(`/agents/${agent.id}/memory`, "PUT", { text: this.state.memory }), "Memory saved.")}>Save memory</Button>
-
-          </section>
-
-          <Button className="self-start" onClick={this.deleteAgent}>Delete agent</Button>
+          </div>
 
         </div>
 

@@ -1,9 +1,9 @@
 import { Component, createRef, type FormEvent } from "react";
 
 import { Composer } from "./Chat";
-import { Bar, Button, Field, inputClass, Memo, Torch } from "./ui";
+import { Autosave, Bar, Button, Field, inputClass, Memo, Section, Torch } from "./ui";
 
-import { api, enablePush, pushEnabled, type Agent, type GroupMessage, type Model } from "./api";
+import { api, enablePush, pushEnabled, type Account, type Agent, type GroupMessage, type Model } from "./api";
 
 export class Login extends Component<{ onDone: () => void }, { token: string; error: string; busy: boolean }> {
 
@@ -225,7 +225,7 @@ export class NewAgent extends Component<NewAgentProps, { name: string; modelId: 
 
 interface SettingsState {
 
-  cookieUser: string | null;
+  account: Account | null;
   cookie: string;
 
   push: boolean;
@@ -237,81 +237,100 @@ interface SettingsState {
 
 export class Settings extends Component<{ onCookie: () => void; onSignOut: () => void }, SettingsState> {
 
-  state: SettingsState = { cookieUser: null, cookie: "", push: false, user: "", note: "" };
+  state: SettingsState = { account: null, cookie: "", push: false, user: "", note: "" };
+
+  private saver = new Autosave((note) => this.flash(note));
+  private noteTimer: ReturnType<typeof setTimeout> | undefined;
 
   async componentDidMount() {
 
-    const [cookie, user, push] = await Promise.all([api<{ set: boolean; userId: string | null }>("/cookie"), api<{ text: string }>("/user"), pushEnabled()]);
+    const [account, user, push] = await Promise.all([api<Account>("/cookie"), api<{ text: string }>("/user"), pushEnabled()]);
 
-    this.setState({ cookieUser: cookie.userId, user: user.text, push });
+    this.setState({ account, user: user.text, push });
 
   }
 
-  act = async (work: () => Promise<unknown>, done: string) => {
+  componentWillUnmount() {
+
+    this.saver.flush();
+    clearTimeout(this.noteTimer);
+
+  }
+
+  flash = (note: string, hold = 2000) => {
+
+    clearTimeout(this.noteTimer);
+    this.setState({ note });
+    this.noteTimer = setTimeout(() => this.setState({ note: "" }), hold);
+
+  };
+
+  attempt = async (work: () => Promise<unknown>, done: string) => {
 
     try {
 
       await work();
-      this.setState({ note: done });
+      this.flash(done);
 
     } catch (err) {
 
-      this.setState({ note: err instanceof Error ? err.message : String(err) });
+      // failures stay up longer: they usually carry an instruction
+      this.flash(err instanceof Error ? err.message : String(err), 6000);
 
     }
 
   };
 
-  saveCookie = () => this.act(async () => {
+  connect = () => this.attempt(async () => {
 
-    const saved = await api<{ userId: string }>("/cookie", "PUT", { cookie: this.state.cookie });
+    const saved = await api<Account & { userId: string }>("/cookie", "PUT", { cookie: this.state.cookie.trim() });
 
-    this.setState({ cookieUser: saved.userId, cookie: "" });
+    this.setState({ account: { set: true, name: saved.name, email: saved.email }, cookie: "" });
     this.props.onCookie();
 
-  }, "Boodle connected.");
+  }, "Connected");
 
   render() {
 
-    const { cookieUser, push, note } = this.state;
+    const { account, push, note } = this.state;
+    const who = account?.name ?? account?.email;
 
     return (
 
       <div className="flex h-full flex-col">
 
-        <Bar back="#/" title="Settings" />
+        <Bar back="#/" title="Settings" actions={note && <span className="max-w-[60%] truncate px-3 text-[13px] text-dim">{note}</span>} />
 
-        <div className="mx-auto flex w-full max-w-lg flex-col gap-10 overflow-y-auto px-6 py-6">
+        <div className="grow overflow-y-auto">
 
-          {note && <p className="m-0 rounded-xl bg-panel px-4 py-3 text-[14px]">{note}</p>}
+          <div className="mx-auto flex w-full max-w-lg flex-col gap-9 px-6 py-6">
 
-          <section className="flex flex-col gap-3">
+            <Section title="Boodle" description={account?.set ? `Connected${who ? ` as ${who}` : ""}. Paste a new cookie if agents start failing.` : "Paste the Cookie header from a signed-in box.boodle.ai tab."}>
 
-            <h2 className="m-0 font-serif text-[21px] font-normal">Boodle</h2>
-            <p className="m-0 text-[14px] text-dim">{cookieUser ? "Connected. Paste a new cookie here if agents start failing." : "Not connected. Paste the full Cookie header from a signed-in box.boodle.ai tab."}</p>
-            <textarea rows={3} value={this.state.cookie} onChange={(event) => this.setState({ cookie: event.target.value })} placeholder="d=…; teamID=…" aria-label="Boodle cookie" className={`${inputClass} font-mono text-[13px]`} />
-            <Button className="self-start" disabled={!this.state.cookie.trim()} onClick={this.saveCookie}>Save cookie</Button>
+              <div className="flex gap-2">
 
-          </section>
+                <input value={this.state.cookie} onChange={(event) => this.setState({ cookie: event.target.value })} placeholder="d=…; teamID=…" aria-label="Boodle cookie" className={`${inputClass} min-w-0 font-mono text-[13px]`} />
+                <button type="button" disabled={!this.state.cookie.trim()} onClick={this.connect} className="shrink-0 rounded-xl border border-line px-5 text-[15px] text-fg disabled:opacity-40">Connect</button>
 
-          <section className="flex flex-col gap-3">
+              </div>
 
-            <h2 className="m-0 font-serif text-[21px] font-normal">Notifications</h2>
-            <p className="m-0 text-[14px] text-dim">{push ? "On for this device." : "Hear when an agent finishes or needs your OK."}</p>
-            {!push && <Button className="self-start" onClick={() => this.act(async () => { await enablePush(); this.setState({ push: true }); }, "Notifications on.")}>Turn on</Button>}
+            </Section>
 
-          </section>
+            <Section
+              title="Notifications"
+              description={push ? "On for this device." : "When an agent finishes or needs your OK."}
+              action={push ? <span className="text-[14px] text-dim">On</span> : <Button onClick={() => this.attempt(async () => { await enablePush(); this.setState({ push: true }); }, "Notifications on")}>Turn on</Button>}
+            />
 
-          <section className="flex flex-col gap-3">
+            <Section title="About you" description="Every agent reads this before each task.">
 
-            <h2 className="m-0 font-serif text-[21px] font-normal">About you</h2>
-            <p className="m-0 text-[14px] text-dim">Every agent reads this before each task.</p>
-            <textarea rows={6} value={this.state.user} onChange={(event) => this.setState({ user: event.target.value })} placeholder="Name, time zone, how you like answers…" aria-label="About you" className={inputClass} />
-            <Button className="self-start" onClick={() => this.act(() => api("/user", "PUT", { text: this.state.user }), "Saved.")}>Save</Button>
+              <textarea rows={6} value={this.state.user} aria-label="About you" placeholder="Name, time zone, how you like answers…" onChange={(event) => { const text = event.target.value; this.setState({ user: text }); this.saver.queue("user", () => api("/user", "PUT", { text })); }} className={inputClass} />
 
-          </section>
+            </Section>
 
-          <Button className="self-start" onClick={this.props.onSignOut}>Sign out</Button>
+            <Section title="Sign out" description="Only on this device; agents keep working." action={<Button onClick={this.props.onSignOut}>Sign out</Button>} />
+
+          </div>
 
         </div>
 

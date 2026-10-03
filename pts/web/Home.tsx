@@ -2,12 +2,11 @@ import { Plus, Settings } from "lucide-react";
 
 import { Torch } from "./ui";
 
-import type { Account, Agent, GroupMessage } from "./api";
+import type { Account, Agent } from "./api";
 
 interface HomeProps {
 
   agents: Agent[];
-  lastGroup: GroupMessage | null;
 
   account: Account;
 
@@ -41,7 +40,7 @@ function Row({ href, title, status, strong, selected }: { href: string; title: s
 
 }
 
-export function Home({ agents, lastGroup, account, selected }: HomeProps) {
+export function Home({ agents, account, selected }: HomeProps) {
 
   const waiting = agents.filter((agent) => agent.state === "waiting");
   const who = account.name ?? account.email ?? "Boodle account";
@@ -109,7 +108,7 @@ export function Home({ agents, lastGroup, account, selected }: HomeProps) {
 
           <div className="mx-6 my-2 h-px bg-line" />
 
-          <Row href="#/group" title="Everyone" status={lastGroup ? lastGroup.text.replace(/\s+/g, " ") : "Talk to all at once"} selected={selected === "group"} />
+          <Row href="#/group" title="Everyone" status={`${agents.length} online`} selected={selected === "group"} />
 
         </nav>
 

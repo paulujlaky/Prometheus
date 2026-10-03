@@ -322,7 +322,7 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const { authed, route, wide, agents, group, account } = this.state;
+    const { authed, route, wide, agents, account } = this.state;
 
     if (authed === null) {
 
@@ -336,7 +336,7 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    const home = <Home agents={agents} lastGroup={group[group.length - 1] ?? null} account={account} selected={routeKey(route)} />;
+    const home = <Home agents={agents} account={account} selected={routeKey(route)} />;
 
     if (!wide) {
 

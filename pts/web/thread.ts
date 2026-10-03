@@ -25,7 +25,74 @@ export type Item =
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
 
-const RESULT_HEAD = /^\[([a-z]+) (ok|failed)\]$/gm;
+const DAYS = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"];
+
+/** Common cron shapes in words; anything unusual stays as the raw spec, which is still exact. */
+export function describeSchedule(spec: string): string {
+
+  const parts = spec.trim().split(/\s+/);
+
+  if (parts.length !== 5) {
+
+    return spec;
+
+  }
+
+  const [minute, hour, day, month, weekday] = parts;
+
+  if (day !== "*" || month !== "*") {
+
+    return spec;
+
+  }
+
+  if (hour === "*" && weekday === "*") {
+
+    const every = /^\*\/(\d+)$/.exec(minute)?.[1];
+
+    return minute === "0" ? "Every hour" : every ? `Every ${every} min` : spec;
+
+  }
+
+  if (!/^\d+$/.test(minute) || !/^\d+$/.test(hour)) {
+
+    return spec;
+
+  }
+
+  const time = `${hour}:${minute.padStart(2, "0")}`;
+
+  if (weekday === "*") {
+
+    return `Every day at ${time}`;
+
+  }
+
+  if (weekday === "1-5") {
+
+    return `Weekdays at ${time}`;
+
+  }
+
+  if (weekday === "0,6" || weekday === "6,0") {
+
+    return `Weekends at ${time}`;
+
+  }
+
+  return /^[0-7]$/.test(weekday) ? `${DAYS[Number(weekday)]} at ${time}` : spec;
+
+}
+
+export function describeWatch(target: string, minutes: string): string {
+
+  const what = /^https?:\/\//i.test(target) ? target.replace(/^https?:\/\//i, "").replace(/\/$/, "") : "a command";
+
+  return `${minutes === "60" ? "Hourly" : `Every ${minutes} min`}, watching ${what}`;
+
+}
+
+const RESULT_HEAD =/^\[([a-z]+) (ok|failed)\]$/gm;
 const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "submit"]);
 
 /** `[verb ok]` sections of one result event, in the order the blocks ran. */
@@ -212,7 +279,9 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
         const [when, task = ""] = step.detail.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
 
-        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: when.replace(/^schedule /, ""), task });
+        const watch = /^watch (.+) every (\d+) min/.exec(when);
+
+        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: watch ? describeWatch(watch[1], watch[2]) : describeSchedule(when.replace(/^schedule /, "")), task });
 
       }
 

@@ -183,4 +183,104 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 
 }
 
-export const inputClass = "w-full rounded-xl border border-line bg-panel px-4 py-3 text-[16px] text-fg outline-none placeholder:text-dim focus:border-dim";
+interface SectionProps {
+
+  title: string;
+  description?: ReactNode;
+
+  /** Sits on the heading's row, right-aligned: a button, a switch, a select. */
+  action?: ReactNode;
+
+  children?: ReactNode;
+
+}
+
+export function Section({ title, description, action, children }: SectionProps) {
+
+  return (
+
+    <section className="flex flex-col gap-3">
+
+      <div className="flex items-center gap-4">
+
+        <div className="flex min-w-0 grow flex-col gap-0.5">
+
+          <h2 className="m-0 font-serif text-[20px] leading-tight font-normal">{title}</h2>
+          {description && <p className="m-0 text-[14px] text-dim">{description}</p>}
+
+        </div>
+
+        {action && <div className="shrink-0">{action}</div>}
+
+      </div>
+
+      {children}
+
+    </section>
+
+  );
+
+}
+
+export function Switch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
+
+  return (
+
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)} className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${checked ? "bg-fg" : "bg-raised"}`}>
+
+      <span className={`absolute top-1 left-1 size-5 rounded-full transition-transform ${checked ? "translate-x-5 bg-ink" : "bg-dim"}`} />
+
+    </button>
+
+  );
+
+}
+
+const AUTOSAVE_MS = 700;
+
+/** Debounced saves keyed by field. `flush` runs whatever is still waiting, so leaving a screen never drops an edit. */
+export class Autosave {
+
+  private pending = new Map<string, { timer: ReturnType<typeof setTimeout>; run: () => Promise<unknown> }>();
+
+  constructor(private report: (note: string) => void) {}
+
+  queue(key: string, run: () => Promise<unknown>) {
+
+    clearTimeout(this.pending.get(key)?.timer);
+
+    const timer = setTimeout(() => this.save(key), AUTOSAVE_MS);
+
+    this.pending.set(key, { timer, run });
+
+  }
+
+  private save(key: string) {
+
+    const job = this.pending.get(key);
+
+    if (!job) {
+
+      return;
+
+    }
+
+    this.pending.delete(key);
+    job.run().then(() => this.report("Saved")).catch((err) => this.report(err instanceof Error ? err.message : String(err)));
+
+  }
+
+  flush() {
+
+    for (const [key, job] of this.pending) {
+
+      clearTimeout(job.timer);
+      this.save(key);
+
+    }
+
+  }
+
+}
+
+export const inputClass ="w-full rounded-xl border border-line bg-panel px-4 py-3 text-[16px] text-fg outline-none placeholder:text-dim focus:border-dim";

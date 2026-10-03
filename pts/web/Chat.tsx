@@ -6,15 +6,6 @@ import { Bar, Button, IconButton, Memo } from "./ui";
 import { buildItems, type Item, type Step } from "./thread";
 import type { Agent, AgentEvent } from "./api";
 
-const STATUS: Record<Agent["state"], string> = {
-
-  waiting: "Needs your OK",
-  running: "Working",
-  queued: "Queued",
-  idle: "Idle",
-
-};
-
 interface ComposerProps {
 
   placeholder: string;
@@ -234,7 +225,7 @@ export class Chat extends Component<ChatProps> {
             <Calendar size={16} className="mt-1 shrink-0 text-dim" />
             <span className="flex min-w-0 flex-col gap-0.5">
 
-              <span className="font-mono text-[12px] text-dim">{item.when}</span>
+              <span className="text-[13px] text-dim">{item.when}</span>
               <span className="line-clamp-2 text-[15px]">{item.task}</span>
 
             </span>
@@ -315,7 +306,6 @@ export class Chat extends Component<ChatProps> {
         <Bar
           back="#/"
           title={agent.name}
-          subtitle={STATUS[agent.state]}
           actions={(
 
             <>
