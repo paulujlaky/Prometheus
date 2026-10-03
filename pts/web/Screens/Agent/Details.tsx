@@ -218,7 +218,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
         <div className="grow overflow-y-auto">
 
-          <div className="mx-auto flex w-full max-w-2xl flex-col gap-9 px-4 py-6">
+          <div className="mx-auto flex w-full max-w-2xl flex-col gap-9 px-5 py-6 md:px-8">
 
             {this.renderLook()}
 

@@ -271,7 +271,7 @@ export class Chat extends Component<ChatProps> {
 
         <div ref={this.scroller} onScroll={this.onScroll} className="grow overflow-y-auto">
 
-          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-4 py-6">
+          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-5 py-6 md:px-8">
 
             {events === undefined && <div className="text-dim">Loading…</div>}
             {events?.length === 0 && <Memo text={`${agent.name} is ready. What should it do?`} className="text-dim" />}

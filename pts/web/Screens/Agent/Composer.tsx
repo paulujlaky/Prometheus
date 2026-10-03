@@ -161,7 +161,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
     return (
 
-      <form onSubmit={(event) => { event.preventDefault(); this.send(); }} className="relative mx-3 mb-[max(12px,env(safe-area-inset-bottom))] flex md:mx-auto md:w-[calc(100%-24px)] md:max-w-[864px] shrink-0 items-end gap-2 rounded-2xl border border-line bg-panel py-1.5 pr-1.5 pl-4 focus-within:border-dim">
+      <form onSubmit={(event) => { event.preventDefault(); this.send(); }} className="relative mx-3 mb-[max(12px,env(safe-area-inset-bottom))] flex md:mx-auto md:w-[calc(100%-64px)] md:max-w-[832px] shrink-0 items-end gap-2 rounded-2xl border border-line bg-panel py-1.5 pr-1.5 pl-4 focus-within:border-dim">
 
         <AnimatePresence>
 
