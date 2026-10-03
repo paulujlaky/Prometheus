@@ -211,11 +211,11 @@ export function routineTask(routine: Routine, changes?: string): string {
 
   if (routine.kind === "schedule") {
 
-    return `[Scheduled routine: ${routine.spec}. The user is not watching; tell them only what matters, in a sentence.]\n\n${routine.task}`;
+    return `[Scheduled routine: ${routine.spec}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
 
   }
 
-  return `[Watch: ${routine.target} changed. The user is not watching; tell them only what matters, in a sentence.]\n\n${routine.task}\n\n${changes}`;
+  return `[Watch: ${routine.target} changed. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}\n\n${changes}`;
 
 }
 

@@ -4,6 +4,7 @@ import { Chat } from "./Chat";
 import { Details } from "./Details";
 import { Home } from "./Home";
 import { Group, Login, NewAgent, Settings } from "./Screens";
+import { AgentsContext } from "./Glyph";
 import { Torch } from "./ui";
 
 import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupMessage, type Model, type SocketMessage } from "./api";
@@ -64,6 +65,7 @@ export class App extends Component<{}, AppState> {
   componentDidMount() {
 
     addEventListener("hashchange", this.onRoute);
+    document.addEventListener("visibilitychange", this.reportVisibility);
     matchMedia(WIDE).addEventListener("change", this.onResize);
 
     this.start();
@@ -76,6 +78,7 @@ export class App extends Component<{}, AppState> {
     this.socket?.close();
 
     removeEventListener("hashchange", this.onRoute);
+    document.removeEventListener("visibilitychange", this.reportVisibility);
     matchMedia(WIDE).removeEventListener("change", this.onResize);
 
   }
@@ -180,6 +183,7 @@ export class App extends Component<{}, AppState> {
       }
 
       this.retries = 0;
+      this.reportVisibility();
 
     };
 
@@ -197,6 +201,17 @@ export class App extends Component<{}, AppState> {
       setTimeout(this.connect, Math.min(30_000, 1000 * 2 ** this.retries));
 
     };
+
+  };
+
+  /** The server holds push notifications while a window is on screen, since everything shows here live. */
+  reportVisibility = () => {
+
+    if (this.socket?.readyState === WebSocket.OPEN) {
+
+      this.socket.send(JSON.stringify({ visible: document.visibilityState === "visible" }));
+
+    }
 
   };
 
@@ -340,18 +355,22 @@ export class App extends Component<{}, AppState> {
 
     if (!wide) {
 
-      return route.name === "home" ? home : this.renderRoute();
+      return <AgentsContext value={agents}>{route.name === "home" ? home : this.renderRoute()}</AgentsContext>;
 
     }
 
     return (
 
-      <div className="flex h-full">
+      <AgentsContext value={agents}>
 
-        <aside className="h-full w-[340px] shrink-0 border-r border-line">{home}</aside>
-        <main className="h-full min-w-0 grow">{this.renderRoute() ?? <Empty text="Pick an agent, or talk to everyone." />}</main>
+        <div className="flex h-full">
 
-      </div>
+          <aside className="h-full w-[340px] shrink-0 border-r border-line">{home}</aside>
+          <main className="h-full min-w-0 grow">{this.renderRoute() ?? <Empty text="Pick an agent, or talk to everyone." />}</main>
+
+        </div>
+
+      </AgentsContext>
 
     );
 

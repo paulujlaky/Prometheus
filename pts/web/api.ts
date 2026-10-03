@@ -13,6 +13,9 @@ export interface Agent {
   modelId: string;
   persona: string;
 
+  /** "shape:color" mascot, see Glyph.ts. */
+  glyph: string;
+
   createdAt: number;
 
   state: AgentState;

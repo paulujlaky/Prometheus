@@ -18,6 +18,7 @@ export type Item =
   | { kind: "user"; key: string; text: string }
   | { kind: "note"; key: string; text: string }
   | { kind: "say"; key: string; text: string }
+  | { kind: "notify"; key: string; text: string }
   | { kind: "work"; key: string; steps: Step[]; seconds: number; live: boolean }
   | { kind: "page"; key: string; url: string; title: string }
   | { kind: "routine"; key: string; when: string; task: string }
@@ -187,9 +188,9 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
       }
 
-      if (event.kind === "say") {
+      if (event.kind === "say" || event.kind === "notify") {
 
-        items.push({ kind: "say", key, text: event.text });
+        items.push({ kind: event.kind, key, text: event.text });
         continue;
 
       }
@@ -207,7 +208,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
         }));
 
-        steps.push(...pending.filter((step) => step.verb !== "say"));
+        steps.push(...pending.filter((step) => step.verb !== "say" && step.verb !== "notify"));
         continue;
 
       }

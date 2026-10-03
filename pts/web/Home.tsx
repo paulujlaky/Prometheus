@@ -1,5 +1,7 @@
 import { Plus, Settings } from "lucide-react";
+import type { ReactNode } from "react";
 
+import { EveryoneGlyph, Glyph } from "./Glyph";
 import { Torch } from "./ui";
 
 import type { Account, Agent } from "./api";
@@ -24,12 +26,13 @@ const STATUS: Record<Agent["state"], string> = {
 
 };
 
-function Row({ href, title, status, strong, selected }: { href: string; title: string; status: string; strong?: boolean; selected: boolean }) {
+function Row({ href, icon, title, status, strong, selected }: { href: string; icon: ReactNode; title: string; status: string; strong?: boolean; selected: boolean }) {
 
   return (
 
-    <a href={href} aria-current={selected ? "page" : undefined} className={`flex items-baseline gap-3 px-6 py-3.5 no-underline ${selected ? "bg-panel" : ""}`}>
+    <a href={href} aria-current={selected ? "page" : undefined} className={`flex items-center gap-3 px-5 py-2.5 no-underline ${selected ? "bg-panel" : ""}`}>
 
+      {icon}
       <span className="shrink-0 font-medium">{title}</span>
       <span className={`ml-auto min-w-0 truncate text-[14px] ${strong ? "text-fg" : "text-dim"}`}>{status}</span>
       {strong && <span className="size-2 shrink-0 self-center rounded-full bg-fg" aria-hidden="true" />}
@@ -76,7 +79,7 @@ export function Home({ agents, account, selected }: HomeProps) {
 
             <span className="flex flex-col gap-1.5">
 
-              <span className="text-[14px] text-dim">{agent.name} needs your OK</span>
+              <span className="flex items-center gap-2 text-[14px] text-dim"><Glyph glyph={agent.glyph} size={20} live />{agent.name} needs your OK</span>
               <span className="font-serif text-[21px] leading-snug">{agent.question?.split("\n")[0] ?? "Approve an action"}</span>
 
             </span>
@@ -91,7 +94,7 @@ export function Home({ agents, account, selected }: HomeProps) {
 
           {agents.map((agent) => (
 
-            <Row key={agent.id} href={`#/agent/${agent.id}`} title={agent.name} status={STATUS[agent.state]} strong={agent.state === "waiting"} selected={selected === `agent/${agent.id}`} />
+            <Row key={agent.id} href={`#/agent/${agent.id}`} icon={<Glyph glyph={agent.glyph} live={agent.state === "running" || agent.state === "waiting"} />} title={agent.name} status={STATUS[agent.state]} strong={agent.state === "waiting"} selected={selected === `agent/${agent.id}`} />
 
           ))}
 
@@ -108,7 +111,7 @@ export function Home({ agents, account, selected }: HomeProps) {
 
           <div className="mx-6 my-2 h-px bg-line" />
 
-          <Row href="#/group" title="Everyone" status={`${agents.length} online`} selected={selected === "group"} />
+          <Row href="#/group" icon={<EveryoneGlyph />} title="Everyone" status={`${agents.length} online`} selected={selected === "group"} />
 
         </nav>
 

@@ -3,11 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { randomGlyph } from "./Glyph";
+
 export const HOME = process.env.PTS_HOME ?? join(homedir(), ".pts");
 
 const NAME = /^[A-Za-z][\w -]{0,31}$/;
 
-export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "ask" | "done" | "error";
+export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "notify" | "ask" | "done" | "error";
 
 export interface Agent {
 
@@ -20,6 +22,9 @@ export interface Agent {
   botDraftId: string | null;
   botAssistantId: string | null;
   botHash: string | null;
+
+  /** "shape:color", see Glyph.ts. */
+  glyph: string;
 
   createdAt: number;
 
@@ -93,7 +98,20 @@ db.exec(`
   );
 `);
 
-const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, created_at as createdAt";
+// added after the first databases existed, so older ones get the column and a mascot here
+if (!db.query<{ name: string }, []>("pragma table_info(agents)").all().some((column) => column.name === "glyph")) {
+
+  db.exec("alter table agents add column glyph text not null default ''");
+
+}
+
+for (const { id } of db.query<{ id: number }, []>("select id from agents where glyph = ''").all()) {
+
+  db.query("update agents set glyph = ? where id = ?").run(randomGlyph(), id);
+
+}
+
+const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, glyph, created_at as createdAt";
 const EVENT_COLUMNS = "id, agent_id as agentId, run_id as runId, kind, text, at";
 const ROUTINE_COLUMNS = "id, agent_id as agentId, kind, spec, target, task, enabled, last_output as lastOutput, last_at as lastAt";
 const GROUP_COLUMNS = "id, author, agent_id as agentId, text, at";
@@ -199,7 +217,7 @@ export function createAgent(name: string, modelId: string, persona = ""): Agent 
 
   }
 
-  return db.query<Agent, [string, string, string, number]>(`insert into agents (name, model_id, persona, created_at) values (?, ?, ?, ?) returning ${AGENT_COLUMNS}`).get(name, modelId, persona, Date.now())!;
+  return db.query<Agent, [string, string, string, string, number]>(`insert into agents (name, model_id, persona, glyph, created_at) values (?, ?, ?, ?, ?) returning ${AGENT_COLUMNS}`).get(name, modelId, persona, randomGlyph(), Date.now())!;
 
 }
 
@@ -215,9 +233,9 @@ export function getAgentById(id: number): Agent | null {
 
 }
 
-export function updateAgent(id: number, changes: { modelId?: string; persona?: string }) {
+export function updateAgent(id: number, changes: { modelId?: string; persona?: string; glyph?: string }) {
 
-  db.query("update agents set model_id = coalesce(?, model_id), persona = coalesce(?, persona) where id = ?").run(changes.modelId ?? null, changes.persona ?? null, id);
+  db.query("update agents set model_id = coalesce(?, model_id), persona = coalesce(?, persona), glyph = coalesce(?, glyph) where id = ?").run(changes.modelId ?? null, changes.persona ?? null, changes.glyph ?? null, id);
 
 }
 

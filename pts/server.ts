@@ -9,6 +9,7 @@ import { BoodleClient, parseSession } from "../sdk/index";
 import { closeAll } from "./Agent/Browser";
 import { Queue, type AgentState } from "./Agent/Queue";
 import { runAgent, type RunControl, type RunEvent } from "./Agent/Runner";
+import { isGlyph } from "./Glyph";
 import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "./Group";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { routineTask, startScheduler, validateRoutine } from "./Routines";
@@ -40,6 +41,9 @@ class HttpError extends Error {
 let client: BoodleClient | null = null;
 let models: { id: string; name: string }[] | null = null;
 let account: { name: string | null; email: string | null } | null = null;
+
+/** Sockets whose window is on screen right now. */
+const watching = new Set<ServerWebSocket<unknown>>();
 
 /** Boodle nests the person two levels down, as `user.user`. */
 function accountOf(bootstrap: { user?: unknown }): { name: string | null; email: string | null } {
@@ -89,13 +93,15 @@ function onRunEvent(event: RunEvent) {
 
   const name = getAgentById(event.agentId)?.name ?? "An agent";
 
-  if (event.kind === "done" && isWaiting(event.text)) {
+  // someone with the app open sees all of this live; buzzing their phone as well is noise
+  if (watching.size) {
 
     return;
 
   }
 
-  if (event.kind === "done" || event.kind === "ask") {
+  // a finished task does not buzz on its own: the agent decides, with <notify>, when it is worth it
+  if (event.kind === "notify" || event.kind === "ask") {
 
     notify({ title: event.kind === "ask" ? `${name} needs your OK` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
     return;
@@ -179,7 +185,7 @@ const queue = new Queue(start, onRunEvent, (agentId: number, state: AgentState) 
 
 function view(agent: Agent) {
 
-  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id) };
+  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id) };
 
 }
 
@@ -276,12 +282,19 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
   if (!action && method === "PATCH") {
 
-    const changes = await body<{ modelId?: unknown; persona?: unknown }>(req);
+    const changes = await body<{ modelId?: unknown; persona?: unknown; glyph?: unknown }>(req);
+
+    if (changes.glyph !== undefined && !isGlyph(text(changes.glyph, "glyph"))) {
+
+      throw new HttpError(400, "glyph must be shape:color from the known sets");
+
+    }
 
     updateAgent(agent.id, {
 
       modelId: changes.modelId === undefined ? undefined : text(changes.modelId, "modelId"),
       persona: changes.persona === undefined ? undefined : text(changes.persona, "persona"),
+      glyph: changes.glyph as string | undefined,
 
     });
 
@@ -671,8 +684,36 @@ export const server = Bun.serve({
 
     },
 
-    // the socket only pushes; everything the client does goes through HTTP
-    message() {},
+    // the one thing a client says over the socket: whether its window is on screen; everything else is HTTP
+    message(ws: ServerWebSocket<unknown>, raw) {
+
+      try {
+
+        const { visible } = JSON.parse(String(raw)) as { visible?: unknown };
+
+        if (visible === true) {
+
+          watching.add(ws);
+
+        } else {
+
+          watching.delete(ws);
+
+        }
+
+      } catch {
+
+        // not a visibility message; nothing else is expected
+
+      }
+
+    },
+
+    close(ws: ServerWebSocket<unknown>) {
+
+      watching.delete(ws);
+
+    },
 
   },
 

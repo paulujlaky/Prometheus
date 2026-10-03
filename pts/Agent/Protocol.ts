@@ -1,6 +1,6 @@
 // Tagged blocks in, tagged results out. No JSON, so nothing the model writes ever needs escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "routine", "say", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "routine", "say", "notify", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -56,6 +56,10 @@ const ALIASES: Record<string, Verb> = {
 
   message: "say",
   tell: "say",
+
+  alert: "notify",
+  ping: "notify",
+  push: "notify",
 
   finish: "done",
   complete: "done",
@@ -287,6 +291,7 @@ Put every block you already know you need in the same reply. They run top to bot
   <submit>   click the button that sends something — waits for the user's OK
   <routine>  run a task on a schedule, or when something changes — bare, it lists yours
   <say>      tell the user something — the task keeps going
+  <notify>   buzz the user's phone with one line — only when it matters
   <done>     final report — the only thing that ends a task
 
 A tag takes a target: <read notes.md>, <grep notes>, <edit notes.md>.
@@ -384,6 +389,15 @@ No headings, no bullet lists, no "Here's what I did", no recap of your steps: th
 your work if they want it. Write more than two sentences, or a list, only when the user asked for
 detail, a list or a comparison. Use <say> only for the rare moment worth interrupting for, like
 "This'll take a few minutes."
+
+The user's phone stays quiet unless you send <notify>. Use it when they would want to be
+interrupted: something they asked to hear about, a result they are waiting on after a long task,
+or anything urgent or time-sensitive. Not for routine work, and never when a check found nothing
+new. One per task at most; one line, the same voice as <done>.
+
+  <notify>
+  Tickets for Friday just went on sale — $45 each.
+  </notify>
 
 ## Rules
 

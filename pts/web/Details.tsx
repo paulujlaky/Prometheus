@@ -1,6 +1,9 @@
 import { Component } from "react";
 
+import { COLORS, Glyph, PALETTE, SHAPES } from "./Glyph";
 import { Autosave, Bar, Button, Confirm, inputClass, Section, Select, Switch } from "./ui";
+
+import { parseGlyph } from "../Glyph";
 
 import { api, type Agent, type Model, type Routine } from "./api";
 import { describeSchedule, describeWatch } from "./thread";
@@ -84,7 +87,48 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
   };
 
-  patch = (changes: Partial<Pick<Agent, "persona" | "modelId">>) => api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", changes).then(this.props.onChanged);
+  setGlyph = (glyph: string) => this.patch({ glyph }).catch((err) => this.flash(String(err)));
+
+  renderLook() {
+
+    const { shape, color } = parseGlyph(this.props.agent.glyph);
+
+    return (
+
+      <Section title="Look">
+
+        <div role="radiogroup" aria-label="Shape" className="grid grid-cols-4 gap-2">
+
+          {SHAPES.map((option) => (
+
+            <button key={option} type="button" role="radio" aria-checked={option === shape} onClick={() => this.setGlyph(`${option}:${color}`)} className={`flex flex-col items-center gap-2 rounded-xl py-3 ${option === shape ? "bg-raised" : "hover:bg-panel"}`}>
+
+              <Glyph glyph={`${option}:${color}`} size={40} live={option === shape} />
+              <span className={`text-[12px] capitalize ${option === shape ? "text-fg" : "text-dim"}`}>{option}</span>
+
+            </button>
+
+          ))}
+
+        </div>
+
+        <div role="radiogroup" aria-label="Colour" className="flex flex-wrap gap-3 px-1 pt-1">
+
+          {COLORS.map((option) => (
+
+            <button key={option} type="button" role="radio" aria-checked={option === color} aria-label={option} title={option} onClick={() => this.setGlyph(`${shape}:${option}`)} className={`size-8 rounded-full ${option === color ? "ring-2 ring-fg ring-offset-2 ring-offset-ink" : ""}`} style={{ background: PALETTE[option] }} />
+
+          ))}
+
+        </div>
+
+      </Section>
+
+    );
+
+  }
+
+  patch = (changes: Partial<Pick<Agent, "persona" | "modelId" | "glyph">>) => api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", changes).then(this.props.onChanged);
 
   deleteAgent = () => this.setState({
 
@@ -161,11 +205,13 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
       <div className="flex h-full flex-col">
 
-        <Bar back={`#/agent/${agent.id}`} title={agent.name} actions={note && <span className="px-3 text-[13px] text-dim">{note}</span>} />
+        <Bar back={`#/agent/${agent.id}`} icon={<Glyph glyph={agent.glyph} size={30} />} title={agent.name} actions={note && <span className="px-3 text-[13px] text-dim">{note}</span>} />
 
         <div className="grow overflow-y-auto">
 
           <div className="mx-auto flex w-full max-w-lg flex-col gap-9 px-6 py-6">
+
+            {this.renderLook()}
 
             <Section title="Who it is">
 

@@ -108,6 +108,8 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
   };
 
+  let notified = false;
+
   const recent = recentRuns(agent.id).map((run) => `- ${new Date(run.at).toISOString().slice(0, 16).replace("T", " ")} — ${clip(run.task)} → ${clip(run.outcome) || "no outcome"}`);
 
   record("task", task);
@@ -216,6 +218,25 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
           record("say", action.body.trim());
           results.push({ verb: "say", ok: true, text: "shown to the user" });
+          continue;
+
+        }
+
+        if (action.verb === "notify") {
+
+          const line = action.body.trim().split("\n")[0];
+
+          // one buzz per task: a second would be the agent narrating, which is what the limit exists to stop
+          if (notified || !line) {
+
+            results.push({ verb: "notify", ok: false, text: notified ? "You already notified the user this task. Put the rest in <done>." : "notify needs one line to send." });
+            continue;
+
+          }
+
+          notified = true;
+          record("notify", line);
+          results.push({ verb: "notify", ok: true, text: "sent to the user's phone" });
           continue;
 
         }

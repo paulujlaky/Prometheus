@@ -1,10 +1,14 @@
 import { Check, ChevronDown, ChevronLeft } from "lucide-react";
-import { Component, createRef, Fragment, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode } from "react";
+import { Component, createRef, Fragment, use, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode } from "react";
+
+import { AgentsContext, withMentions } from "./Glyph";
+
+import type { Agent } from "./api";
 
 const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*)/g;
 const BULLET = /^\s*(?:[-*•]|\d+[.)])\s+/;
 
-function inline(text: string): ReactNode[] {
+function inline(text: string, agents: Agent[]): ReactNode[] {
 
   return text.split(INLINE).map((part, i) => {
 
@@ -20,7 +24,7 @@ function inline(text: string): ReactNode[] {
 
     }
 
-    return <Fragment key={i}>{part}</Fragment>;
+    return <Fragment key={i}>{withMentions(part, agents, `${i}-`)}</Fragment>;
 
   });
 
@@ -28,6 +32,8 @@ function inline(text: string): ReactNode[] {
 
 /** Just enough markdown for what agents write: paragraphs, bullets, `code` and **bold**. */
 export function Memo({ text, className = "" }: { text: string; className?: string }) {
+
+  const agents = use(AgentsContext);
 
   // runs of bullet lines become lists even when a paragraph sits directly above them, as agents often write
   const runs: { list: boolean; lines: string[] }[] = [];
@@ -66,7 +72,7 @@ export function Memo({ text, className = "" }: { text: string; className?: strin
 
             <ul key={i} className="m-0 flex list-disc flex-col gap-1.5 pl-5 marker:text-dim">
 
-              {run.lines.map((line, j) => <li key={j}>{inline(line.replace(BULLET, ""))}</li>)}
+              {run.lines.map((line, j) => <li key={j}>{inline(line.replace(BULLET, ""), agents)}</li>)}
 
             </ul>
 
@@ -74,7 +80,7 @@ export function Memo({ text, className = "" }: { text: string; className?: strin
 
         }
 
-        return <p key={i} className="m-0 whitespace-pre-line">{inline(run.lines.join("\n"))}</p>;
+        return <p key={i} className="m-0 whitespace-pre-line">{inline(run.lines.join("\n"), agents)}</p>;
 
       })}
 
@@ -93,6 +99,7 @@ export function Torch({ size = 22 }: { size?: number }) {
 interface BarProps {
 
   title: ReactNode;
+  icon?: ReactNode;
   subtitle?: ReactNode;
 
   back?: string;
@@ -101,7 +108,7 @@ interface BarProps {
 }
 
 /** A screen's top bar. `back` is where the chevron goes; leave it out on screens with nowhere to go back to. */
-export function Bar({ title, subtitle, back, actions }: BarProps) {
+export function Bar({ title, icon, subtitle, back, actions }: BarProps) {
 
   return (
 
@@ -117,7 +124,9 @@ export function Bar({ title, subtitle, back, actions }: BarProps) {
 
       )}
 
-      <div className={`flex min-w-0 grow flex-col ${back ? "" : "pl-3"}`}>
+      {icon && <span className={`mr-2.5 flex ${back ? "" : "ml-3"}`}>{icon}</span>}
+
+      <div className={`flex min-w-0 grow flex-col ${back || icon ? "" : "pl-3"}`}>
 
         <span className="truncate font-serif text-[22px] leading-none">{title}</span>
         {subtitle && <span className="mt-1 truncate text-[13px] leading-none text-dim">{subtitle}</span>}
