@@ -51,7 +51,7 @@ test("agents can be created, changed, remembered and deleted", async () => {
 
   // without a model in the request it falls back to the default, which needs Boodle to resolve
   expect((await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "Modelless" }) })).status).toBe(503);
-  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null });
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: null });
 
   const duplicate = await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "tester", modelId: "model-1" }) });
 
@@ -97,6 +97,22 @@ test("routines are validated, edited and removed; the group needs a cookie", asy
 
   expect((await call("/api/group", { method: "POST", body: JSON.stringify({ text: "hi all" }) })).status).toBe(503);
   expect(await (await call("/api/group")).json()).toEqual([]);
+
+});
+
+test("a time zone is saved and rejected when it is not a real one", async () => {
+
+  expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "Not/AZone" }) })).status).toBe(400);
+  expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({}) })).status).toBe(400);
+
+  const saved = await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "America/New_York" }) });
+
+  expect(await saved.json()).toEqual({ defaultModel: null, timezone: "America/New_York" });
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: "America/New_York" });
+
+  const cleared = await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "  " }) });
+
+  expect((await cleared.json()).timezone).toBe(null);
 
 });
 

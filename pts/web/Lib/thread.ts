@@ -35,9 +35,103 @@ export function routineTitle(routine: Routine): string {
 }
 
 const DAYS = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"];
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/** Common cron shapes in words; anything unusual stays as the raw spec, which is still exact. */
-export function describeSchedule(spec: string): string {
+function ordinal(day: number): string {
+
+  const teen = day % 100;
+  const ending = teen >= 11 && teen <= 13 ? "th" : ["th", "st", "nd", "rd"][day % 10] ?? "th";
+
+  return `${day}${ending}`;
+
+}
+
+/** 12-hour clock. Midnight and noon read as words; other times keep the minutes. */
+function clock(hourText: string, minuteText: string): string | null {
+
+  if (!/^\d{1,2}$/.test(hourText) || !/^\d{1,2}$/.test(minuteText)) {
+
+    return null;
+
+  }
+
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+
+  if (hour > 23 || minute > 59) {
+
+    return null;
+
+  }
+
+  if (minute === 0 && hour === 0) {
+
+    return "midnight";
+
+  }
+
+  if (minute === 0 && hour === 12) {
+
+    return "noon";
+
+  }
+
+  const suffix = hour < 12 ? "AM" : "PM";
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+
+  return `${hour12}:${String(minute).padStart(2, "0")} ${suffix}`;
+
+}
+
+function dayPhrase(weekday: string): string | null {
+
+  if (weekday === "*") {
+
+    return "Every day";
+
+  }
+
+  if (weekday === "1-5") {
+
+    return "Weekdays";
+
+  }
+
+  if (weekday === "0,6" || weekday === "6,0") {
+
+    return "Weekends";
+
+  }
+
+  if (/^[0-7]$/.test(weekday)) {
+
+    return DAYS[Number(weekday)];
+
+  }
+
+  const range = /^([0-7])-([0-7])$/.exec(weekday);
+
+  if (range && Number(range[1]) <= Number(range[2])) {
+
+    return `${DAYS[Number(range[1])]} to ${DAYS[Number(range[2])]}`;
+
+  }
+
+  const days = weekday.split(",");
+
+  if (days.length > 1 && days.every((day) => /^[0-7]$/.test(day))) {
+
+    const names = days.map((day) => DAYS[Number(day)]);
+
+    return names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+
+  }
+
+  return null;
+
+}
+
+function scheduleWords(spec: string): string {
 
   const parts = spec.trim().split(/\s+/);
 
@@ -49,47 +143,112 @@ export function describeSchedule(spec: string): string {
 
   const [minute, hour, day, month, weekday] = parts;
 
-  if (day !== "*" || month !== "*") {
+  if (day === "*" && month === "*" && weekday === "*") {
+
+    if (hour === "*") {
+
+      if (minute === "0") {
+
+        return "Every hour";
+
+      }
+
+      const every = /^\*\/(\d+)$/.exec(minute)?.[1];
+
+      if (every) {
+
+        return every === "1" ? "Every minute" : `Every ${every} min`;
+
+      }
+
+      if (/^\d{1,2}$/.test(minute) && Number(minute) < 60) {
+
+        return `Every hour at :${minute.padStart(2, "0")}`;
+
+      }
+
+    }
+
+    const everyHour = minute === "0" ? /^\*\/(\d+)$/.exec(hour)?.[1] : undefined;
+
+    if (everyHour) {
+
+      return everyHour === "1" ? "Every hour" : `Every ${everyHour} hours`;
+
+    }
+
+  }
+
+  const time = clock(hour, minute);
+
+  if (!time) {
 
     return spec;
 
   }
 
-  if (hour === "*" && weekday === "*") {
+  if (day === "*" && month === "*") {
 
-    const every = /^\*\/(\d+)$/.exec(minute)?.[1];
+    const days = dayPhrase(weekday);
 
-    return minute === "0" ? "Every hour" : every ? `Every ${every} min` : spec;
-
-  }
-
-  if (!/^\d+$/.test(minute) || !/^\d+$/.test(hour)) {
-
-    return spec;
+    return days ? `${days} at ${time}` : spec;
 
   }
 
-  const time = `${hour}:${minute.padStart(2, "0")}`;
+  if (weekday === "*" && month === "*" && /^\d{1,2}$/.test(day)) {
 
-  if (weekday === "*") {
+    const date = Number(day);
 
-    return `Every day at ${time}`;
-
-  }
-
-  if (weekday === "1-5") {
-
-    return `Weekdays at ${time}`;
+    return date >= 1 && date <= 31 ? `The ${ordinal(date)} of every month at ${time}` : spec;
 
   }
 
-  if (weekday === "0,6" || weekday === "6,0") {
+  if (weekday === "*" && /^\d{1,2}$/.test(day) && /^\d{1,2}$/.test(month)) {
 
-    return `Weekends at ${time}`;
+    const date = Number(day);
+    const monthIndex = Number(month) - 1;
+
+    if (date >= 1 && date <= 31 && monthIndex >= 0 && monthIndex < 12) {
+
+      return `${MONTHS[monthIndex]} ${ordinal(date)} at ${time}`;
+
+    }
 
   }
 
-  return /^[0-7]$/.test(weekday) ? `${DAYS[Number(weekday)]} at ${time}` : spec;
+  return spec;
+
+}
+
+/** Short label such as EDT. Empty when the name is not a real zone. */
+export function zoneLabel(timeZone: string, at = new Date()): string {
+
+  try {
+
+    return new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(at).find((part) => part.type === "timeZoneName")?.value ?? "";
+
+  } catch {
+
+    return "";
+
+  }
+
+}
+
+/** Common cron shapes in words. A time zone adds its abbreviation. Anything unusual stays as the raw spec. */
+export function describeSchedule(spec: string, timeZone?: string | null): string {
+
+  const words = scheduleWords(spec);
+
+  if (!timeZone || words === spec) {
+
+    return words;
+
+  }
+
+  const zone = zoneLabel(timeZone);
+
+  return zone ? `${words} ${zone}` : words;
 
 }
 

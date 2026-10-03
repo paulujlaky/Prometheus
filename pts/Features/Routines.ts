@@ -1,5 +1,5 @@
 import { runShell } from "../Agent/Tools/Shell";
-import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, workspaceOf, type Agent, type Routine } from "../Store";
+import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, readSetting, workspaceOf, type Agent, type Routine } from "../Store";
 
 const FIELDS = [
 
@@ -75,18 +75,91 @@ export function parseCron(spec: string): Cron {
 
 }
 
-export function cronMatches(cron: Cron, date: Date): boolean {
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
-  const [minutes, hours, days, months, weekdays] = cron.sets;
+export function isTimeZone(zone: string): boolean {
 
-  if (!minutes.has(date.getMinutes()) || !hours.has(date.getHours()) || !months.has(date.getMonth() + 1)) {
+  try {
+
+    Intl.DateTimeFormat("en-US", { timeZone: zone });
+    return true;
+
+  } catch {
 
     return false;
 
   }
 
-  const day = days.has(date.getDate());
-  const weekday = weekdays.has(date.getDay());
+}
+
+/** Empty until Settings has one. A stored name the runtime rejects falls back to the server clock. */
+export function userTimeZone(): string | undefined {
+
+  const zone = readSetting("timezone")?.trim();
+
+  return zone && isTimeZone(zone) ? zone : undefined;
+
+}
+
+/** Wall clock of `date` in `timeZone`, or on this machine when no zone is given. */
+export function clockOf(date: Date, timeZone?: string): { minute: number; hour: number; day: number; month: number; weekday: number } {
+
+  if (!timeZone) {
+
+    return { minute: date.getMinutes(), hour: date.getHours(), day: date.getDate(), month: date.getMonth() + 1, weekday: date.getDay() };
+
+  }
+
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+
+    timeZone,
+    hourCycle: "h23",
+    weekday: "short",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+
+  }).formatToParts(date).flatMap((part) => part.type === "literal" ? [] : [[part.type, part.value]]));
+
+  const hour = Number(parts.hour);
+
+  return {
+
+    minute: Number(parts.minute),
+    hour: hour === 24 ? 0 : hour,
+    day: Number(parts.day),
+    month: Number(parts.month),
+    weekday: WEEKDAY_INDEX[parts.weekday] ?? 0,
+
+  };
+
+}
+
+export function cronMatches(cron: Cron, date: Date, timeZone?: string): boolean {
+
+  let clock: ReturnType<typeof clockOf>;
+
+  try {
+
+    clock = clockOf(date, timeZone);
+
+  } catch {
+
+    clock = clockOf(date);
+
+  }
+
+  const [minutes, hours, days, months, weekdays] = cron.sets;
+
+  if (!minutes.has(clock.minute) || !hours.has(clock.hour) || !months.has(clock.month)) {
+
+    return false;
+
+  }
+
+  const day = days.has(clock.day);
+  const weekday = weekdays.has(clock.weekday);
 
   if (cron.anyDay || cron.anyWeekday) {
 
@@ -221,7 +294,9 @@ export function routineTask(routine: Routine, changes?: string): string {
 
   if (routine.kind === "schedule") {
 
-    return `[Scheduled routine${named}: ${routine.spec}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
+    const zone = userTimeZone();
+
+    return `[Scheduled routine${named}: ${routine.spec}${zone ? ` (${zone})` : ""}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
 
   }
 
@@ -376,6 +451,9 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
     const now = new Date();
 
+    // every schedule is read in the user's zone, so one Settings change moves them all, including across daylight saving
+    const timeZone = userTimeZone();
+
     for (const routine of listRoutines()) {
 
       const agent = routine.enabled ? getAgentById(routine.agentId) : null;
@@ -390,7 +468,7 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
         const firedThisMinute = routine.lastAt !== null && Math.floor(routine.lastAt / 60_000) === Math.floor(now.getTime() / 60_000);
 
-        if (!firedThisMinute && cronMatches(parseCron(routine.spec), now)) {
+        if (!firedThisMinute && cronMatches(parseCron(routine.spec), now, timeZone)) {
 
           markRoutine(routine.id, null, now.getTime());
           wake(agent, routineTask(routine));

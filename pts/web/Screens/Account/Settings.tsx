@@ -17,22 +17,48 @@ interface SettingsState {
   models: Model[];
   defaultModel: string | null;
 
+  timezone: string;
+
   note: string;
+
+}
+
+const ZONES = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+
+function knownZone(zone: string): boolean {
+
+  try {
+
+    Intl.DateTimeFormat("en-US", { timeZone: zone });
+    return true;
+
+  } catch {
+
+    return false;
+
+  }
 
 }
 
 export class Settings extends Component<{ onCookie: () => void; onSignOut: () => void }, SettingsState> {
 
-  state: SettingsState = { account: null, cookie: "", push: false, user: "", models: [], defaultModel: null, note: "" };
+  state: SettingsState = { account: null, cookie: "", push: false, user: "", models: [], defaultModel: null, timezone: "", note: "" };
 
   private saver = new Autosave((note) => this.flash(note));
   private noteTimer: ReturnType<typeof setTimeout> | undefined;
+  private timezoneSaved = "";
 
   async componentDidMount() {
 
-    const [account, user, push] = await Promise.all([api<Account>("/cookie"), api<{ text: string }>("/user"), pushEnabled()]);
+    const [account, user, push, settings] = await Promise.all([
+      api<Account>("/cookie"),
+      api<{ text: string }>("/user"),
+      pushEnabled(),
+      api<{ defaultModel: string | null; timezone: string | null }>("/settings"),
+    ]);
 
-    this.setState({ account, user: user.text, push });
+    this.timezoneSaved = settings.timezone ?? "";
+    this.setState({ account, user: user.text, push, timezone: this.timezoneSaved, defaultModel: settings.defaultModel });
 
     if (account.set) {
 
@@ -57,6 +83,42 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
     this.setState({ defaultModel });
 
   }, "Saved");
+
+  saveTimezone = (next?: string) => {
+
+    const timezone = (next ?? this.state.timezone).trim();
+
+    if (timezone === this.timezoneSaved) {
+
+      return;
+
+    }
+
+    if (timezone && !knownZone(timezone)) {
+
+      this.flash("Unknown time zone. Try America/New_York.", 6000);
+      return;
+
+    }
+
+    this.attempt(async () => {
+
+      await api("/settings", "PUT", { timezone });
+      this.timezoneSaved = timezone;
+      this.setState({ timezone });
+
+    }, "Saved");
+
+  };
+
+  useDeviceZone = () => {
+
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    this.setState({ timezone });
+    this.saveTimezone(timezone);
+
+  };
 
   componentWillUnmount() {
 
@@ -140,9 +202,21 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
             )}
 
+            <Section title="Time zone" description="Schedules run on this clock. 8:00 means 8:00 here.">
+
+              <div className="flex gap-2">
+
+                <input list="time-zones" value={this.state.timezone} aria-label="Time zone" placeholder="Server time" onChange={(event) => this.setState({ timezone: event.target.value })} onBlur={() => this.saveTimezone()} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); this.saveTimezone(); } }} className={`${inputClass} min-w-0`} />
+                <datalist id="time-zones">{ZONES.map((zone) => <option key={zone} value={zone} />)}</datalist>
+                <button type="button" onClick={this.useDeviceZone} className="shrink-0 rounded-xl border border-line px-5 text-[15px] text-fg">This device</button>
+
+              </div>
+
+            </Section>
+
             <Section title="About you" description="Context for agents to respond better">
 
-              <textarea rows={6} value={this.state.user} aria-label="About you" placeholder="Name, time zone, how you like answers…" onChange={(event) => { const text = event.target.value; this.setState({ user: text }); this.saver.queue("user", () => api("/user", "PUT", { text })); }} className={inputClass} />
+              <textarea rows={6} value={this.state.user} aria-label="About you" placeholder="Name, how you like answers…" onChange={(event) => { const text = event.target.value; this.setState({ user: text }); this.saver.queue("user", () => api("/user", "PUT", { text })); }} className={inputClass} />
 
             </Section>
 

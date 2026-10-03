@@ -27,6 +27,8 @@ interface DetailsState {
   routines: Routine[];
   open: number | null;
 
+  timezone: string | null;
+
   note: string;
 
   /** The destructive action waiting on the confirm dialog. */
@@ -34,24 +36,28 @@ interface DetailsState {
 
 }
 
-function when(routine: Routine): string {
+function when(routine: Routine, timeZone: string | null): string {
 
-  return routine.kind === "schedule" ? describeSchedule(routine.spec) : describeWatch(routine.target, routine.spec);
+  return routine.kind === "schedule" ? describeSchedule(routine.spec, timeZone) : describeWatch(routine.target, routine.spec);
 
 }
 
 export class Details extends Component<DetailsProps, DetailsState> {
 
-  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, note: "", confirming: null };
+  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, timezone: null, note: "", confirming: null };
 
   private saver = new Autosave((note) => this.flash(note));
   private noteTimer: ReturnType<typeof setTimeout> | undefined;
 
   async componentDidMount() {
 
-    const [memory, routines] = await Promise.all([api<{ text: string }>(`/agents/${this.props.agent.id}/memory`), this.loadRoutines()]);
+    const [memory, routines, settings] = await Promise.all([
+      api<{ text: string }>(`/agents/${this.props.agent.id}/memory`),
+      this.loadRoutines(),
+      api<{ timezone: string | null }>("/settings"),
+    ]);
 
-    this.setState({ memory: memory.text, routines });
+    this.setState({ memory: memory.text, routines, timezone: settings.timezone });
 
   }
 
@@ -180,7 +186,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
           <button type="button" aria-expanded={open} onClick={() => this.setState({ open: open ? null : routine.id })} className="flex min-w-0 grow flex-col text-left">
 
             <span className={`truncate text-[15px] ${routine.enabled ? "" : "text-dim"}`}>{routineTitle(routine)}</span>
-            <span className="truncate text-[13px] text-dim">{when(routine)}</span>
+            <span className="truncate text-[13px] text-dim">{when(routine, this.state.timezone)}</span>
 
           </button>
 

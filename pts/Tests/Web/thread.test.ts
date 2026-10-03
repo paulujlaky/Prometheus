@@ -59,14 +59,22 @@ test("a running run's unanswered steps show live; a finished run drops blocks th
 
 });
 
-test("schedules read as words when they are a common shape, and stay exact otherwise", () => {
+test("schedules read as a clock time, and stay exact when the shape is unusual", () => {
 
-  expect(describeSchedule("0 9 * * 1-5")).toBe("Weekdays at 9:00");
-  expect(describeSchedule("30 7 * * *")).toBe("Every day at 7:30");
-  expect(describeSchedule("0 18 * * 5")).toBe("Fridays at 18:00");
-  expect(describeSchedule("0 10 * * 0,6")).toBe("Weekends at 10:00");
+  expect(describeSchedule("0 9 * * 1-5")).toBe("Weekdays at 9:00 AM");
+  expect(describeSchedule("30 7 * * *")).toBe("Every day at 7:30 AM");
+  expect(describeSchedule("0 18 * * 5")).toBe("Fridays at 6:00 PM");
+  expect(describeSchedule("0 10 * * 0,6")).toBe("Weekends at 10:00 AM");
+  expect(describeSchedule("0 0 * * *")).toBe("Every day at midnight");
+  expect(describeSchedule("0 12 * * 1")).toBe("Mondays at noon");
   expect(describeSchedule("*/15 * * * *")).toBe("Every 15 min");
-  expect(describeSchedule("0 9 1 * *")).toBe("0 9 1 * *");
+  expect(describeSchedule("30 * * * *")).toBe("Every hour at :30");
+  expect(describeSchedule("0 */2 * * *")).toBe("Every 2 hours");
+  expect(describeSchedule("0 9 * * 1,3,5")).toBe("Mondays, Wednesdays and Fridays at 9:00 AM");
+  expect(describeSchedule("0 9 1 * *")).toBe("The 1st of every month at 9:00 AM");
+  expect(describeSchedule("0 9 1 1 *")).toBe("January 1st at 9:00 AM");
+  expect(describeSchedule("0 9 1 * 0")).toBe("0 9 1 * 0");
+  expect(describeSchedule("0 9 * * 1-5", "America/New_York")).toMatch(/^Weekdays at 9:00 AM \S+$/);
   expect(describeWatch("https://example.com/", "60")).toBe("Hourly, watching example.com");
   expect(describeWatch("cat stock.txt", "5")).toBe("Every 5 min, watching a command");
 

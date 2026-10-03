@@ -13,7 +13,7 @@ import { isGlyph } from "../Features/Glyph";
 import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/Group";
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
-import { routineTask, startScheduler, validateRoutine } from "../Features/Routines";
+import { isTimeZone, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
 import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
@@ -498,25 +498,51 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
 
   if (method === "GET" && path === "/api/settings") {
 
-    return json({ defaultModel: readCookie() ? await defaultModel() : null });
+    return json({ defaultModel: readCookie() ? await defaultModel() : null, timezone: readSetting("timezone") || null });
 
   }
 
   if (method === "PUT" && path === "/api/settings") {
 
-    const modelId = text((await body<{ defaultModel?: unknown }>(req)).defaultModel, "defaultModel");
+    const input = await body<{ defaultModel?: unknown; timezone?: unknown }>(req);
 
-    models ??= (await boodle().listCustomModels()).map(({ id, name }) => ({ id, name }));
+    if (input.defaultModel === undefined && input.timezone === undefined) {
 
-    if (!models.some((model) => model.id === modelId)) {
-
-      throw new HttpError(400, "That model is not available to this Boodle account");
+      throw new HttpError(400, "Nothing to save");
 
     }
 
-    writeSetting("defaultModel", modelId);
+    if (input.defaultModel !== undefined) {
 
-    return json({ defaultModel: modelId });
+      const modelId = text(input.defaultModel, "defaultModel");
+
+      models ??= (await boodle().listCustomModels()).map(({ id, name }) => ({ id, name }));
+
+      if (!models.some((model) => model.id === modelId)) {
+
+        throw new HttpError(400, "That model is not available to this Boodle account");
+
+      }
+
+      writeSetting("defaultModel", modelId);
+
+    }
+
+    if (input.timezone !== undefined) {
+
+      const timezone = text(input.timezone, "timezone").trim();
+
+      if (timezone && !isTimeZone(timezone)) {
+
+        throw new HttpError(400, "Unknown time zone. Use a name like America/New_York.");
+
+      }
+
+      writeSetting("timezone", timezone);
+
+    }
+
+    return json({ defaultModel: readCookie() ? await defaultModel() : null, timezone: readSetting("timezone") || null });
 
   }
 

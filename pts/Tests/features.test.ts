@@ -10,7 +10,7 @@ import type { Agent, GroupMessage } from "../Store";
 // Routines reads the store, which opens its database at import
 process.env.PTS_HOME ??= mkdtempSync(join(tmpdir(), "pts-routines-"));
 
-const { cronMatches, lineChanges, parseCron, parseInterval, routineBlock, visibleText } = await import("../Features/Routines");
+const { clockOf, cronMatches, lineChanges, parseCron, parseInterval, routineBlock, visibleText } = await import("../Features/Routines");
 const { createAgent, listRoutines } = await import("../Store");
 
 const at = (text: string) => new Date(text);
@@ -36,6 +36,17 @@ test("cron fields, steps, ranges and the day-or-weekday rule", () => {
   expect(cronMatches(firstOrSunday, at("2026-10-05T09:00:00"))).toBe(false);
 
   expect(cronMatches(parseCron("0 0 * * 7"), at("2026-10-04T00:00:00"))).toBe(true);
+
+  // 12:00 UTC is 08:00 in New York on this date (EDT, UTC-4), a Monday
+  expect(cronMatches(weekdays8am, new Date("2026-10-05T12:00:00Z"), "America/New_York")).toBe(true);
+  expect(cronMatches(weekdays8am, new Date("2026-10-05T08:00:00Z"), "America/New_York")).toBe(false);
+
+  // Sunday 22:00 in New York is Monday 02:00 UTC, so the zone decides the weekday
+  expect(cronMatches(parseCron("0 22 * * 0"), new Date("2026-10-05T02:00:00Z"), "America/New_York")).toBe(true);
+
+  // 03:00 UTC is 08:30 in Kolkata (UTC+5:30)
+  expect(cronMatches(parseCron("30 8 * * *"), new Date("2026-10-05T03:00:00Z"), "Asia/Kolkata")).toBe(true);
+  expect(clockOf(new Date("2026-10-05T03:00:00Z"), "Asia/Kolkata")).toMatchObject({ hour: 8, minute: 30 });
 
   expect(() => parseCron("0 8 * *")).toThrow();
   expect(() => parseCron("60 8 * * *")).toThrow();

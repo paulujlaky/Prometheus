@@ -372,7 +372,8 @@ routine instead of promising to remember. It starts a fresh task for you each ti
   task: The widget page changed. If the price dropped below $50, tell the user.
   </routine>
 
-schedule: is cron — minute hour day month weekday, server time. watch: is a URL, or a shell
+schedule: is cron — minute hour day month weekday, on the user's clock from Settings.
+With no time zone set, it is the server's clock. watch: is a URL, or a shell
 command whose output is compared, checked every: N minutes; you are woken with the lines that
 changed. title: is what the user sees in the app — a few words, not a sentence. Everything
 after task: is the task. A bare <routine> lists yours with their numbers; remove: 3 deletes one.
