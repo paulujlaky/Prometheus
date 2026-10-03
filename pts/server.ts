@@ -1,4 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 import type { ServerWebSocket } from "bun";
 
@@ -16,6 +18,7 @@ const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
 const SESSION_COOKIE = "pts_session";
 const RECENT_GROUP = 20;
+const WEB = join(import.meta.dir, "web", "dist");
 const TOPIC = "events";
 
 if (TOKEN.length < 24) {
@@ -36,6 +39,16 @@ class HttpError extends Error {
 
 let client: BoodleClient | null = null;
 let models: { id: string; name: string }[] | null = null;
+let account: { name: string | null; email: string | null } | null = null;
+
+/** Boodle nests the person two levels down, as `user.user`. */
+function accountOf(bootstrap: { user?: unknown }): { name: string | null; email: string | null } {
+
+  const person = (bootstrap.user as { user?: { name?: unknown; email?: unknown } } | undefined)?.user;
+
+  return { name: typeof person?.name === "string" ? person.name : null, email: typeof person?.email === "string" ? person.email : null };
+
+}
 
 function boodle(): BoodleClient {
 
@@ -537,7 +550,14 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
 
     const cookie = readCookie();
 
-    return json({ set: Boolean(cookie), userId: cookie ? parseSession(cookie).userId : null });
+    if (cookie && !account) {
+
+      // an expired cookie still reads as set; the PWA shows it without a name, and runs say why they fail
+      account = await boodle().getUser().then(accountOf).catch(() => null);
+
+    }
+
+    return json({ set: Boolean(cookie), userId: cookie ? parseSession(cookie).userId : null, name: account?.name ?? null, email: account?.email ?? null });
 
   }
 
@@ -547,7 +567,7 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
     const next = new BoodleClient({ cookie });
 
     // a cookie that cannot load the user is one that will fail every run
-    await next.getUser().catch((err) => {
+    const bootstrap = await next.getUser().catch((err) => {
 
       throw new HttpError(400, `Boodle rejected that cookie: ${err instanceof Error ? err.message : err}`);
 
@@ -556,8 +576,9 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
     writeCookie(cookie);
     client = next;
     models = null;
+    account = accountOf(bootstrap);
 
-    return json({ ok: true, userId: next.userId });
+    return json({ ok: true, userId: next.userId, ...account });
 
   }
 
@@ -589,6 +610,27 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
 
 }
 
+/** The built PWA. Unknown paths get index.html, since the app routes in the hash. */
+function serveWeb(pathname: string): Response {
+
+  // left percent-encoded on purpose: decoding would let %2e%2e climb out of WEB, and no built file needs it
+  const target = resolve(WEB, `.${pathname}`);
+  const inside = target.startsWith(`${WEB}${sep}`) && existsSync(target) && statSync(target).isFile();
+  const index = join(WEB, "index.html");
+
+  if (!inside && !existsSync(index)) {
+
+    return new Response("The PWA is not built yet: bun run pts:web", { status: 404 });
+
+  }
+
+  // hashed bundles never change under one name; everything else must be re-checked or a deploy never lands
+  const cache = inside && pathname.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
+
+  return new Response(Bun.file(inside ? target : index), { headers: { "Cache-Control": cache } });
+
+}
+
 export const server = Bun.serve({
 
   port: PORT,
@@ -599,7 +641,7 @@ export const server = Bun.serve({
 
     if (!url.pathname.startsWith("/api/")) {
 
-      return new Response("Prometheus API. The PWA is served here from phase 7.", { status: 404 });
+      return serveWeb(url.pathname);
 
     }
 

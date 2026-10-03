@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@theme {
+
+  --color-ink: #0F0F0F;
+  --color-panel: #1A1A1A;
+  --color-raised: #242424;
+  --color-line: #262626;
+  --color-fg: #F5F5F5;
+  --color-dim: #8A8A8A;
+
+  --font-sans: "Geist Variable", system-ui, sans-serif;
+  --font-serif: "Newsreader", Georgia, serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+}
+
+html,
+body,
+#root {
+
+  height: 100%;
+
+}
+
+body {
+
+  margin: 0;
+  background: var(--color-ink);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+
+}
+
+::selection {
+
+  background: #F5F5F5;
+  color: #0F0F0F;
+
+}
+
+/* layered, so a component's own outline-none still wins */
+@layer base {
+
+  :focus-visible {
+
+    outline: 2px solid #F5F5F5;
+    outline-offset: 2px;
+
+  }
+
+}
