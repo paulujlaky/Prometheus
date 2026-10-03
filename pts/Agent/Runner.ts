@@ -14,6 +14,8 @@ const MAX_ACTIONS_PER_TURN = 8;
 
 const RECENT_CHARS = 300;
 
+const LOOKING = new Set(["run", "read", "grep", "ls"]);
+
 export type RunEvent = AgentEvent | { kind: "delta"; agentId: number; text: string };
 
 export type RunListener = (event: RunEvent) => void;
@@ -176,7 +178,18 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
       const batch = actions.slice(0, MAX_ACTIONS_PER_TURN);
       const results: Result[] = [];
 
+      let unseen = false;
+      let heldDone = false;
+
       for (const action of batch) {
+
+        // a report written before the output came back can only guess at it
+        if (action.verb === "done" && unseen) {
+
+          heldDone = true;
+          break;
+
+        }
 
         if (action.verb === "done") {
 
@@ -184,6 +197,8 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
           return;
 
         }
+
+        unseen ||= LOOKING.has(action.verb);
 
         if (action.verb === "say") {
 
@@ -212,9 +227,15 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
       }
 
-      const held = actions.length - results.length;
+      const held = actions.length - results.length - (heldDone ? 1 : 0);
 
       message = formatResults(results);
+
+      if (heldDone) {
+
+        message += "\n\n[harness]\nYour <done> was held: it came before you had seen the output above. Check it, then send <done> with what actually happened.";
+
+      }
 
       if (held > 0) {
 

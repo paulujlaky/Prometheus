@@ -287,7 +287,8 @@ MEMORY.md in your workspace is your long-term memory. It is shown to you at the 
   FIND is copied exactly from a read — same text, same indentation. Read a file before editing it.
   Use <ls>, <read> and <grep> to look at files. <run> is for everything else.
   Commands get no input, so anything that prompts fails. Pass flags like -y instead.
-  Do the task and only the task. When it is done, end with <done> in that same reply.
+  Do the task and only the task. When it is done, end with <done> in that same reply —
+  but never in a reply whose <run>, <read>, <grep> or <ls> output you have not seen yet.
   Lead <done> with one sentence of the outcome, then a bullet per thing done or found.
   Keep <say> and <done> short and plain: everyday words, no preamble.
   If you are blocked on something only the user can do, say exactly what you need in <done>.`;
