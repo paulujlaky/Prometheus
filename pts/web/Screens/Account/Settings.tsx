@@ -25,21 +25,6 @@ interface SettingsState {
 
 const ZONES = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
 
-function knownZone(zone: string): boolean {
-
-  try {
-
-    Intl.DateTimeFormat("en-US", { timeZone: zone });
-    return true;
-
-  } catch {
-
-    return false;
-
-  }
-
-}
-
 export class Settings extends Component<{ onCookie: () => void; onSignOut: () => void }, SettingsState> {
 
   state: SettingsState = { account: null, cookie: "", push: false, user: "", models: [], defaultModel: null, timezone: "", note: "" };
@@ -90,13 +75,6 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
     if (timezone === this.timezoneSaved) {
 
-      return;
-
-    }
-
-    if (timezone && !knownZone(timezone)) {
-
-      this.flash("Unknown time zone. Try America/New_York.", 6000);
       return;
 
     }
@@ -202,7 +180,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
             )}
 
-            <Section title="Time zone" description="Schedules run on this clock. 8:00 means 8:00 here.">
+            <Section title="Time zone" description="Used for routines and scheduling">
 
               <div className="flex gap-2">
 

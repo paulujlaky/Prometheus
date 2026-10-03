@@ -1,5 +1,4 @@
 import { Plus, Settings } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
 
 import { EveryoneGlyph, Glyph } from "../../Components/Glyph/Glyph";
@@ -36,7 +35,7 @@ function Row({ href, icon, title, status, strong, selected }: { href: string; ic
       {icon}
       <span className="shrink-0 font-medium">{title}</span>
       <span className={`ml-auto min-w-0 truncate text-[14px] ${strong ? "text-fg" : "text-dim"}`}>{status}</span>
-      {strong && <span className="size-2 shrink-0 self-center rounded-full bg-fg" aria-hidden="true" />}
+      {strong && <span className="size-1.5 shrink-0 self-center rounded-full bg-fg animate-pulse" aria-hidden="true" />}
 
     </a>
 
@@ -46,7 +45,6 @@ function Row({ href, icon, title, status, strong, selected }: { href: string; ic
 
 export function Home({ agents, account, selected }: HomeProps) {
 
-  const waiting = agents.filter((agent) => agent.state === "waiting");
   const who = account.name ?? account.email ?? "Boodle account";
 
   return (
@@ -73,27 +71,6 @@ export function Home({ agents, account, selected }: HomeProps) {
           </a>
 
         )}
-
-        <AnimatePresence initial={false}>
-
-          {waiting.map((agent) => (
-
-            <motion.a key={agent.id} href={agent.waitingOn === "handoff" ? `#/agent/${agent.id}/browser` : `#/agent/${agent.id}`} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.2, ease: "easeOut" }} className="mx-4 mt-8 flex flex-col gap-4 rounded-2xl bg-panel p-5 no-underline">
-
-              <span className="flex flex-col gap-1.5">
-
-                <span className="flex items-center gap-2 text-[14px] text-dim"><Glyph glyph={agent.glyph} size={20} live />{agent.name} {agent.waitingOn === "handoff" ? "needs you in the browser" : "needs your OK"}</span>
-                <span className="font-serif text-[21px] leading-snug">{agent.question?.split("\n")[0] ?? "Approve an action"}</span>
-
-              </span>
-
-              <span className="flex h-11 items-center self-start rounded-xl bg-fg px-5 text-[15px] font-medium text-ink">{agent.waitingOn === "handoff" ? "Open browser" : "Review"}</span>
-
-            </motion.a>
-
-          ))}
-
-        </AnimatePresence>
 
         <nav aria-label="Agents" className="mt-8 flex flex-col">
 

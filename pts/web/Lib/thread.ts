@@ -49,37 +49,22 @@ function ordinal(day: number): string {
 /** 12-hour clock. Midnight and noon read as words; other times keep the minutes. */
 function clock(hourText: string, minuteText: string): string | null {
 
-  if (!/^\d{1,2}$/.test(hourText) || !/^\d{1,2}$/.test(minuteText)) {
-
-    return null;
-
-  }
-
   const hour = Number(hourText);
   const minute = Number(minuteText);
 
-  if (hour > 23 || minute > 59) {
+  if (!/^\d{1,2}$/.test(hourText) || !/^\d{1,2}$/.test(minuteText) || hour > 23 || minute > 59) {
 
     return null;
 
   }
 
-  if (minute === 0 && hour === 0) {
+  if (minute === 0 && (hour === 0 || hour === 12)) {
 
-    return "midnight";
-
-  }
-
-  if (minute === 0 && hour === 12) {
-
-    return "noon";
+    return hour ? "noon" : "midnight";
 
   }
 
-  const suffix = hour < 12 ? "AM" : "PM";
-  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
-
-  return `${hour12}:${String(minute).padStart(2, "0")} ${suffix}`;
+  return `${hour % 12 || 12}:${minuteText.padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
 
 }
 

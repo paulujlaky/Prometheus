@@ -92,23 +92,15 @@ export function isTimeZone(zone: string): boolean {
 
 }
 
-/** Empty until Settings has one. A stored name the runtime rejects falls back to the server clock. */
+/** Empty until Settings has one, which the server checked on the way in. */
 export function userTimeZone(): string | undefined {
 
-  const zone = readSetting("timezone")?.trim();
-
-  return zone && isTimeZone(zone) ? zone : undefined;
+  return readSetting("timezone") || undefined;
 
 }
 
 /** Wall clock of `date` in `timeZone`, or on this machine when no zone is given. */
-export function clockOf(date: Date, timeZone?: string): { minute: number; hour: number; day: number; month: number; weekday: number } {
-
-  if (!timeZone) {
-
-    return { minute: date.getMinutes(), hour: date.getHours(), day: date.getDate(), month: date.getMonth() + 1, weekday: date.getDay() };
-
-  }
+export function clockOf(date: Date, timeZone?: string) {
 
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
 
@@ -120,17 +112,15 @@ export function clockOf(date: Date, timeZone?: string): { minute: number; hour: 
     hour: "2-digit",
     minute: "2-digit",
 
-  }).formatToParts(date).flatMap((part) => part.type === "literal" ? [] : [[part.type, part.value]]));
-
-  const hour = Number(parts.hour);
+  }).formatToParts(date).map((part) => [part.type, part.value]));
 
   return {
 
     minute: Number(parts.minute),
-    hour: hour === 24 ? 0 : hour,
+    hour: Number(parts.hour),
     day: Number(parts.day),
     month: Number(parts.month),
-    weekday: WEEKDAY_INDEX[parts.weekday] ?? 0,
+    weekday: WEEKDAY_INDEX[parts.weekday],
 
   };
 
@@ -138,17 +128,7 @@ export function clockOf(date: Date, timeZone?: string): { minute: number; hour: 
 
 export function cronMatches(cron: Cron, date: Date, timeZone?: string): boolean {
 
-  let clock: ReturnType<typeof clockOf>;
-
-  try {
-
-    clock = clockOf(date, timeZone);
-
-  } catch {
-
-    clock = clockOf(date);
-
-  }
+  const clock = clockOf(date, timeZone);
 
   const [minutes, hours, days, months, weekdays] = cron.sets;
 
