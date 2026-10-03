@@ -89,6 +89,11 @@ db.exec(`
     last_at integer
   );
 
+  create table if not exists settings (
+    key text primary key,
+    value text not null
+  );
+
   create table if not exists group_messages (
     id integer primary key,
     author text not null,
@@ -396,5 +401,17 @@ export function addGroupMessage(author: string, agentId: number | null, text: st
 export function listGroupMessages(limit = 200, before = Number.MAX_SAFE_INTEGER): GroupMessage[] {
 
   return db.query<GroupMessage, [number, number]>(`select * from (select ${GROUP_COLUMNS} from group_messages where id < ? order by id desc limit ?) order by id`).all(before, limit);
+
+}
+
+export function readSetting(key: string): string | null {
+
+  return db.query<{ value: string }, [string]>("select value from settings where key = ?").get(key)?.value ?? null;
+
+}
+
+export function writeSetting(key: string, value: string) {
+
+  db.query("insert into settings (key, value) values (?, ?) on conflict (key) do update set value = excluded.value").run(key, value);
 
 }

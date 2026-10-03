@@ -13,7 +13,7 @@ import { isGlyph } from "./Glyph";
 import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "./Group";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { routineTask, startScheduler, validateRoutine } from "./Routines";
-import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeUserDoc, type Agent } from "./Store";
+import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "./Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
@@ -41,6 +41,37 @@ class HttpError extends Error {
 let client: BoodleClient | null = null;
 let models: { id: string; name: string }[] | null = null;
 let account: { name: string | null; email: string | null } | null = null;
+
+/** undefined until looked up; null when Boodle has no preference we can match. */
+let preferredModel: string | null | undefined;
+
+/**
+ * The model new agents get: the user's pick in settings, else the one they prefer in Boodle itself.
+ * Boodle stores that preference as a chat assistant, so it is matched to a bot model by the upstream model id.
+ */
+async function defaultModel(): Promise<string | null> {
+
+  const chosen = readSetting("defaultModel");
+
+  if (chosen) {
+
+    return chosen;
+
+  }
+
+  if (preferredModel === undefined) {
+
+    const client = boodle();
+    const [assistants, custom] = await Promise.all([client.listAssistants(), client.listCustomModels()]);
+    const preferred = assistants.find((assistant) => assistant.id === client.preferredAssistantId);
+
+    preferredModel = custom.find((model) => preferred?.model && model.model === preferred.model)?.id ?? custom.find((model) => model.name === preferred?.name)?.id ?? custom[0]?.id ?? null;
+
+  }
+
+  return preferredModel;
+
+}
 
 /** Sockets whose window is on screen right now. */
 const watching = new Set<ServerWebSocket<unknown>>();
@@ -448,8 +479,39 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
   if (method === "POST" && path === "/api/agents") {
 
     const input = await body<{ name?: unknown; modelId?: unknown; persona?: unknown }>(req);
+    const modelId = input.modelId === undefined ? await defaultModel() : text(input.modelId, "modelId");
 
-    return json(view(createAgent(text(input.name, "name").trim(), text(input.modelId, "modelId"), input.persona === undefined ? "" : text(input.persona, "persona"))), 201);
+    if (!modelId) {
+
+      throw new HttpError(503, "No model to give it yet. Connect Boodle in settings.");
+
+    }
+
+    return json(view(createAgent(text(input.name, "name").trim(), modelId, input.persona === undefined ? "" : text(input.persona, "persona"))), 201);
+
+  }
+
+  if (method === "GET" && path === "/api/settings") {
+
+    return json({ defaultModel: readCookie() ? await defaultModel() : null });
+
+  }
+
+  if (method === "PUT" && path === "/api/settings") {
+
+    const modelId = text((await body<{ defaultModel?: unknown }>(req)).defaultModel, "defaultModel");
+
+    models ??= (await boodle().listCustomModels()).map(({ id, name }) => ({ id, name }));
+
+    if (!models.some((model) => model.id === modelId)) {
+
+      throw new HttpError(400, "That model is not available to this Boodle account");
+
+    }
+
+    writeSetting("defaultModel", modelId);
+
+    return json({ defaultModel: modelId });
 
   }
 
@@ -589,6 +651,7 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
     writeCookie(cookie);
     client = next;
     models = null;
+    preferredModel = undefined;
     account = accountOf(bootstrap);
 
     return json({ ok: true, userId: next.userId, ...account });

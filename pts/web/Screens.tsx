@@ -154,16 +154,10 @@ export class Group extends Component<GroupProps> {
 
 }
 
-interface NewAgentProps {
+/** The model comes from settings, so creating an agent is just who it is. */
+export class NewAgent extends Component<{ onCreated: (agent: Agent) => void }, { name: string; persona: string; error: string; busy: boolean }> {
 
-  models: Model[] | null;
-  onCreated: (agent: Agent) => void;
-
-}
-
-export class NewAgent extends Component<NewAgentProps, { name: string; modelId: string; persona: string; error: string; busy: boolean }> {
-
-  state = { name: "", modelId: "", persona: "", error: "", busy: false };
+  state = { name: "", persona: "", error: "", busy: false };
 
   submit = async (event: FormEvent) => {
 
@@ -172,9 +166,7 @@ export class NewAgent extends Component<NewAgentProps, { name: string; modelId: 
 
     try {
 
-      const modelId = this.state.modelId || this.props.models?.[0]?.id || "";
-
-      this.props.onCreated(await api<Agent>("/agents", "POST", { name: this.state.name.trim(), modelId, persona: this.state.persona.trim() }));
+      this.props.onCreated(await api<Agent>("/agents", "POST", { name: this.state.name.trim(), persona: this.state.persona.trim() }));
 
     } catch (err) {
 
@@ -185,8 +177,6 @@ export class NewAgent extends Component<NewAgentProps, { name: string; modelId: 
   };
 
   render() {
-
-    const { models } = this.props;
 
     return (
 
@@ -202,13 +192,6 @@ export class NewAgent extends Component<NewAgentProps, { name: string; modelId: 
 
           </Field>
 
-          <div className="flex flex-col gap-2">
-
-            <span className="text-[14px] text-dim">Model</span>
-            <Select label="Model" wide disabled={!models} value={this.state.modelId || models?.[0]?.id || ""} options={(models ?? []).map((model) => ({ value: model.id, label: model.name }))} onChange={(modelId) => this.setState({ modelId })} />
-
-          </div>
-
           <Field label="Who it is">
 
             <textarea rows={3} value={this.state.persona} onChange={(event) => this.setState({ persona: event.target.value })} placeholder="A careful research assistant. Checks sources and says when it isn’t sure." className={inputClass} />
@@ -217,7 +200,7 @@ export class NewAgent extends Component<NewAgentProps, { name: string; modelId: 
 
           {this.state.error && <p className="m-0 text-[14px] text-dim">{this.state.error}</p>}
 
-          <Button type="submit" tone="primary" disabled={!this.state.name.trim() || !models?.length || this.state.busy}>Create</Button>
+          <Button type="submit" tone="primary" disabled={!this.state.name.trim() || this.state.busy}>Create</Button>
 
         </form>
 
@@ -237,13 +220,16 @@ interface SettingsState {
   push: boolean;
   user: string;
 
+  models: Model[];
+  defaultModel: string | null;
+
   note: string;
 
 }
 
 export class Settings extends Component<{ onCookie: () => void; onSignOut: () => void }, SettingsState> {
 
-  state: SettingsState = { account: null, cookie: "", push: false, user: "", note: "" };
+  state: SettingsState = { account: null, cookie: "", push: false, user: "", models: [], defaultModel: null, note: "" };
 
   private saver = new Autosave((note) => this.flash(note));
   private noteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -254,7 +240,29 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
     this.setState({ account, user: user.text, push });
 
+    if (account.set) {
+
+      this.loadModels();
+
+    }
+
   }
+
+  /** Needs Boodle, so it waits for a connected cookie. */
+  loadModels = async () => {
+
+    const [models, settings] = await Promise.all([api<Model[]>("/models"), api<{ defaultModel: string | null }>("/settings")]);
+
+    this.setState({ models, defaultModel: settings.defaultModel });
+
+  };
+
+  chooseModel = (defaultModel: string) => this.attempt(async () => {
+
+    await api("/settings", "PUT", { defaultModel });
+    this.setState({ defaultModel });
+
+  }, "Saved");
 
   componentWillUnmount() {
 
@@ -293,6 +301,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
     this.setState({ account: { set: true, name: saved.name, email: saved.email }, cookie: "" });
     this.props.onCookie();
+    this.loadModels();
 
   }, "Connected");
 
@@ -326,6 +335,16 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
               description={push ? "On" : "Off"}
               action={push ? undefined : <Button onClick={() => this.attempt(async () => { await enablePush(); this.setState({ push: true }); }, "Notifications on")}>Turn on</Button>}
             />
+
+            {this.state.models.length > 0 && (
+
+              <Section
+                title="Model"
+                description="For new agents"
+                action={<Select label="Model for new agents" value={this.state.defaultModel ?? ""} options={this.state.models.map((model) => ({ value: model.id, label: model.name }))} onChange={this.chooseModel} />}
+              />
+
+            )}
 
             <Section title="About you" description="Shared with every agent">
 

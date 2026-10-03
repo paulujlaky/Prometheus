@@ -49,6 +49,10 @@ test("agents can be created, changed, remembered and deleted", async () => {
   expect(created.status).toBe(201);
   expect(agent).toMatchObject({ name: "Tester", modelId: "model-1", persona: "", state: "idle" });
 
+  // without a model in the request it falls back to the default, which needs Boodle to resolve
+  expect((await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "Modelless" }) })).status).toBe(503);
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null });
+
   const duplicate = await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "tester", modelId: "model-1" }) });
 
   expect(duplicate.status).toBe(400);

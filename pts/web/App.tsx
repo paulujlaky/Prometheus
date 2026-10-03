@@ -151,7 +151,7 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    if ((route.name === "new" || route.name === "details") && !this.state.models) {
+    if (route.name === "details" && !this.state.models) {
 
       api<Model[]>("/models").then((models) => this.setState({ models })).catch(this.guard);
 
@@ -321,7 +321,7 @@ export class App extends Component<{}, AppState> {
 
     if (route.name === "new") {
 
-      return <NewAgent models={models} onCreated={(agent) => { this.setState({ agents: [...agents, agent] }); location.hash = `#/agent/${agent.id}`; }} />;
+      return <NewAgent onCreated={(agent) => { this.setState({ agents: [...agents, agent] }); location.hash = `#/agent/${agent.id}`; }} />;
 
     }
 
