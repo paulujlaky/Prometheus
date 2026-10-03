@@ -1,4 +1,5 @@
 import { ChevronLeft } from "lucide-react";
+import { motion } from "motion/react";
 import { Component, createRef, type ReactNode } from "react";
 
 import { Button } from "./Controls";
@@ -150,7 +151,7 @@ export class Confirm extends Component<ConfirmProps> {
 
       <dialog ref={this.dialog} onCancel={(event) => { event.preventDefault(); onCancel(); }} onClick={(event) => event.target === event.currentTarget && onCancel()} className="m-auto w-[min(92vw,380px)] rounded-2xl border border-line bg-panel p-0 text-fg">
 
-        <div className="flex flex-col gap-5 p-6">
+        <motion.div initial={false} animate={this.props.open ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.96 }} transition={{ duration: 0.16, ease: "easeOut" }} className="flex flex-col gap-5 p-6">
 
           <div className="flex flex-col gap-1.5">
 
@@ -166,7 +167,7 @@ export class Confirm extends Component<ConfirmProps> {
 
           </div>
 
-        </div>
+        </motion.div>
 
       </dialog>
 

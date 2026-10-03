@@ -1,4 +1,5 @@
 import { ArrowUp } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { Component, createRef, type KeyboardEvent } from "react";
 
 import { colorOf, Glyph } from "../../Components/Glyph/Glyph";
@@ -160,26 +161,30 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
     return (
 
-      <form onSubmit={(event) => { event.preventDefault(); this.send(); }} className="relative mx-3 mb-[max(12px,env(safe-area-inset-bottom))] flex shrink-0 items-end gap-2 rounded-2xl border border-line bg-panel py-1.5 pr-1.5 pl-4 focus-within:border-dim">
+      <form onSubmit={(event) => { event.preventDefault(); this.send(); }} className="relative mx-3 mb-[max(12px,env(safe-area-inset-bottom))] flex md:mx-auto md:w-[calc(100%-24px)] md:max-w-[864px] shrink-0 items-end gap-2 rounded-2xl border border-line bg-panel py-1.5 pr-1.5 pl-4 focus-within:border-dim">
 
-        {suggestions.length > 0 && (
+        <AnimatePresence>
 
-          <ul role="listbox" aria-label="Mention an agent" className="absolute bottom-full left-0 z-20 m-0 mb-2 flex min-w-56 list-none flex-col rounded-xl border border-line bg-panel p-1 shadow-[0_16px_40px_rgb(0_0_0/0.5)]">
+          {suggestions.length > 0 && (
 
-            {suggestions.map((agent, index) => (
+            <motion.ul initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 4 }} transition={{ duration: 0.12 }} role="listbox" aria-label="Mention an agent" className="absolute bottom-full left-0 z-20 m-0 mb-2 flex min-w-56 list-none flex-col rounded-xl border border-line bg-panel p-1 shadow-[0_16px_40px_rgb(0_0_0/0.5)]">
 
-              <li key={agent.id} role="option" aria-selected={index === this.state.active} onPointerDown={(event) => { event.preventDefault(); this.pick(agent); }} className={`flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-[15px] ${index === this.state.active ? "bg-raised" : ""}`}>
+              {suggestions.map((agent, index) => (
 
-                <Glyph glyph={agent.glyph} size={22} />
-                <span style={{ color: colorOf(agent) }}>{agent.name}</span>
+                <li key={agent.id} role="option" aria-selected={index === this.state.active} onPointerDown={(event) => { event.preventDefault(); this.pick(agent); }} className={`flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-[15px] ${index === this.state.active ? "bg-raised" : ""}`}>
 
-              </li>
+                  <Glyph glyph={agent.glyph} size={22} />
+                  <span style={{ color: colorOf(agent) }}>{agent.name}</span>
 
-            ))}
+                </li>
 
-          </ul>
+              ))}
 
-        )}
+            </motion.ul>
+
+          )}
+
+        </AnimatePresence>
 
         <label className="sr-only" htmlFor="composer">{this.props.placeholder}</label>
         <textarea ref={this.field} id="composer" rows={rows} value={this.state.text} onChange={(event) => this.setState({ text: event.target.value }, this.track)} onKeyDown={this.onKeyDown} onKeyUp={(event) => (event.key.startsWith("Arrow") && !suggestions.length) && this.track()} onClick={this.track} onBlur={() => this.setState({ query: null })} placeholder={this.props.placeholder} className="max-h-40 min-w-0 grow resize-none bg-transparent py-2.5 text-[16px] leading-normal text-fg outline-none placeholder:text-dim" />

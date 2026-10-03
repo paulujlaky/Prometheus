@@ -1,4 +1,5 @@
 import { Check, ChevronDown } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { Component, createRef, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode } from "react";
 
 type Tone = "primary" | "quiet" | "danger" | "destroy";
@@ -227,24 +228,28 @@ export class Select extends Component<SelectProps, SelectState> {
 
         </button>
 
-        {open && (
+        <AnimatePresence>
 
-          <ul role="listbox" aria-label={label} onKeyDown={this.onListKey} className="absolute top-full right-0 z-30 m-0 mt-1.5 flex max-h-72 min-w-full list-none flex-col overflow-y-auto rounded-xl border border-line bg-panel p-1 shadow-[0_16px_40px_rgb(0_0_0/0.5)]">
+          {open && (
 
-            {options.map((option, index) => (
+            <motion.ul initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.12 }} role="listbox" aria-label={label} onKeyDown={this.onListKey} className="absolute top-full right-0 z-30 m-0 mt-1.5 flex max-h-72 min-w-full list-none flex-col overflow-y-auto rounded-xl border border-line bg-panel p-1 shadow-[0_16px_40px_rgb(0_0_0/0.5)]">
 
-              <li key={option.value} ref={(element) => { this.items[index] = element; }} role="option" tabIndex={-1} aria-selected={option.value === value} onClick={() => this.choose(index)} onPointerMove={() => index !== active && this.setState({ active: index })} className={`flex cursor-pointer items-center justify-between gap-6 rounded-lg px-3 py-2.5 text-[15px] whitespace-nowrap outline-none ${index === active ? "bg-raised" : ""}`}>
+              {options.map((option, index) => (
 
-                {option.label}
-                {option.value === value && <Check size={15} className="shrink-0" />}
+                <li key={option.value} ref={(element) => { this.items[index] = element; }} role="option" tabIndex={-1} aria-selected={option.value === value} onClick={() => this.choose(index)} onPointerMove={() => index !== active && this.setState({ active: index })} className={`flex cursor-pointer items-center justify-between gap-6 rounded-lg px-3 py-2.5 text-[15px] whitespace-nowrap outline-none ${index === active ? "bg-raised" : ""}`}>
 
-              </li>
+                  {option.label}
+                  {option.value === value && <Check size={15} className="shrink-0" />}
 
-            ))}
+                </li>
 
-          </ul>
+              ))}
 
-        )}
+            </motion.ul>
+
+          )}
+
+        </AnimatePresence>
 
       </div>
 

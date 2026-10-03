@@ -1,3 +1,4 @@
+import { motion, MotionConfig } from "motion/react";
 import { Component } from "react";
 
 import { Torch } from "../Components/Layout";
@@ -305,6 +306,7 @@ export class App extends Component<{}, AppState> {
       return (
 
         <Chat
+          key={agent.id}
           agent={agent}
           events={events[agent.id]}
           onSend={(text) => api<Agent>(`/agents/${agent.id}/messages`, "POST", { text }).then(this.updateAgent)}
@@ -355,25 +357,39 @@ export class App extends Component<{}, AppState> {
     }
 
     const home = <Home agents={agents} account={account} selected={routeKey(route)} />;
+    const screen = route.name === "home" && !wide ? home : this.renderRoute() ?? <Empty text="Pick an agent, or talk to everyone." />;
 
-    if (!wide) {
+    // keyed by screen, not agent alone, so moving from a chat to its details fades too
+    const page = (
 
-      return <AgentsContext value={agents}>{route.name === "home" ? home : this.renderRoute()}</AgentsContext>;
+      <motion.div key={`${route.name}/${"id" in route ? route.id : ""}`} className="h-full" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.18 }}>
 
-    }
+        {screen}
+
+      </motion.div>
+
+    );
 
     return (
 
-      <AgentsContext value={agents}>
+      <MotionConfig reducedMotion="user">
 
-        <div className="flex h-full">
+        <AgentsContext value={agents}>
 
-          <aside className="h-full w-[340px] shrink-0 border-r border-line">{home}</aside>
-          <main className="h-full min-w-0 grow">{this.renderRoute() ?? <Empty text="Pick an agent, or talk to everyone." />}</main>
+          {wide ? (
 
-        </div>
+            <div className="flex h-full">
 
-      </AgentsContext>
+              <aside className="h-full w-[340px] shrink-0 border-r border-line">{home}</aside>
+              <main className="h-full min-w-0 grow">{page}</main>
+
+            </div>
+
+          ) : page}
+
+        </AgentsContext>
+
+      </MotionConfig>
 
     );
 

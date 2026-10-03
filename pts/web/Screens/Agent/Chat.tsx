@@ -1,4 +1,5 @@
 import { Bell, Calendar, Check, ChevronRight, Globe, SlidersHorizontal, Square, X } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { Component, createRef } from "react";
 
 import { Composer } from "./Composer";
@@ -33,30 +34,34 @@ class Work extends Component<{ steps: Step[]; seconds: number; live: boolean }, 
 
         </button>
 
-        {this.state.open && (
+        <AnimatePresence initial={false}>
 
-          <ol className="m-0 flex list-none flex-col gap-2 border-l border-line py-1 pl-4">
+          {this.state.open && (
 
-            {steps.map((step, i) => (
+            <motion.ol initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2, ease: "easeOut" }} className="m-0 flex list-none flex-col gap-2 overflow-hidden border-l border-line py-1 pl-4">
 
-              <li key={i} className="flex flex-col gap-1">
+              {steps.map((step, i) => (
 
-                <span className="flex items-center gap-2 text-[14px]">
+                <li key={i} className="flex flex-col gap-1">
 
-                  {step.ok === false ? <X size={14} className="text-dim" /> : <Check size={14} className={step.ok ? "text-dim" : "opacity-0"} />}
-                  {step.label}
+                  <span className="flex items-center gap-2 text-[14px]">
 
-                </span>
+                    {step.ok === false ? <X size={14} className="text-dim" /> : <Check size={14} className={step.ok ? "text-dim" : "opacity-0"} />}
+                    {step.label}
 
-                {step.detail && <pre className="m-0 max-h-48 overflow-auto rounded-lg bg-panel p-3 font-mono text-[12px] whitespace-pre-wrap text-dim">{step.detail.slice(0, 1500)}</pre>}
+                  </span>
 
-              </li>
+                  {step.detail && <pre className="m-0 max-h-48 overflow-auto rounded-lg bg-panel p-3 font-mono text-[12px] whitespace-pre-wrap text-dim">{step.detail.slice(0, 1500)}</pre>}
 
-            ))}
+                </li>
 
-          </ol>
+              ))}
 
-        )}
+            </motion.ol>
+
+          )}
+
+        </AnimatePresence>
 
       </div>
 
@@ -85,9 +90,13 @@ export class Chat extends Component<ChatProps> {
   private scroller = createRef<HTMLDivElement>();
   private pinned = true;
 
+  // history already on screen when the chat opens appears at once; only what arrives later animates in
+  private ready = false;
+
   componentDidMount() {
 
     this.scrollToEnd();
+    this.ready = true;
 
   }
 
@@ -262,11 +271,19 @@ export class Chat extends Component<ChatProps> {
 
         <div ref={this.scroller} onScroll={this.onScroll} className="grow overflow-y-auto">
 
-          <div className="mx-auto flex max-w-2xl flex-col gap-5 px-5 py-6">
+          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-4 py-6">
 
             {events === undefined && <div className="text-dim">Loading…</div>}
             {events?.length === 0 && <Memo text={`${agent.name} is ready. What should it do?`} className="text-dim" />}
-            {items.map((item) => this.renderItem(item, lastAsk))}
+            {items.map((item) => (
+
+              <motion.div key={item.key} className="flex flex-col" initial={this.ready ? { opacity: 0, y: 8 } : false} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: "easeOut" }}>
+
+                {this.renderItem(item, lastAsk)}
+
+              </motion.div>
+
+            ))}
             {working && <div className="flex items-center gap-2 text-[14px] text-dim"><span className="size-2 animate-pulse rounded-full bg-fg" />Working…</div>}
             {agent.state === "queued" && <div className="text-[14px] text-dim">Queued — it starts when another agent finishes.</div>}
 

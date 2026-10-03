@@ -111,7 +111,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
         <div className="grow overflow-y-auto">
 
-          <div className="mx-auto flex w-full max-w-lg flex-col gap-9 px-6 py-6">
+          <div className="mx-auto flex w-full max-w-2xl flex-col gap-9 px-4 py-6">
 
             <Section title="Boodle" description={account?.set ? "Connected" : "Paste your Boodle cookie"}>
 

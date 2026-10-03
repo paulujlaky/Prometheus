@@ -35,7 +35,7 @@ export class NewAgent extends Component<{ onCreated: (agent: Agent) => void }, {
 
         <Bar back="#/" title="New agent" />
 
-        <form onSubmit={this.submit} className="mx-auto flex w-full max-w-lg flex-col gap-6 overflow-y-auto px-6 py-6">
+        <form onSubmit={this.submit} className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto px-4 py-6">
 
           <Field label="Name">
 
