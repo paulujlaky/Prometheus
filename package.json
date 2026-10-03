@@ -11,7 +11,8 @@
   "scripts": {
     "swe:compile": "bun swe/scripts/compile.ts",
     "swe:build": "bun run swe:compile && electron-builder --publish never",
-    "swe": "bun run swe:compile && electron swe/dist/main.cjs"
+    "swe": "bun run swe:compile && electron swe/dist/main.cjs",
+    "pts": "bun pts/cli.ts"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

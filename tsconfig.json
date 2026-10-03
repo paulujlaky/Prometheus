@@ -30,6 +30,7 @@
     "sdk/**/*",
     "vite.config.ts",
     "test/**/*",
-    "swe/**/*"
+    "swe/**/*",
+    "pts/**/*"
   ]
 }
