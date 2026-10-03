@@ -24,6 +24,14 @@ body,
 
 }
 
+/* iOS rubber-bands the page even when nothing overflows */
+html {
+
+  overscroll-behavior-block: none !important;
+  overscroll-behavior-inline: none !important;
+
+}
+
 body {
 
   margin: 0;

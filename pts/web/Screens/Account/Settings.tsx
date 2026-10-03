@@ -113,7 +113,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
           <div className="mx-auto flex w-full max-w-2xl flex-col gap-9 px-[23px] py-6 md:px-8">
 
-            <Section title="Boodle" description={account?.set ? "Connected" : "Paste your Boodle cookie"}>
+            <Section title="Boodle" description={account?.set ? "Connected" : "Not Connected"}>
 
               <div className="flex gap-2">
 
@@ -126,7 +126,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
             <Section
               title="Notifications"
-              description={push ? "On" : "Off"}
+              description="Get pinged when agents need you"
               action={push ? undefined : <Button onClick={() => this.attempt(async () => { await enablePush(); this.setState({ push: true }); }, "Notifications on")}>Turn on</Button>}
             />
 
@@ -134,13 +134,13 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
               <Section
                 title="Model"
-                description="For new agents"
+                description="New agents use this by default"
                 action={<Select label="Model for new agents" value={this.state.defaultModel ?? ""} options={this.state.models.map((model) => ({ value: model.id, label: model.name }))} onChange={this.chooseModel} />}
               />
 
             )}
 
-            <Section title="About you" description="Shared with every agent">
+            <Section title="About you" description="Context for agents to respond better">
 
               <textarea rows={6} value={this.state.user} aria-label="About you" placeholder="Name, time zone, how you like answers…" onChange={(event) => { const text = event.target.value; this.setState({ user: text }); this.saver.queue("user", () => api("/user", "PUT", { text })); }} className={inputClass} />
 

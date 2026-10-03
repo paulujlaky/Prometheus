@@ -25,7 +25,7 @@ class Work extends Component<{ steps: Step[]; seconds: number; live: boolean }, 
 
     return (
 
-      <div className="flex flex-col gap-1 self-start">
+      <div className="flex max-w-full min-w-0 flex-col gap-1 self-start wrap-anywhere">
 
         <button type="button" aria-expanded={this.state.open} onClick={() => this.setState({ open: !this.state.open })} className="flex items-center gap-2 py-1 text-[14px] text-dim hover:text-fg">
 

@@ -108,7 +108,6 @@ export function Home({ agents, account, selected }: HomeProps) {
             <a href="#/new" className="mx-6 flex flex-col gap-1 py-3 no-underline">
 
               <span className="font-serif text-[21px]">No agents yet.</span>
-              <span className="text-[15px] text-dim">Create one — give it a name and a model.</span>
 
             </a>
 

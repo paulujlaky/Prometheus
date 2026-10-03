@@ -40,9 +40,9 @@ export class Login extends Component<{ onDone: () => void }, { token: string; er
 
         </div>
 
-        <Field label="Access token" hint={this.state.error || "The PTS_TOKEN your server was started with."}>
+        <Field>
 
-          <input type="password" autoComplete="current-password" autoFocus value={this.state.token} onChange={(event) => this.setState({ token: event.target.value })} className={inputClass} />
+          <input type="password" placeholder="Access token" autoComplete="current-password" autoFocus value={this.state.token} onChange={(event) => this.setState({ token: event.target.value })} className={inputClass} />
 
         </Field>
 

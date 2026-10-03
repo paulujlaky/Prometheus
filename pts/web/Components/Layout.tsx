@@ -73,7 +73,7 @@ export function Section({ title, description, action, children }: SectionProps) 
 
     <section className="flex flex-col gap-3">
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 mb-0.5">
 
         <div className="flex min-w-0 grow flex-col gap-0.5">
 

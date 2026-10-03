@@ -13,11 +13,11 @@ const GROUND = "#1F1F1F";
 
 const ICONS = [
 
-  // maskable icons are cropped to a circle by some launchers, so the torch keeps to the middle half
-  { file: "icons/icon-192.png", size: 192, scale: 0.6, ground: GROUND },
-  { file: "icons/icon-512.png", size: 512, scale: 0.6, ground: GROUND },
-  { file: "icons/icon-maskable-512.png", size: 512, scale: 0.5, ground: GROUND },
-  { file: "brand/apple-touch-icon.png", size: 180, scale: 0.6, ground: GROUND },
+  // maskable icons are cropped to a circle by some launchers, so the torch keeps inside the 80% safe zone
+  { file: "icons/icon-192.png", size: 192, scale: 0.82, ground: GROUND },
+  { file: "icons/icon-512.png", size: 512, scale: 0.82, ground: GROUND },
+  { file: "icons/icon-maskable-512.png", size: 512, scale: 0.66, ground: GROUND },
+  { file: "brand/apple-touch-icon.png", size: 180, scale: 0.82, ground: GROUND },
   { file: "brand/logo.png", size: 128, scale: 1, ground: "transparent" },
 
 ];

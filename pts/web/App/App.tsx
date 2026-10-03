@@ -2,6 +2,7 @@ import { motion, MotionConfig } from "motion/react";
 import { Component } from "react";
 
 import { Torch } from "../Components/Layout";
+import { Install, mustInstall } from "../Screens/Account/Install";
 import { Login } from "../Screens/Account/Login";
 import { Settings } from "../Screens/Account/Settings";
 import { Chat } from "../Screens/Agent/Chat";
@@ -343,6 +344,12 @@ export class App extends Component<{}, AppState> {
   render() {
 
     const { authed, route, wide, agents, account } = this.state;
+
+    if (mustInstall) {
+
+      return <Install />;
+
+    }
 
     if (authed === null) {
 
