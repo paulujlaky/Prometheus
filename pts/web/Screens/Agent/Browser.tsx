@@ -19,6 +19,7 @@ interface BrowserProps {
 interface BrowserState {
 
   ready: boolean;
+  blank: boolean;
   mine: boolean;
   error: string;
 
@@ -35,7 +36,7 @@ const PASSIVE_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "Unidentified",
 /** One agent's browser, live. Watching is free; taking over pauses the agent's browser work until it is handed back. */
 export class Browser extends Component<BrowserProps, BrowserState> {
 
-  state: BrowserState = { ready: false, mine: false, error: "", typed: "" };
+  state: BrowserState = { ready: false, blank: false, mine: false, error: "", typed: "" };
 
   private frame = createRef<HTMLImageElement>();
   private typer = createRef<HTMLInputElement>();
@@ -90,9 +91,9 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
       URL.revokeObjectURL(previous);
 
-      if (!this.state.ready) {
+      if (!this.state.ready || this.state.blank) {
 
-        this.setState({ ready: true, error: "" });
+        this.setState({ ready: true, blank: false, error: "" });
 
       }
 
@@ -100,7 +101,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     }
 
-    this.setState((state) => ({ mine: event.mine ?? state.mine, error: event.error ?? state.error }));
+    this.setState((state) => ({ ready: state.ready || !!event.blank, blank: event.blank ?? state.blank, mine: event.mine ?? state.mine, error: event.error ?? state.error }));
 
   };
 
@@ -321,7 +322,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
   render() {
 
     const { agent } = this.props;
-    const { ready, mine, error, typed } = this.state;
+    const { ready, blank, mine, error, typed } = this.state;
     const handoff = agent.state === "waiting" && agent.waitingOn === "handoff";
 
     return (
@@ -373,10 +374,11 @@ export class Browser extends Component<BrowserProps, BrowserState> {
             onPointerCancel={() => (this.press = null)}
             onTouchEnd={this.onTouchEnd}
             onWheel={this.onWheel}
-            className={`max-h-full max-w-full rounded-xl border select-none [-webkit-touch-callout:none] ${mine ? "[touch-action:pinch-zoom] border-fg/40 outline-none" : "border-line"} ${ready ? "" : "hidden"}`}
+            className={`max-h-full max-w-full rounded-xl border select-none [-webkit-touch-callout:none] ${mine ? "[touch-action:pinch-zoom] border-fg/40 outline-none" : "border-line"} ${ready && !blank ? "" : "hidden"}`}
           />
 
           {!ready && <span className="text-[15px] text-dim">{error || "Opening the browser…"}</span>}
+          {ready && blank && <span className="flex items-center gap-3 text-[15px] text-dim"><Glyph glyph={agent.glyph} size={22} live />Browser is suspended</span>}
 
         </div>
 

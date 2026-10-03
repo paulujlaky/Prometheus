@@ -51,11 +51,11 @@ export type SocketMessage =
   | { type: "group"; message: GroupMessage }
   | LiveEvent;
 
-/** An agent's browser, streamed to whoever watches it. `mine` is whether this device has taken it over. */
+/** An agent's browser, streamed to whoever watches it. `mine` is whether this device has taken it over; `blank` means no page is open. */
 export type LiveEvent =
 
   | { type: "frame"; agentId: number; data: Blob }
-  | { type: "browser"; agentId: number; held?: boolean; mine?: boolean; error?: string };
+  | { type: "browser"; agentId: number; held?: boolean; mine?: boolean; blank?: boolean; error?: string };
 
 export type LiveInput =
 

@@ -206,7 +206,11 @@ export class Live {
     // frames go as raw JPEG bytes: a third smaller than base64, and the socket only ever streams the one browser it watches
     const stop = watch(workspaceOf(agent), (frame) => {
 
-      if (ws.getBufferedAmount() < MAX_BUFFERED) {
+      if (!frame) {
+
+        this.send(ws, { type: "browser", agentId: agent.id, blank: true });
+
+      } else if (ws.getBufferedAmount() < MAX_BUFFERED) {
 
         ws.send(frame);
 

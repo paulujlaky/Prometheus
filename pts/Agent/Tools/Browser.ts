@@ -21,8 +21,8 @@ const FRAME_MS = 100;
 // a page's cache otherwise grows with every site the agent visits, on a disk the VPS may not have to spare
 const DISK_CACHE_BYTES = 50 * 1024 * 1024;
 
-/** One JPEG frame of the agent's page. */
-type Watcher = (frame: Buffer) => void;
+/** One JPEG frame of the agent's page, or null while it is blank, which would only stream white. */
+type Watcher = (frame: Buffer | null) => void;
 
 interface Tab {
 
@@ -502,7 +502,7 @@ async function recast(tab: Tab) {
 
   cdp.on("Page.screencastFrame", ({ data, sessionId }) => {
 
-    const frame = Buffer.from(data, "base64");
+    const frame = page.url() === "about:blank" ? null : Buffer.from(data, "base64");
 
     for (const watcher of tab.watchers) {
 
@@ -559,7 +559,15 @@ export async function watch(workspace: string, watcher: Watcher): Promise<() => 
   } else {
 
     // a second watcher still needs a first frame; a static page sends none on its own
-    tab.page.screenshot({ type: "jpeg", quality: 70 }).then(watcher).catch(() => {});
+    if (tab.page.url() === "about:blank") {
+
+      watcher(null);
+
+    } else {
+
+      tab.page.screenshot({ type: "jpeg", quality: 70 }).then(watcher).catch(() => {});
+
+    }
 
   }
 

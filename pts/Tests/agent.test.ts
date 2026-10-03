@@ -230,7 +230,7 @@ test.skipIf(process.platform !== "linux")("a watched browser streams, and a take
 
     const opened = await run("open", `http://localhost:${site.port}/`);
     const link = /\[ref=(e\d+)\]/.exec(opened.text.split("\n").find((line) => line.includes("link"))!)![1];
-    const stop = await watch(cwd, (frame) => frames.push(frame));
+    const stop = await watch(cwd, (frame) => frame && frames.push(frame));
 
     for (let i = 0; i < 50 && !frames.length; i += 1) {
 
