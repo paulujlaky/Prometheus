@@ -32,6 +32,17 @@ html {
 
 }
 
+/* no double-tap zoom anywhere, pinch still works; layered so the live browser's own touch-action still wins */
+@layer base {
+
+  * {
+
+    touch-action: manipulation;
+
+  }
+
+}
+
 body {
 
   margin: 0;

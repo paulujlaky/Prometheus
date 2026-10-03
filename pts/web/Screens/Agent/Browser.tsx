@@ -1,5 +1,5 @@
 import { ArrowLeft } from "lucide-react";
-import { Component, createRef, type ChangeEvent, type KeyboardEvent, type PointerEvent, type WheelEvent } from "react";
+import { Component, createRef, type ChangeEvent, type KeyboardEvent, type PointerEvent, type TouchEvent, type WheelEvent } from "react";
 
 import { Button, IconButton } from "../../Components/Controls";
 import { Glyph } from "../../Components/Glyph/Glyph";
@@ -238,6 +238,17 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
   };
 
+  // iOS follows a tap with mouse events that move focus off the hidden field, closing the keyboard it just opened
+  onTouchEnd = (event: TouchEvent<HTMLImageElement>) => {
+
+    if (this.state.mine) {
+
+      event.preventDefault();
+
+    }
+
+  };
+
   onWheel = (event: WheelEvent<HTMLImageElement>) => {
 
     if (this.state.mine) {
@@ -360,8 +371,9 @@ export class Browser extends Component<BrowserProps, BrowserState> {
             onPointerMove={this.onPointerMove}
             onPointerUp={this.onPointerUp}
             onPointerCancel={() => (this.press = null)}
+            onTouchEnd={this.onTouchEnd}
             onWheel={this.onWheel}
-            className={`max-h-full max-w-full rounded-xl border select-none [-webkit-touch-callout:none] ${mine ? "touch-none border-fg/40 outline-none" : "border-line"} ${ready ? "" : "hidden"}`}
+            className={`max-h-full max-w-full rounded-xl border select-none [-webkit-touch-callout:none] ${mine ? "[touch-action:pinch-zoom] border-fg/40 outline-none" : "border-line"} ${ready ? "" : "hidden"}`}
           />
 
           {!ready && <span className="text-[15px] text-dim">{error || "Opening the browser…"}</span>}
