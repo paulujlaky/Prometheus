@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { randomGlyph } from "./Glyph";
+import { randomGlyph } from "./Features/Glyph";
 
 export const HOME = process.env.PTS_HOME ?? join(homedir(), ".pts");
 

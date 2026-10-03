@@ -3,15 +3,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Queue } from "./Agent/Queue";
-import { groupTask, isWaiting, MAX_HOPS, mentioned, route } from "./Group";
-import type { Agent, GroupMessage } from "./Store";
+import { Queue } from "../Agent/Queue";
+import { groupTask, isWaiting, MAX_HOPS, mentioned, route } from "../Features/Group";
+import type { Agent, GroupMessage } from "../Store";
 
 // Routines reads the store, which opens its database at import
 process.env.PTS_HOME ??= mkdtempSync(join(tmpdir(), "pts-routines-"));
 
-const { cronMatches, lineChanges, parseCron, parseInterval, routineBlock, visibleText } = await import("./Routines");
-const { createAgent, listRoutines } = await import("./Store");
+const { cronMatches, lineChanges, parseCron, parseInterval, routineBlock, visibleText } = await import("../Features/Routines");
+const { createAgent, listRoutines } = await import("../Store");
 
 const at = (text: string) => new Date(text);
 

@@ -11,7 +11,7 @@ process.env.PTS_TOKEN = TOKEN;
 process.env.PTS_PORT = "0";
 process.env.BOODLE_COOKIE = "";
 
-const { server } = await import("./server");
+const { server } = await import("../Server/server");
 
 const base = `http://localhost:${server.port}`;
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };

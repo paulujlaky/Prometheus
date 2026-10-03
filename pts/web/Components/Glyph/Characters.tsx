@@ -1,27 +1,6 @@
-import { Users } from "lucide-react";
-import { createContext, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
-import { parseGlyph, type Color, type Shape } from "../Glyph";
-
-import type { Agent } from "./api";
-
-export { COLORS, SHAPES } from "../Glyph";
-
-/** Every agent, for anything that turns a name into a glyph: mentions, authors, suggestions. */
-export const AgentsContext = createContext<Agent[]>([]);
-
-export const PALETTE: Record<Color, string> = {
-
-  peach: "#F7B89C",
-  butter: "#F2DC8C",
-  mint: "#A8E0BE",
-  sky: "#A6CBF0",
-  lilac: "#C7B5F2",
-  rose: "#F2A9BE",
-  sand: "#DDCBA9",
-  frost: "#BFE3E3",
-
-};
+import type { Shape } from "../../../Features/Glyph";
 
 const INK = "#141414";
 
@@ -48,7 +27,7 @@ function Smile({ x = 12, y, width = 2.6 }: { x?: number; y: number; width?: numb
 }
 
 // each part that moves carries a class; index.css blinks the eyes always and runs the rest only while the agent works
-const DRAWINGS: Record<Shape, ReactNode> = {
+export const DRAWINGS: Record<Shape, ReactNode> = {
 
   flame: (
 
@@ -173,106 +152,3 @@ export const NAMES: Record<Shape, string> = {
   bloom: "Petal",
 
 };
-
-interface GlyphProps {
-
-  glyph: string;
-  size?: number;
-
-  /** Animates the mascot, which is how a working agent looks alive. */
-  live?: boolean;
-
-}
-
-export function Glyph({ glyph, size = 32, live = false }: GlyphProps) {
-
-  const { shape, color } = parseGlyph(glyph);
-  const hex = PALETTE[color];
-
-  return (
-
-    <span aria-hidden="true" className={`glyph glyph-${shape} ${live ? "is-live" : ""}`} style={{ width: size, height: size, color: hex }}>
-
-      <svg viewBox="0 0 24 24" width={size} height={size} overflow="visible">{DRAWINGS[shape]}</svg>
-
-    </span>
-
-  );
-
-}
-
-/** The "Everyone" thread's stand-in: no single agent, so no single mascot. */
-export function EveryoneGlyph({ size = 32 }: { size?: number }) {
-
-  return (
-
-    <span aria-hidden="true" className="glyph text-dim" style={{ width: size, height: size }}>
-
-      <Users size={Math.round(size * 0.78)} strokeWidth={1.7} />
-
-    </span>
-
-  );
-
-}
-
-export function colorOf(agent: Agent): string {
-
-  return PALETTE[parseGlyph(agent.glyph).color];
-
-}
-
-/** An @mention, in the agent's colour with its mascot beside the name. */
-export function Mention({ agent }: { agent: Agent }) {
-
-  const hex = colorOf(agent);
-
-  return (
-
-    <span className="mention" style={{ color: hex, background: `${hex}1F` }}>
-
-      <Glyph glyph={agent.glyph} size={18} />
-      {agent.name}
-
-    </span>
-
-  );
-
-}
-
-function escape(text: string): string {
-
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-}
-
-/** Plain text with every @Name of a known agent turned into a Mention; longest names first so "@Scout Two" wins over "@Scout". */
-export function withMentions(text: string, agents: Agent[], keyPrefix = "m"): ReactNode[] {
-
-  if (!agents.length || !text.includes("@")) {
-
-    return [text];
-
-  }
-
-  const names = [...agents].sort((a, b) => b.name.length - a.name.length).map((agent) => escape(agent.name));
-  const pattern = new RegExp(`@(${names.join("|")})(?![\\w-])`, "gi");
-  const out: ReactNode[] = [];
-
-  let last = 0;
-
-  for (const match of text.matchAll(pattern)) {
-
-    const agent = agents.find((one) => one.name.toLowerCase() === match[1].toLowerCase())!;
-
-    out.push(text.slice(last, match.index));
-    out.push(<Mention key={`${keyPrefix}${match.index}`} agent={agent} />);
-    last = match.index! + match[0].length;
-
-  }
-
-  out.push(text.slice(last));
-
-  return out;
-
-}

@@ -3,12 +3,12 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeAll } from "./Agent/Browser";
-import { Queue, type AgentState } from "./Agent/Queue";
-import { runShell } from "./Agent/Shell";
-import { applyEdit, execute, relPath } from "./Agent/Tools";
-import { parseActions, type Action } from "./Agent/Protocol";
-import type { Agent } from "./Store";
+import { closeAll } from "../Agent/Tools/Browser";
+import { Queue, type AgentState } from "../Agent/Queue";
+import { runShell } from "../Agent/Tools/Shell";
+import { applyEdit, execute, relPath } from "../Agent/Tools/Tools";
+import { parseActions, type Action } from "../Agent/Protocol";
+import type { Agent } from "../Store";
 
 test("parses labelled blocks, aliases, targets and an unclosed tail", () => {
 

@@ -1,10 +1,10 @@
 import { Plus, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { EveryoneGlyph, Glyph } from "./Glyph";
-import { Torch } from "./ui";
+import { EveryoneGlyph, Glyph } from "../../Components/Glyph/Glyph";
+import { Torch } from "../../Components/Layout";
 
-import type { Account, Agent } from "./api";
+import type { Account, Agent } from "../../Lib/api";
 
 interface HomeProps {
 

@@ -1,4 +1,4 @@
-import type { AgentEvent, GroupMessage, Routine } from "../Store";
+import type { AgentEvent, GroupMessage, Routine } from "../../Store";
 
 export type { AgentEvent, GroupMessage, Routine };
 

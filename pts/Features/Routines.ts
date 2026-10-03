@@ -1,5 +1,5 @@
-import { runShell } from "./Agent/Shell";
-import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, workspaceOf, type Agent, type Routine } from "./Store";
+import { runShell } from "../Agent/Tools/Shell";
+import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, workspaceOf, type Agent, type Routine } from "../Store";
 
 const FIELDS = [
 

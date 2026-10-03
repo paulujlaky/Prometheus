@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 
 import * as browser from "./Browser";
 import { runShell } from "./Shell";
-import { parsePairs, type Action, type Result } from "./Protocol";
+import { parsePairs, type Action, type Result } from "../Protocol";
 
 const MAX_READ = 120_000;
 const MAX_GREP_FILE = 400_000;

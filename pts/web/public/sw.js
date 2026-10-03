@@ -7,8 +7,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(self.registration.showNotification(notice.title, {
 
     body: notice.body,
-    icon: "/icon-192.png",
-    badge: "/icon-192.png",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
 
     // one notification per agent; a newer one replaces the older
     tag: notice.agentId ? `agent-${notice.agentId}` : "prometheus",

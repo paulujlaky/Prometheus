@@ -1,12 +1,13 @@
 import { Component } from "react";
 
-import { COLORS, Glyph, NAMES, PALETTE, SHAPES } from "./Glyph";
-import { Autosave, Bar, Button, Confirm, inputClass, Section, Select, Switch } from "./ui";
+import { Button, inputClass, Select, Switch } from "../../Components/Controls";
+import { COLORS, Glyph, NAMES, PALETTE, SHAPES } from "../../Components/Glyph/Glyph";
+import { Bar, Confirm, Section } from "../../Components/Layout";
 
-import { parseGlyph } from "../Glyph";
-
-import { api, type Agent, type Model, type Routine } from "./api";
-import { describeSchedule, describeWatch } from "./thread";
+import { parseGlyph } from "../../../Features/Glyph";
+import { api, type Agent, type Model, type Routine } from "../../Lib/api";
+import { Autosave } from "../../Lib/autosave";
+import { describeSchedule, describeWatch } from "../../Lib/thread";
 
 interface DetailsProps {
 

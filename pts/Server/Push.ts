@@ -2,7 +2,7 @@ import webpush, { type PushSubscription } from "web-push";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { deletePushSub, HOME, listPushSubs } from "./Store";
+import { deletePushSub, HOME, listPushSubs } from "../Store";
 
 const KEYS_FILE = join(HOME, "vapid.json");
 

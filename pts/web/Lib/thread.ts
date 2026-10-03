@@ -1,7 +1,7 @@
 // An agent's event log, regrouped into what a person reads: their messages, the agent's words, and the work folded away.
 
-import { parseActions, type Verb } from "../Agent/Protocol";
-import type { AgentEvent } from "../Store";
+import { parseActions, type Verb } from "../../Agent/Protocol";
+import type { AgentEvent } from "../../Store";
 
 export interface Step {
 

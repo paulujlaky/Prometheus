@@ -1,9 +1,9 @@
 import { BoodleClient, ChatSession } from "../../sdk/index";
 
-import { pageUrl } from "./Browser";
-import { execute } from "./Tools";
+import { pageUrl } from "./Tools/Browser";
+import { execute } from "./Tools/Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
-import { routineBlock } from "../Routines";
+import { routineBlock } from "../Features/Routines";
 import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
 const MAX_STEPS = Number(process.env.PTS_MAX_STEPS ?? 60);

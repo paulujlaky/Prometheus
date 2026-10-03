@@ -4,22 +4,22 @@ import { join, resolve, sep } from "node:path";
 
 import type { ServerWebSocket } from "bun";
 
-import { BoodleClient, parseSession } from "../sdk/index";
+import { BoodleClient, parseSession } from "../../sdk/index";
 
-import { closeAll } from "./Agent/Browser";
-import { Queue, type AgentState } from "./Agent/Queue";
-import { runAgent, type RunControl, type RunEvent } from "./Agent/Runner";
-import { isGlyph } from "./Glyph";
-import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "./Group";
+import { closeAll } from "../Agent/Tools/Browser";
+import { Queue, type AgentState } from "../Agent/Queue";
+import { runAgent, type RunControl, type RunEvent } from "../Agent/Runner";
+import { isGlyph } from "../Features/Glyph";
+import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/Group";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
-import { routineTask, startScheduler, validateRoutine } from "./Routines";
-import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "./Store";
+import { routineTask, startScheduler, validateRoutine } from "../Features/Routines";
+import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
 const SESSION_COOKIE = "pts_session";
 const RECENT_GROUP = 20;
-const WEB = join(import.meta.dir, "web", "dist");
+const WEB = join(import.meta.dir, "..", "web", "dist");
 const TOPIC = "events";
 
 if (TOKEN.length < 24) {

@@ -1,4 +1,4 @@
-import type { Agent, GroupMessage } from "./Store";
+import type { Agent, GroupMessage } from "../Store";
 
 // each agent-to-agent hand-off costs a full run; a loop of two polite agents would otherwise never end
 export const MAX_HOPS = Number(process.env.PTS_MAX_HOPS ?? 6);

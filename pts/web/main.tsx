@@ -3,9 +3,9 @@ import "@fontsource-variable/jetbrains-mono";
 
 import { createRoot } from "react-dom/client";
 
-import { App } from "./App";
+import { App } from "./App/App";
 
-import "./index.css";
+import "./Styles/index.css";
 
 if ("serviceWorker" in navigator) {
 

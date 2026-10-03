@@ -1,8 +1,8 @@
-// Phase-1 driver until the server and PWA exist: bun pts/cli.ts <command>
+// Drives agents from a terminal, no server needed: bun pts/cli.ts <command>
 
 import { BoodleClient } from "../sdk/index";
 
-import { closeAll } from "./Agent/Browser";
+import { closeAll } from "./Agent/Tools/Browser";
 import { runAgent, type RunEvent } from "./Agent/Runner";
 import { createAgent, getAgent, HOME, listAgents, listEvents, workspaceOf } from "./Store";
 

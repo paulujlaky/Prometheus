@@ -1,5 +1,5 @@
 import type { RunControl, RunListener } from "./Runner";
-import type { Origin } from "../Group";
+import type { Origin } from "../Features/Group";
 import type { Agent } from "../Store";
 
 const MAX_RUNNING = Number(process.env.PTS_MAX_RUNNING ?? 3);

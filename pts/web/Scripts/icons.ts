@@ -1,12 +1,12 @@
-// Renders the PWA icons from pts/assets/logo.png: bun pts/web/icons.ts (needs Playwright's Chromium).
+// Renders the PWA icons from pts/assets/logo.png: bun pts/web/Scripts/icons.ts (needs Playwright's Chromium).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { chromium } from "playwright";
 
-const LOGO = readFileSync(join(import.meta.dir, "..", "assets", "logo.png")).toString("base64");
-const OUT = join(import.meta.dir, "public");
+const LOGO = readFileSync(join(import.meta.dir, "..", "..", "assets", "logo.png")).toString("base64");
+const OUT = join(import.meta.dir, "..", "public");
 
 // the banner's ground, so the home-screen icon matches the brand art
 const GROUND = "#1F1F1F";
@@ -14,11 +14,11 @@ const GROUND = "#1F1F1F";
 const ICONS = [
 
   // maskable icons are cropped to a circle by some launchers, so the torch keeps to the middle half
-  { file: "icon-192.png", size: 192, scale: 0.6, ground: GROUND },
-  { file: "icon-512.png", size: 512, scale: 0.6, ground: GROUND },
-  { file: "icon-maskable-512.png", size: 512, scale: 0.5, ground: GROUND },
-  { file: "apple-touch-icon.png", size: 180, scale: 0.6, ground: GROUND },
-  { file: "logo.png", size: 128, scale: 1, ground: "transparent" },
+  { file: "icons/icon-192.png", size: 192, scale: 0.6, ground: GROUND },
+  { file: "icons/icon-512.png", size: 512, scale: 0.6, ground: GROUND },
+  { file: "icons/icon-maskable-512.png", size: 512, scale: 0.5, ground: GROUND },
+  { file: "brand/apple-touch-icon.png", size: 180, scale: 0.6, ground: GROUND },
+  { file: "brand/logo.png", size: 128, scale: 1, ground: "transparent" },
 
 ];
 

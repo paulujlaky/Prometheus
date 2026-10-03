@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 
-import { buildItems, describeSchedule, describeWatch } from "./thread";
+import { buildItems, describeSchedule, describeWatch } from "../../web/Lib/thread";
 
-import type { AgentEvent } from "../Store";
+import type { AgentEvent } from "../../Store";
 
 let id = 0;
 

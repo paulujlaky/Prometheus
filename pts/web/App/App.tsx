@@ -1,13 +1,16 @@
 import { Component } from "react";
 
-import { Chat } from "./Chat";
-import { Details } from "./Details";
-import { Home } from "./Home";
-import { Group, Login, NewAgent, Settings } from "./Screens";
-import { AgentsContext } from "./Glyph";
-import { Torch } from "./ui";
+import { Torch } from "../Components/Layout";
+import { Login } from "../Screens/Account/Login";
+import { Settings } from "../Screens/Account/Settings";
+import { Chat } from "../Screens/Agent/Chat";
+import { Details } from "../Screens/Agent/Details";
+import { Group } from "../Screens/Group/Group";
+import { Home } from "../Screens/Home/Home";
+import { NewAgent } from "../Screens/Home/NewAgent";
 
-import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupMessage, type Model, type SocketMessage } from "./api";
+import { AgentsContext } from "./context";
+import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupMessage, type Model, type SocketMessage } from "../Lib/api";
 
 type Route =
 
