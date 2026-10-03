@@ -1,6 +1,6 @@
 import { Component } from "react";
 
-import { COLORS, Glyph, PALETTE, SHAPES } from "./Glyph";
+import { COLORS, Glyph, NAMES, PALETTE, SHAPES } from "./Glyph";
 import { Autosave, Bar, Button, Confirm, inputClass, Section, Select, Switch } from "./ui";
 
 import { parseGlyph } from "../Glyph";
@@ -103,8 +103,8 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
             <button key={option} type="button" role="radio" aria-checked={option === shape} onClick={() => this.setGlyph(`${option}:${color}`)} className={`flex flex-col items-center gap-2 rounded-xl py-3 ${option === shape ? "bg-raised" : "hover:bg-panel"}`}>
 
-              <Glyph glyph={`${option}:${color}`} size={40} live={option === shape} />
-              <span className={`text-[12px] capitalize ${option === shape ? "text-fg" : "text-dim"}`}>{option}</span>
+              <Glyph glyph={`${option}:${color}`} size={48} live={option === shape} />
+              <span className={`text-[12px] ${option === shape ? "text-fg" : "text-dim"}`}>{NAMES[option]}</span>
 
             </button>
 
@@ -112,7 +112,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
         </div>
 
-        <div role="radiogroup" aria-label="Colour" className="flex flex-wrap gap-3 px-1 pt-1">
+        <div role="radiogroup" aria-label="Colour" className="flex flex-wrap justify-center gap-3 pt-1">
 
           {COLORS.map((option) => (
 

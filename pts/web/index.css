@@ -104,40 +104,46 @@ body {
 
 }
 
-/* glyphs move only while their agent works, so motion itself means "busy" */
+/* every character blinks, each on its own beat so a list of them never blinks in unison */
+.glyph .g-eyes { animation: g-blink 5.2s infinite; }
+.glyph-spark .g-eyes { animation-delay: -1.3s; }
+.glyph-orbit .g-eyes { animation-delay: -2.1s; }
+.glyph-ember .g-eyes { animation-delay: -0.6s; }
+.glyph-prism .g-eyes { animation-delay: -3.4s; }
+.glyph-comet .g-eyes { animation-delay: -1.8s; }
+.glyph-wave .g-eyes { animation-delay: -2.7s; }
+.glyph-bloom .g-eyes { animation-delay: -4.1s; }
+
+/* the rest moves only while the agent works, so motion itself means "busy" */
 .is-live .g-flame { transform-origin: 50% 100%; animation: g-flicker 1.1s ease-in-out infinite; }
-.is-live .g-spin { animation: g-spin 2.4s cubic-bezier(0.6, 0, 0.4, 1) infinite; }
-.is-live .g-twinkle { animation: g-twinkle 1.2s ease-in-out infinite; }
-.is-live .g-orbit { transform-box: view-box; transform-origin: 12px 12px; animation: g-rotate 1.6s linear infinite; }
-.is-live .g-ripple { animation: g-ripple 1.6s ease-out infinite; }
-.is-live .g-glow { animation: g-breathe 1.6s ease-in-out infinite; }
-.is-live .g-turn { transform-box: view-box; transform-origin: 12px 13.5px; animation: g-rotate 3.2s cubic-bezier(0.7, 0, 0.3, 1) infinite; }
-.is-live .g-comet { animation: g-comet 1.4s ease-in-out infinite; }
-.is-live .g-wave { stroke-dasharray: 62 38; animation: g-flow 1.3s linear infinite; }
-.is-live .g-wave-late { animation-delay: -0.45s; }
-.is-live .g-bloom { animation: g-bloom 3s ease-in-out infinite; }
+.is-live .g-wiggle { animation: g-wiggle 0.9s ease-in-out infinite; }
+.is-live .g-orbit { transform-box: view-box; transform-origin: 11.5px 13px; animation: g-rotate 1.8s linear infinite; }
+.is-live .g-bounce { transform-origin: 50% 100%; animation: g-bounce 0.8s cubic-bezier(0.3, 0, 0.5, 1) infinite; }
+.is-live .g-wobble { transform-origin: 50% 100%; animation: g-wobble 1s ease-in-out infinite; }
+.is-live .g-zoom { animation: g-zoom 1s ease-in-out infinite; }
+.is-live .g-float { animation: g-float 1.6s ease-in-out infinite; }
+.is-live .g-petals { transform-box: view-box; transform-origin: 12px 12px; animation: g-rotate 4s linear infinite; }
+
+@keyframes g-blink {
+
+  0%, 93%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.1); }
+
+}
 
 @keyframes g-flicker {
 
   0%, 100% { transform: scale(1, 1) skewX(0deg); }
-  25% { transform: scale(0.93, 1.07) skewX(-4deg); }
-  50% { transform: scale(1.05, 0.94) skewX(3deg); }
-  75% { transform: scale(0.97, 1.04) skewX(-2deg); }
+  25% { transform: scale(0.94, 1.06) skewX(-4deg); }
+  50% { transform: scale(1.05, 0.95) skewX(3deg); }
+  75% { transform: scale(0.97, 1.03) skewX(-2deg); }
 
 }
 
-@keyframes g-spin {
+@keyframes g-wiggle {
 
-  0% { transform: rotate(0deg) scale(1); }
-  50% { transform: rotate(45deg) scale(0.8); }
-  100% { transform: rotate(90deg) scale(1); }
-
-}
-
-@keyframes g-twinkle {
-
-  0%, 100% { opacity: 0.2; transform: scale(0.6); }
-  50% { opacity: 1; transform: scale(1.2); }
+  0%, 100% { transform: rotate(-12deg) scale(1); }
+  50% { transform: rotate(12deg) scale(1.08); }
 
 }
 
@@ -147,44 +153,37 @@ body {
 
 }
 
-@keyframes g-ripple {
+@keyframes g-bounce {
 
-  0% { opacity: 1; transform: scale(0.55); }
-  100% { opacity: 0; transform: scale(1.15); }
-
-}
-
-@keyframes g-breathe {
-
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(0.82); }
+  0%, 100% { transform: translateY(0) scale(1.06, 0.94); }
+  45% { transform: translateY(-2.5px) scale(0.96, 1.05); }
 
 }
 
-@keyframes g-comet {
+@keyframes g-wobble {
 
-  0%, 100% { opacity: 0.55; transform: translate(-3px, 3px); }
-  50% { opacity: 1; transform: translate(1.5px, -1.5px); }
-
-}
-
-@keyframes g-flow {
-
-  to { stroke-dashoffset: -100; }
+  0%, 100% { transform: rotate(-9deg); }
+  50% { transform: rotate(9deg); }
 
 }
 
-@keyframes g-bloom {
+@keyframes g-zoom {
 
-  0% { transform: rotate(0deg) scale(1); }
-  50% { transform: rotate(36deg) scale(0.86); }
-  100% { transform: rotate(72deg) scale(1); }
+  0%, 100% { transform: translate(-2px, 2px); }
+  50% { transform: translate(1.5px, -1.5px); }
+
+}
+
+@keyframes g-float {
+
+  0%, 100% { transform: translateY(1px) rotate(-4deg); }
+  50% { transform: translateY(-1.5px) rotate(4deg); }
 
 }
 
 @media (prefers-reduced-motion: reduce) {
 
-  .is-live * { animation: none !important; }
+  .glyph * { animation: none !important; }
 
 }
 
