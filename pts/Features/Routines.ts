@@ -207,19 +207,29 @@ export function lineChanges(before: string, after: string): string {
 
 }
 
-export function routineTask(routine: Routine, changes?: string): string {
+/** The title, or for routines made before titles, the task's first line. */
+export function routineTitle(routine: Routine): string {
 
-  if (routine.kind === "schedule") {
-
-    return `[Scheduled routine: ${routine.spec}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
-
-  }
-
-  return `[Watch: ${routine.target} changed. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}\n\n${changes}`;
+  return routine.title || routine.task.split("\n")[0];
 
 }
 
-const BLOCK_KEY = /^\s*(schedule|watch|every|task|remove)\s*:\s*(.*)$/i;
+export function routineTask(routine: Routine, changes?: string): string {
+
+  // the chat reads the quoted title back out of this header; older headers have none
+  const named = routine.title ? ` "${routine.title}"` : "";
+
+  if (routine.kind === "schedule") {
+
+    return `[Scheduled routine${named}: ${routine.spec}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
+
+  }
+
+  return `[Watch${named}: ${routine.target} changed. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}\n\n${changes}`;
+
+}
+
+const BLOCK_KEY = /^\s*(schedule|watch|every|title|task|remove)\s*:\s*(.*)$/i;
 
 // an agent that schedules itself in a loop would quietly multiply its own runs
 const MAX_PER_AGENT = 20;
@@ -228,13 +238,13 @@ function describe(routine: Routine): string {
 
   const when = routine.kind === "schedule" ? `schedule ${routine.spec}` : `watch ${routine.target} every ${routine.spec} min`;
 
-  return `${routine.id}  ${when}${routine.enabled ? "" : "  (paused)"}  — ${routine.task.split("\n")[0]}`;
+  return `${routine.id}  ${when}${routine.enabled ? "" : "  (paused)"}  — ${routineTitle(routine)}`;
 
 }
 
 /**
  * The agent's own `<routine>` block. A bare one lists its routines; `remove: 3` deletes one;
- * `schedule:` or `watch:` + `every:` with a `task:` creates one. Everything after `task:` is the task.
+ * `schedule:` or `watch:` + `every:` with a `title:` and `task:` creates one. Everything after `task:` is the task.
  */
 export function routineBlock(agentId: number, body: string): { ok: boolean; text: string } {
 
@@ -305,6 +315,9 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
   const spec = kind === "schedule" ? fields.get("schedule")! : fields.get("every") ?? "";
   const target = kind === "watch" ? fields.get("watch")! : "";
 
+  // optional, so a model that forgets it still gets its routine; the app falls back to the task
+  const title = (fields.get("title") ?? "").replace(/"/g, "");
+
   try {
 
     if (!text) {
@@ -321,7 +334,7 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
 
   }
 
-  return { ok: true, text: `created routine ${describe(createRoutine(agentId, { kind, spec, target, task: text }))}` };
+  return { ok: true, text: `created routine ${describe(createRoutine(agentId, { kind, spec, target, title, task: text }))}` };
 
 }
 

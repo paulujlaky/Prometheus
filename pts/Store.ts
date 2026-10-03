@@ -116,9 +116,15 @@ for (const { id } of db.query<{ id: number }, []>("select id from agents where g
 
 }
 
+if (!db.query<{ name: string }, []>("pragma table_info(routines)").all().some((column) => column.name === "title")) {
+
+  db.exec("alter table routines add column title text not null default ''");
+
+}
+
 const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, glyph, created_at as createdAt";
 const EVENT_COLUMNS = "id, agent_id as agentId, run_id as runId, kind, text, at";
-const ROUTINE_COLUMNS = "id, agent_id as agentId, kind, spec, target, task, enabled, last_output as lastOutput, last_at as lastAt";
+const ROUTINE_COLUMNS = "id, agent_id as agentId, kind, spec, target, title, task, enabled, last_output as lastOutput, last_at as lastAt";
 const GROUP_COLUMNS = "id, author, agent_id as agentId, text, at";
 
 /** `schedule` runs on a cron spec; `watch` checks `target` every `spec` minutes and runs only when it changes. */
@@ -130,6 +136,9 @@ export interface Routine {
   kind: "schedule" | "watch";
   spec: string;
   target: string;
+
+  /** A few words for the app; empty on routines made before titles existed. */
+  title: string;
   task: string;
 
   enabled: boolean;
@@ -354,9 +363,9 @@ export function getRoutine(id: number): Routine | null {
 
 }
 
-export function createRoutine(agentId: number, input: Pick<Routine, "kind" | "spec" | "target" | "task">): Routine {
+export function createRoutine(agentId: number, input: Pick<Routine, "kind" | "spec" | "target" | "title" | "task">): Routine {
 
-  const row = db.query<RoutineRow, [number, string, string, string, string]>(`insert into routines (agent_id, kind, spec, target, task) values (?, ?, ?, ?, ?) returning ${ROUTINE_COLUMNS}`).get(agentId, input.kind, input.spec, input.target, input.task)!;
+  const row = db.query<RoutineRow, [number, string, string, string, string, string]>(`insert into routines (agent_id, kind, spec, target, title, task) values (?, ?, ?, ?, ?, ?) returning ${ROUTINE_COLUMNS}`).get(agentId, input.kind, input.spec, input.target, input.title, input.task)!;
 
   return routineOf(row);
 

@@ -176,7 +176,7 @@ export class Chat extends Component<ChatProps> {
             <span className="flex min-w-0 flex-col gap-0.5">
 
               <span className="text-[13px] text-dim">{item.when}</span>
-              <span className="line-clamp-2 text-[15px]">{item.task}</span>
+              <span className="line-clamp-2 text-[15px]">{item.title}</span>
 
             </span>
 

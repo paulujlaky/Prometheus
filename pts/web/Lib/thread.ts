@@ -1,7 +1,7 @@
 // An agent's event log, regrouped into what a person reads: their messages, the agent's words, and the work folded away.
 
 import { parseActions, type Verb } from "../../Agent/Protocol";
-import type { AgentEvent } from "../../Store";
+import type { AgentEvent, Routine } from "../../Store";
 
 export interface Step {
 
@@ -21,10 +21,17 @@ export type Item =
   | { kind: "notify"; key: string; text: string }
   | { kind: "work"; key: string; steps: Step[]; seconds: number; live: boolean }
   | { kind: "page"; key: string; url: string; title: string }
-  | { kind: "routine"; key: string; when: string; task: string }
+  | { kind: "routine"; key: string; when: string; title: string }
   | { kind: "ask"; key: string; text: string; answer: "allowed" | "refused" | null }
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
+
+/** The title, or for routines made before titles, the task's first line. */
+export function routineTitle(routine: Routine): string {
+
+  return routine.title || routine.task.split("\n")[0];
+
+}
 
 const DAYS = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"];
 
@@ -126,13 +133,17 @@ function taskItem(event: AgentEvent): Item {
 
   if (text.startsWith("[Scheduled routine")) {
 
-    return { kind: "note", key, text: `Routine: ${text.replace(/^\[[^\]]*\]\s*/, "").split("\n")[0]}` };
+    const title = /^\[Scheduled routine "(.*?)": /.exec(text)?.[1];
+
+    return { kind: "note", key, text: `Routine: ${title ?? text.replace(/^\[[^\]]*\]\s*/, "").split("\n")[0]}` };
 
   }
 
-  if (text.startsWith("[Watch:")) {
+  const watch = /^\[Watch(?: "(.*?)")?: (.*?) changed/.exec(text);
 
-    return { kind: "note", key, text: `Watch: ${/^\[Watch: (.*?) changed/.exec(text)?.[1] ?? "something"} changed` };
+  if (watch) {
+
+    return { kind: "note", key, text: watch[1] ? `Watch: ${watch[1]}` : `Watch: ${watch[2]} changed` };
 
   }
 
@@ -278,11 +289,11 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
       if (step.verb === "routine" && step.ok && step.detail.startsWith("created routine")) {
 
-        const [when, task = ""] = step.detail.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
+        const [when, title = ""] = step.detail.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
 
         const watch = /^watch (.+) every (\d+) min/.exec(when);
 
-        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: watch ? describeWatch(watch[1], watch[2]) : describeSchedule(when.replace(/^schedule /, "")), task });
+        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: watch ? describeWatch(watch[1], watch[2]) : describeSchedule(when.replace(/^schedule /, "")), title });
 
       }
 

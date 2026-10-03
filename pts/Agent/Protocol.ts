@@ -345,6 +345,7 @@ routine instead of promising to remember. It starts a fresh task for you each ti
   every weekday morning
   <routine>
   schedule: 0 8 * * 1-5
+  title: Morning HN digest
   task: Summarise the five top stories on Hacker News.
   </routine>
 
@@ -352,13 +353,14 @@ routine instead of promising to remember. It starts a fresh task for you each ti
   <routine>
   watch: https://example.com/widget
   every: 30
+  title: Widget price
   task: The widget page changed. If the price dropped below $50, tell the user.
   </routine>
 
 schedule: is cron — minute hour day month weekday, server time. watch: is a URL, or a shell
 command whose output is compared, checked every: N minutes; you are woken with the lines that
-changed. Everything after task: is the task. A bare <routine> lists yours with their numbers;
-remove: 3 deletes one.
+changed. title: is what the user sees in the app — a few words, not a sentence. Everything
+after task: is the task. A bare <routine> lists yours with their numbers; remove: 3 deletes one.
 
 ## Memory
 

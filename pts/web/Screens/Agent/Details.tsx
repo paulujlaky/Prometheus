@@ -7,7 +7,7 @@ import { Bar, Confirm, Section } from "../../Components/Layout";
 import { parseGlyph } from "../../../Features/Glyph";
 import { api, type Agent, type Model, type Routine } from "../../Lib/api";
 import { Autosave } from "../../Lib/autosave";
-import { describeSchedule, describeWatch } from "../../Lib/thread";
+import { describeSchedule, describeWatch, routineTitle } from "../../Lib/thread";
 
 interface DetailsProps {
 
@@ -158,7 +158,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
     confirming: {
 
       title: "Delete this routine?",
-      body: routine.task.split("\n")[0],
+      body: routineTitle(routine),
       confirm: "Delete",
 
       run: () => this.routineAction(() => api(`/routines/${routine.id}`, "DELETE")),
@@ -179,7 +179,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
           <button type="button" aria-expanded={open} onClick={() => this.setState({ open: open ? null : routine.id })} className="flex min-w-0 grow flex-col text-left">
 
-            <span className={`truncate text-[15px] ${routine.enabled ? "" : "text-dim"}`}>{routine.task.split("\n")[0]}</span>
+            <span className={`truncate text-[15px] ${routine.enabled ? "" : "text-dim"}`}>{routineTitle(routine)}</span>
             <span className="truncate text-[13px] text-dim">{when(routine)}</span>
 
           </button>

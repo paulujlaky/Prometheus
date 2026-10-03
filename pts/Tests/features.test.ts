@@ -54,15 +54,15 @@ test("an agent's routine block creates, lists and removes its own routines", () 
   expect(routineBlock(mine.id, "schedule: every morning\ntask: x").ok).toBe(false);
   expect(routineBlock(mine.id, "schedule: 0 8 * * 1-5").ok).toBe(false);
 
-  const daily = routineBlock(mine.id, "schedule: 0 8 * * 1-5\ntask: Summarise HN.\nKeep it to five bullets.");
+  const daily = routineBlock(mine.id, "schedule: 0 8 * * 1-5\ntitle: HN digest\ntask: Summarise HN.\nKeep it to five bullets.");
   const watch = routineBlock(mine.id, "watch: curl -s https://example.com > page.txt && cat page.txt\nevery: 30\ntask: Report changes.");
 
   expect(daily.ok && watch.ok).toBe(true);
 
   const [first, second] = listRoutines(mine.id);
 
-  expect(first).toMatchObject({ kind: "schedule", spec: "0 8 * * 1-5", task: "Summarise HN.\nKeep it to five bullets." });
-  expect(second).toMatchObject({ kind: "watch", spec: "30", target: "curl -s https://example.com > page.txt && cat page.txt" });
+  expect(first).toMatchObject({ kind: "schedule", spec: "0 8 * * 1-5", title: "HN digest", task: "Summarise HN.\nKeep it to five bullets." });
+  expect(second).toMatchObject({ kind: "watch", spec: "30", target: "curl -s https://example.com > page.txt && cat page.txt", title: "" });
   expect(routineBlock(mine.id, "").text.split("\n").length).toBe(2);
 
   expect(routineBlock(other.id, `remove: ${first.id}`).ok).toBe(false);

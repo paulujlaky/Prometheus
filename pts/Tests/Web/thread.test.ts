@@ -22,7 +22,7 @@ test("a run folds into the user's message, one work row, its cards and the repor
     event("r1", "result", "[submit ok]\nhttps://httpbin.org/post\n\n{}"),
     event("r1", "assistant", "<done>\nSent.\n</done>"),
     event("r1", "done", "Sent."),
-    event("r2", "task", "[Scheduled routine: 0 9 * * 1-5. The user is not watching; report what matters in <done>.]\n\nTop HN story"),
+    event("r2", "task", "[Scheduled routine \"Morning HN\": 0 9 * * 1-5. The user is not watching; report what matters in <done>.]\n\nTop HN story"),
     event("r2", "done", "wait"),
 
   ];
@@ -36,7 +36,7 @@ test("a run folds into the user's message, one work row, its cards and the repor
   expect(work.kind === "work" && work.steps.map((step) => [step.verb, step.ok])).toEqual([["open", true], ["type", true], ["submit", true]]);
   expect(items.find((item) => item.kind === "page")).toMatchObject({ url: "https://httpbin.org/post" });
   expect(items.find((item) => item.kind === "ask")).toMatchObject({ answer: "allowed" });
-  expect(items.find((item) => item.kind === "note")).toMatchObject({ text: "Routine: Top HN story" });
+  expect(items.find((item) => item.kind === "note")).toMatchObject({ text: "Routine: Morning HN" });
 
 });
 

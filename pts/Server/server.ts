@@ -426,13 +426,14 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
   if (action === "routines" && method === "POST") {
 
-    const input = await body<{ kind?: unknown; spec?: unknown; target?: unknown; task?: unknown }>(req);
+    const input = await body<{ kind?: unknown; spec?: unknown; target?: unknown; title?: unknown; task?: unknown }>(req);
     const spec = text(input.spec, "spec").trim();
     const target = input.target === undefined ? "" : text(input.target, "target").trim();
+    const title = input.title === undefined ? "" : text(input.title, "title").trim().replace(/"/g, "");
 
     validateRoutine(input.kind, spec, target);
 
-    return json(createRoutine(agent.id, { kind: input.kind as "schedule" | "watch", spec, target, task: text(input.task, "task").trim() }), 201);
+    return json(createRoutine(agent.id, { kind: input.kind as "schedule" | "watch", spec, target, title, task: text(input.task, "task").trim() }), 201);
 
   }
 
