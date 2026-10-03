@@ -21,6 +21,9 @@ export interface Agent {
   state: AgentState;
   question: string | null;
 
+  /** What a waiting agent waits on: an OK for a <submit>, or the user in its browser. */
+  waitingOn: "ask" | "handoff" | null;
+
 }
 
 /** The Boodle account the server's cookie belongs to. */
@@ -45,7 +48,38 @@ export type SocketMessage =
   | { type: "event"; event: AgentEvent }
   | { type: "delta"; agentId: number; text: string }
   | { type: "state"; agentId: number; state: AgentState }
-  | { type: "group"; message: GroupMessage };
+  | { type: "group"; message: GroupMessage }
+  | LiveEvent;
+
+/** An agent's browser, streamed to whoever watches it. `mine` is whether this device has taken it over. */
+export type LiveEvent =
+
+  | { type: "frame"; agentId: number; data: Blob }
+  | { type: "browser"; agentId: number; held?: boolean; mine?: boolean; error?: string };
+
+export type LiveInput =
+
+  | { kind: "click"; x: number; y: number }
+  | { kind: "scroll"; x: number; y: number; dx: number; dy: number }
+  | { kind: "text"; text: string }
+  | { kind: "drag"; x: number; y: number; toX: number; toY: number }
+  | { kind: "key"; key: string }
+  | { kind: "back" };
+
+export type LiveCommand =
+
+  | { live: "watch"; agentId: number }
+  | { live: "unwatch" }
+  | { live: "take"; width?: number; height?: number }
+  | { live: "give" }
+  | { live: "input"; event: LiveInput };
+
+export interface LiveChannel {
+
+  send: (command: LiveCommand) => void;
+  subscribe: (listener: (event: LiveEvent) => void) => () => void;
+
+}
 
 export class Unauthorized extends Error {}
 

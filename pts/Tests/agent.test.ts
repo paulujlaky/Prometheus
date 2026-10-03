@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeAll } from "../Agent/Tools/Browser";
+import { closeAll, handBack, input, takeOver, watch } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
 import { runShell } from "../Agent/Tools/Shell";
 import { applyEdit, execute, relPath } from "../Agent/Tools/Tools";
@@ -133,7 +133,7 @@ test("a run asking for approval waits, then hears the answer or a stop", async (
     asked = (async () => {
 
       answers.push(await control.ask("Send it?"));
-      answers.push(await control.ask("And this?"));
+      answers.push(await control.ask("Sign in to GitHub", "handoff"));
 
     })();
 
@@ -149,7 +149,11 @@ test("a run asking for approval waits, then hears the answer or a stop", async (
 
   await Bun.sleep(0);
 
-  expect(queue.question(7)).toBe("And this?");
+  expect(queue.question(7)).toBe("Sign in to GitHub");
+  expect(queue.waitingOn(7)).toBe("handoff");
+
+  // handing the browser back must never answer a <submit>, and an approval must not end a handoff
+  expect(queue.answer(7, true, "ask")).toBe(false);
 
   queue.stop(7);
   await asked;
@@ -192,6 +196,70 @@ test.skipIf(process.platform !== "linux")("the browser opens, reads, types and c
     const greeted = await run("click", ref("button"));
 
     expect(greeted.text).toContain("Hello Ada");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
+test.skipIf(process.platform !== "linux")("a watched browser streams, and a take-over holds the agent then refuses its stale refs", async () => {
+
+  const site = Bun.serve({
+
+    port: 0,
+
+    fetch(req) {
+
+      const name = new URL(req.url).searchParams.get("name");
+
+      return new Response(`<!doctype html><title>Greeter</title>${name ? `<h1>Hello ${name}</h1>` : `<a href="?name=Grace" style="position:fixed;inset:0">Greet</a>`}`, { headers: { "Content-Type": "text/html" } });
+
+    },
+
+  });
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+  const run = (verb: Action["verb"], path = "") => execute({ verb, path, label: "", body: "" }, cwd);
+  const frames: Buffer[] = [];
+
+  try {
+
+    const opened = await run("open", `http://localhost:${site.port}/`);
+    const link = /\[ref=(e\d+)\]/.exec(opened.text.split("\n").find((line) => line.includes("link"))!)![1];
+    const stop = await watch(cwd, (frame) => frames.push(frame));
+
+    for (let i = 0; i < 50 && !frames.length; i += 1) {
+
+      await Bun.sleep(100);
+
+    }
+
+    // a JPEG starts FF D8
+    expect([...frames[0].subarray(0, 2)]).toEqual([0xff, 0xd8]);
+
+    await takeOver(cwd, { width: 400, height: 700 });
+
+    let settled = false;
+    const held = run("click", link).finally(() => (settled = true));
+
+    // the link covers the page, so the middle of a phone-sized frame lands on it
+    await input(cwd, { kind: "click", x: 0.5, y: 0.5 });
+    await Bun.sleep(500);
+
+    expect(settled).toBe(false);
+
+    await handBack(cwd);
+
+    const result = await held;
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("Hello Grace");
+
+    stop();
 
   } finally {
 

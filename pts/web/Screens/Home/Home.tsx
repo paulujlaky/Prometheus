@@ -78,16 +78,16 @@ export function Home({ agents, account, selected }: HomeProps) {
 
           {waiting.map((agent) => (
 
-            <motion.a key={agent.id} href={`#/agent/${agent.id}`} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.2, ease: "easeOut" }} className="mx-4 mt-8 flex flex-col gap-4 rounded-2xl bg-panel p-5 no-underline">
+            <motion.a key={agent.id} href={agent.waitingOn === "handoff" ? `#/agent/${agent.id}/browser` : `#/agent/${agent.id}`} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.2, ease: "easeOut" }} className="mx-4 mt-8 flex flex-col gap-4 rounded-2xl bg-panel p-5 no-underline">
 
               <span className="flex flex-col gap-1.5">
 
-                <span className="flex items-center gap-2 text-[14px] text-dim"><Glyph glyph={agent.glyph} size={20} live />{agent.name} needs your OK</span>
+                <span className="flex items-center gap-2 text-[14px] text-dim"><Glyph glyph={agent.glyph} size={20} live />{agent.name} {agent.waitingOn === "handoff" ? "needs you in the browser" : "needs your OK"}</span>
                 <span className="font-serif text-[21px] leading-snug">{agent.question?.split("\n")[0] ?? "Approve an action"}</span>
 
               </span>
 
-              <span className="flex h-11 items-center self-start rounded-xl bg-fg px-5 text-[15px] font-medium text-ink">Review</span>
+              <span className="flex h-11 items-center self-start rounded-xl bg-fg px-5 text-[15px] font-medium text-ink">{agent.waitingOn === "handoff" ? "Open browser" : "Review"}</span>
 
             </motion.a>
 

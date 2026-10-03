@@ -9,6 +9,9 @@ const ANSWER_MS = Number(process.env.PTS_ANSWER_MS ?? 30 * 60_000);
 
 export type AgentState = "idle" | "queued" | "running" | "waiting";
 
+/** What a waiting run waits on: an OK for a <submit>, or the user doing something in the browser. */
+export type WaitKind = "ask" | "handoff";
+
 export type StartRun = (agent: Agent, task: string, control: RunControl, origin?: Origin) => Promise<unknown>;
 
 interface Job {
@@ -25,7 +28,7 @@ interface Slot {
   controller: AbortController;
   notes: string[];
 
-  pending: { question: string; answer: (allow: boolean) => void } | null;
+  pending: { question: string; kind: WaitKind; answer: (allow: boolean) => void } | null;
 
   origin?: Origin;
 
@@ -73,10 +76,22 @@ export class Queue {
 
   }
 
-  /** False when nothing was waiting, e.g. the question already timed out. */
-  answer(agentId: number, allow: boolean): boolean {
+  waitingOn(agentId: number): WaitKind | null {
+
+    return this.running.get(agentId)?.pending?.kind ?? null;
+
+  }
+
+  /** False when nothing was waiting, e.g. the question already timed out. `kind` limits it to one sort of wait. */
+  answer(agentId: number, allow: boolean, kind?: WaitKind): boolean {
 
     const pending = this.running.get(agentId)?.pending;
+
+    if (kind && pending?.kind !== kind) {
+
+      return false;
+
+    }
 
     pending?.answer(allow);
 
@@ -154,13 +169,14 @@ export class Queue {
       this.running.set(job.agent.id, slot);
       this.onState(job.agent.id, "running");
 
-      const ask = (question: string) => new Promise<boolean>((resolve) => {
+      const ask = (question: string, kind: WaitKind = "ask") => new Promise<boolean>((resolve) => {
 
         const timer = setTimeout(() => slot.pending?.answer(false), ANSWER_MS);
 
         slot.pending = {
 
           question,
+          kind,
 
           answer: (allow) => {
 

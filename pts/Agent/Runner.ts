@@ -1,6 +1,7 @@
 import { BoodleClient, ChatSession } from "../../sdk/index";
 
-import { pageUrl } from "./Tools/Browser";
+import { look, pageUrl, pinned } from "./Tools/Browser";
+import type { WaitKind } from "./Queue";
 import { execute } from "./Tools/Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
 import { routineBlock } from "../Features/Routines";
@@ -17,7 +18,7 @@ const MAX_ACTIONS_PER_TURN = 8;
 const RECENT_CHARS = 300;
 
 // verbs whose output the model has to see before it can honestly report
-const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "submit"]);
+const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "submit", "handoff"]);
 
 export type RunEvent = AgentEvent | { kind: "delta"; agentId: number; text: string };
 
@@ -30,8 +31,8 @@ export interface RunControl {
   /** Messages the user sent while this run was going; each call takes them. */
   takeNotes: () => string[];
 
-  /** Parks the run until the user allows or refuses; resolves false on stop or timeout. */
-  ask: (question: string) => Promise<boolean>;
+  /** Parks the run until the user allows or refuses, or for a handoff, hands the browser back; resolves false on stop or timeout. */
+  ask: (question: string, kind?: WaitKind) => Promise<boolean>;
 
   listen: RunListener;
 
@@ -268,7 +269,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
           }
 
-          const question = `${what}\n${pageUrl(cwd)}`;
+          const question = `${what}\n${await pageUrl(cwd)}`;
 
           record("ask", question);
 
@@ -288,6 +289,44 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
             break;
 
           }
+
+        }
+
+        if (action.verb === "handoff") {
+
+          const what = action.body.trim().split("\n")[0];
+
+          if (!what) {
+
+            results.push({ verb: "handoff", ok: false, text: "handoff needs one line saying what the user should do in the browser." });
+            break;
+
+          }
+
+          record("handoff", what);
+
+          const finished = await pinned(cwd, () => control.ask(what, "handoff"));
+
+          if (signal.aborted) {
+
+            throw new Error("aborted");
+
+          }
+
+          record("user", finished ? "Done." : "Skipped.");
+
+          if (!finished) {
+
+            results.push({ verb: "handoff", ok: false, text: "The user did not do it. If the task cannot go on without it, say so in <done>." });
+            break;
+
+          }
+
+          const page = await look(cwd, signal).catch((err: Error) => err.message);
+
+          // the page first, like every browser result, so the chat shows where the user left off
+          results.push({ verb: "handoff", ok: true, text: `${page}\n\n[harness]\nThe user handed the browser back; this is the page as they left it.` });
+          continue;
 
         }
 

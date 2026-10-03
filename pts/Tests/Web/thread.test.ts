@@ -71,3 +71,16 @@ test("schedules read as words when they are a common shape, and stay exact other
   expect(describeWatch("cat stock.txt", "5")).toBe("Every 5 min, watching a command");
 
 });
+
+test("a handoff gets its own card, open until the user hands the browser back", () => {
+
+  const asked = [event("r9", "task", "Check my orders"), event("r9", "assistant", "<handoff>\nSign in to the shop\n</handoff>"), event("r9", "handoff", "Sign in to the shop")];
+
+  expect(buildItems(asked, true).find((item) => item.kind === "handoff")).toMatchObject({ text: "Sign in to the shop", answer: null });
+
+  const done = buildItems([...asked, event("r9", "user", "Done."), event("r9", "done", "Two orders on the way.")], false);
+
+  expect(done.find((item) => item.kind === "handoff")).toMatchObject({ answer: "done" });
+  expect(done.some((item) => item.kind === "user" && item.text === "Done.")).toBe(false);
+
+});

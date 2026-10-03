@@ -837,23 +837,23 @@ export async function execute(action: Action, cwd: string, signal?: AbortSignal)
 
       case "open":
 
-        return ok(await browser.open(cwd, action.path || bodyLines(action.body)[0] || ""));
+        return ok(await browser.open(cwd, action.path || bodyLines(action.body)[0] || "", signal));
 
       case "look":
 
-        return ok(await browser.look(cwd));
+        return ok(await browser.look(cwd, signal));
 
       case "click":
 
-        return ok(await browser.click(cwd, action.path || bodyLines(action.body)[0] || ""));
+        return ok(await browser.click(cwd, action.path || bodyLines(action.body)[0] || "", signal));
 
       case "type":
 
-        return ok(await browser.type(cwd, action.path, action.body));
+        return ok(await browser.type(cwd, action.path, action.body, signal));
 
       case "press":
 
-        return ok(await browser.press(cwd, action.path || bodyLines(action.body)[0] || ""));
+        return ok(await browser.press(cwd, action.path || bodyLines(action.body)[0] || "", signal));
 
       default:
 

@@ -9,7 +9,7 @@ export const HOME = process.env.PTS_HOME ?? join(homedir(), ".pts");
 
 const NAME = /^[A-Za-z][\w -]{0,31}$/;
 
-export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "notify" | "ask" | "done" | "error";
+export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "notify" | "ask" | "handoff" | "done" | "error";
 
 export interface Agent {
 

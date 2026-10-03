@@ -1,4 +1,4 @@
-import { Bell, Calendar, Check, ChevronRight, Globe, SlidersHorizontal, Square, X } from "lucide-react";
+import { AppWindow, Bell, Calendar, Check, ChevronRight, Globe, SlidersHorizontal, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Component, createRef } from "react";
 
@@ -157,12 +157,12 @@ export class Chat extends Component<ChatProps> {
 
         return (
 
-          <div key={item.key} className="flex max-w-md flex-col gap-1 rounded-2xl border border-line px-4 py-3">
+          <a key={item.key} href={`#/agent/${agent.id}/browser`} className="flex max-w-md flex-col gap-1 rounded-2xl border border-line px-4 py-3 text-fg no-underline hover:border-dim">
 
             <span className="flex items-center gap-2 font-mono text-[12px] text-dim"><Globe size={13} /><span className="truncate">{item.url.replace(/^https?:\/\//, "")}</span></span>
             {item.title && <span className="font-serif text-[18px]">{item.title}</span>}
 
-          </div>
+          </a>
 
         );
 
@@ -229,6 +229,49 @@ export class Chat extends Component<ChatProps> {
 
       }
 
+      case "handoff": {
+
+        const open = item.answer === null && agent.state === "waiting" && item.key === lastAsk;
+
+        if (!open) {
+
+          return (
+
+            <div key={item.key} className="flex max-w-md items-start gap-3 text-dim">
+
+              {item.answer === "done" ? <Check size={16} className="mt-1 shrink-0" /> : <X size={16} className="mt-1 shrink-0" />}
+              <span className="text-[14px]">{item.answer === "done" ? "Done in the browser" : "Skipped"} — {item.text}</span>
+
+            </div>
+
+          );
+
+        }
+
+        return (
+
+          <section key={item.key} aria-label="Needs you" className="flex max-w-md flex-col gap-4 rounded-2xl bg-panel p-5">
+
+            <span className="flex flex-col gap-1.5">
+
+              <span className="text-[14px] text-dim">Needs you in the browser</span>
+              <span className="font-serif text-[20px] leading-snug">{item.text}</span>
+
+            </span>
+
+            <span className="flex gap-2">
+
+              <Button className="grow" onClick={() => this.props.onAnswer(false)}>Skip</Button>
+              <a href={`#/agent/${agent.id}/browser`} className="flex h-11 grow items-center justify-center rounded-xl bg-fg px-5 text-[15px] font-medium text-ink no-underline">Open browser</a>
+
+            </span>
+
+          </section>
+
+        );
+
+      }
+
       case "done":
 
         return <Memo key={item.key} text={item.text} />;
@@ -246,7 +289,7 @@ export class Chat extends Component<ChatProps> {
     const { agent, events } = this.props;
     const busy = agent.state === "running" || agent.state === "waiting";
     const items = buildItems(events ?? [], busy);
-    const lastAsk = [...items].reverse().find((item) => item.kind === "ask")?.key ?? null;
+    const lastAsk = [...items].reverse().find((item) => item.kind === "ask" || item.kind === "handoff")?.key ?? null;
     const working = agent.state === "running" && !items.some((item) => item.kind === "work" && item.live);
 
     return (
@@ -262,6 +305,7 @@ export class Chat extends Component<ChatProps> {
             <>
 
               {agent.state !== "idle" && <IconButton label="Stop" onClick={this.props.onStop}><Square size={16} strokeWidth={2} /></IconButton>}
+              <a href={`#/agent/${agent.id}/browser`} aria-label="Browser" title="Browser" className="flex size-11 items-center justify-center rounded-xl text-dim hover:text-fg"><AppWindow size={19} strokeWidth={1.6} /></a>
               <a href={`#/agent/${agent.id}/details`} aria-label="Details" title="Details" className="flex size-11 items-center justify-center rounded-xl text-dim hover:text-fg"><SlidersHorizontal size={19} strokeWidth={1.6} /></a>
 
             </>

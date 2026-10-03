@@ -11,6 +11,7 @@ import { Queue, type AgentState } from "../Agent/Queue";
 import { runAgent, type RunControl, type RunEvent } from "../Agent/Runner";
 import { isGlyph } from "../Features/Glyph";
 import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/Group";
+import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { routineTask, startScheduler, validateRoutine } from "../Features/Routines";
 import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
@@ -132,9 +133,9 @@ function onRunEvent(event: RunEvent) {
   }
 
   // a finished task does not buzz on its own: the agent decides, with <notify>, when it is worth it
-  if (event.kind === "notify" || event.kind === "ask") {
+  if (event.kind === "notify" || event.kind === "ask" || event.kind === "handoff") {
 
-    notify({ title: event.kind === "ask" ? `${name} needs your OK` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
+    notify({ title: event.kind === "ask" ? `${name} needs your OK` : event.kind === "handoff" ? `${name} needs you in the browser` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
     return;
 
   }
@@ -214,9 +215,12 @@ async function start(agent: Agent, task: string, control: RunControl, origin?: O
 
 const queue = new Queue(start, onRunEvent, (agentId: number, state: AgentState) => broadcast({ type: "state", agentId, state }));
 
+// handing the browser back is how the user answers a <handoff>
+const live = new Live((agentId) => queue.answer(agentId, true, "handoff"));
+
 function view(agent: Agent) {
 
-  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id) };
+  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id), waitingOn: queue.waitingOn(agent.id) };
 
 }
 
@@ -748,26 +752,35 @@ export const server = Bun.serve({
 
     },
 
-    // the one thing a client says over the socket: whether its window is on screen; everything else is HTTP
+    // a client says whether its window is on screen, and drives the live browser; everything else is HTTP
     message(ws: ServerWebSocket<unknown>, raw) {
+
+      let message: { visible?: unknown } | LiveMessage;
 
       try {
 
-        const { visible } = JSON.parse(String(raw)) as { visible?: unknown };
-
-        if (visible === true) {
-
-          watching.add(ws);
-
-        } else {
-
-          watching.delete(ws);
-
-        }
+        message = JSON.parse(String(raw));
 
       } catch {
 
-        // not a visibility message; nothing else is expected
+        return;
+
+      }
+
+      if ("live" in message) {
+
+        live.message(ws, message);
+        return;
+
+      }
+
+      if (message.visible === true) {
+
+        watching.add(ws);
+
+      } else {
+
+        watching.delete(ws);
 
       }
 
@@ -776,6 +789,7 @@ export const server = Bun.serve({
     close(ws: ServerWebSocket<unknown>) {
 
       watching.delete(ws);
+      live.close(ws);
 
     },
 

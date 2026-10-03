@@ -23,6 +23,7 @@ export type Item =
   | { kind: "page"; key: string; url: string; title: string }
   | { kind: "routine"; key: string; when: string; title: string }
   | { kind: "ask"; key: string; text: string; answer: "allowed" | "refused" | null }
+  | { kind: "handoff"; key: string; text: string; answer: "done" | "skipped" | null }
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
 
@@ -101,7 +102,7 @@ export function describeWatch(target: string, minutes: string): string {
 }
 
 const RESULT_HEAD =/^\[([a-z]+) (ok|failed)\]$/gm;
-const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "submit"]);
+const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "submit", "handoff"]);
 
 /** `[verb ok]` sections of one result event, in the order the blocks ran. */
 function splitResults(text: string): { ok: boolean; text: string }[] {
@@ -188,7 +189,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
         const previous = run[index - 1];
 
         // an approval's answer belongs to its card, not the chat
-        if (previous?.kind === "ask") {
+        if (previous?.kind === "ask" || previous?.kind === "handoff") {
 
           continue;
 
@@ -245,6 +246,15 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
         const answer = run[index + 1]?.kind === "user" ? (run[index + 1].text === "Allowed." ? "allowed" : "refused") : null;
 
         after.push({ kind: "ask", key, text: event.text, answer });
+        continue;
+
+      }
+
+      if (event.kind === "handoff") {
+
+        const answer = run[index + 1]?.kind === "user" ? (run[index + 1].text === "Done." ? "done" : "skipped") : null;
+
+        after.push({ kind: "handoff", key, text: event.text, answer });
         continue;
 
       }

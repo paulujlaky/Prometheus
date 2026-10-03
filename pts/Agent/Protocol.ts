@@ -1,6 +1,6 @@
 // Tagged blocks in, tagged results out. No JSON, so nothing the model writes ever needs escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "routine", "say", "notify", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "handoff", "routine", "say", "notify", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -47,6 +47,9 @@ const ALIASES: Record<string, Verb> = {
   input: "type",
 
   key: "press",
+
+  handover: "handoff",
+  human: "handoff",
 
   routines: "routine",
   schedule: "routine",
@@ -289,6 +292,7 @@ Put every block you already know you need in the same reply. They run top to bot
   <type>     fill a text field on the page
   <press>    press a key: Enter, Tab, Escape, ArrowDown
   <submit>   click the button that sends something — waits for the user's OK
+  <handoff>  ask the user to do something in your browser, like signing in — waits for them
   <routine>  run a task on a schedule, or when something changes — bare, it lists yours
   <say>      tell the user something — the task keeps going
   <notify>   buzz the user's phone with one line — only when it matters
@@ -333,6 +337,17 @@ and to whom. The task waits until the user allows or refuses it.
   <submit e31>
   Book a table for 2 at Nopa, Friday 7pm, under the user's name
   </submit>
+
+When a page needs the user themselves — a sign-in, a code sent to their phone, a captcha — use
+<handoff> with one line saying what they should do. The task waits while they use your browser;
+when they hand it back you get the page as they left it. Never ask for a password in chat.
+
+  <handoff>
+  Sign in to GitHub
+  </handoff>
+
+The user can also watch your browser, or take it over, at any time. If they do, your next
+click, type or press is refused and you get the page as it is now; carry on from there.
 
 Prefer <run> with curl for plain fetches and APIs; use the browser when a page needs JavaScript,
 a login, or clicking through.

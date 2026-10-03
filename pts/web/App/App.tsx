@@ -5,6 +5,7 @@ import { Torch } from "../Components/Layout";
 import { Install, mustInstall } from "../Screens/Account/Install";
 import { Login } from "../Screens/Account/Login";
 import { Settings } from "../Screens/Account/Settings";
+import { Browser } from "../Screens/Agent/Browser";
 import { Chat } from "../Screens/Agent/Chat";
 import { Details } from "../Screens/Agent/Details";
 import { Group } from "../Screens/Group/Group";
@@ -12,12 +13,12 @@ import { Home } from "../Screens/Home/Home";
 import { NewAgent } from "../Screens/Home/NewAgent";
 
 import { AgentsContext } from "./context";
-import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupMessage, type Model, type SocketMessage } from "../Lib/api";
+import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupMessage, type LiveChannel, type LiveCommand, type LiveEvent, type Model, type SocketMessage } from "../Lib/api";
 
 type Route =
 
   | { name: "home" }
-  | { name: "agent" | "details"; id: number }
+  | { name: "agent" | "details" | "browser"; id: number }
   | { name: "group" | "settings" | "new" };
 
 interface AppState {
@@ -45,7 +46,7 @@ function parseRoute(): Route {
 
   if (name === "agent" && Number(id)) {
 
-    return { name: sub === "details" ? "details" : "agent", id: Number(id) };
+    return { name: sub === "details" || sub === "browser" ? sub : "agent", id: Number(id) };
 
   }
 
@@ -66,6 +67,53 @@ export class App extends Component<{}, AppState> {
   private socket: WebSocket | null = null;
   private retries = 0;
   private closed = false;
+
+  // frames skip React state: at ten a second they would re-render every screen
+  private liveListeners = new Set<(event: LiveEvent) => void>();
+
+  // what a reconnect has to ask for again: the browser being watched, and whether this device had taken it over
+  private watched: number | null = null;
+  private holding = false;
+
+  live: LiveChannel = {
+
+    send: (command: LiveCommand) => {
+
+      if (command.live === "watch") {
+
+        this.watched = command.agentId;
+
+      }
+
+      if (command.live === "unwatch") {
+
+        this.watched = null;
+
+      }
+
+      this.sendSocket(command);
+
+    },
+
+    subscribe: (listener) => {
+
+      this.liveListeners.add(listener);
+
+      return () => this.liveListeners.delete(listener);
+
+    },
+
+  };
+
+  sendSocket = (message: unknown) => {
+
+    if (this.socket?.readyState === WebSocket.OPEN) {
+
+      this.socket.send(JSON.stringify(message));
+
+    }
+
+  };
 
   componentDidMount() {
 
@@ -190,9 +238,22 @@ export class App extends Component<{}, AppState> {
       this.retries = 0;
       this.reportVisibility();
 
+      if (this.watched !== null) {
+
+        this.sendSocket({ live: "watch", agentId: this.watched });
+
+        if (this.holding) {
+
+          this.sendSocket({ live: "take" });
+
+        }
+
+      }
+
     };
 
-    socket.onmessage = (message) => this.onSocket(JSON.parse(message.data));
+    // the one binary message is a frame of the browser this window watches
+    socket.onmessage = (message) => this.onSocket(typeof message.data === "string" ? JSON.parse(message.data) : { type: "frame", agentId: this.watched ?? 0, data: message.data });
 
     socket.onclose = () => {
 
@@ -221,6 +282,25 @@ export class App extends Component<{}, AppState> {
   };
 
   onSocket = (message: SocketMessage) => {
+
+    if (message.type === "frame" || message.type === "browser") {
+
+      // mirrors the server, so a reconnect retakes only what this device still had
+      if (message.type === "browser" && message.mine !== undefined) {
+
+        this.holding = message.mine;
+
+      }
+
+      for (const listener of this.liveListeners) {
+
+        listener(message);
+
+      }
+
+      return;
+
+    }
 
     if (message.type === "event") {
 
@@ -288,13 +368,19 @@ export class App extends Component<{}, AppState> {
 
     const { route, events, agents, group, models } = this.state;
 
-    if (route.name === "agent" || route.name === "details") {
+    if (route.name === "agent" || route.name === "details" || route.name === "browser") {
 
       const agent = this.agentById(route.id);
 
       if (!agent) {
 
         return <Empty text="That agent no longer exists." />;
+
+      }
+
+      if (route.name === "browser") {
+
+        return <Browser key={agent.id} agent={agent} live={this.live} onAnswer={(allow) => api<Agent>(`/agents/${agent.id}/answer`, "POST", { allow }).then(this.updateAgent).catch(this.guard)} />;
 
       }
 
