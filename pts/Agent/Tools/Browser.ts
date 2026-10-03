@@ -9,6 +9,9 @@ const LOAD_MS = 30_000;
 const MAX_SNAPSHOT = 16_000;
 const VIEWPORT = { width: 1280, height: 800 };
 
+// where a take-over lands when the agent has not opened anything yet
+const START_URL = "https://duckduckgo.com";
+
 // headless otherwise reports 800x600, which is smaller than the window the page is laid out in
 const SCREEN = { width: 1920, height: 1080 };
 
@@ -45,6 +48,9 @@ interface Tab {
 
   /** Handoffs waiting on the user; the page they need must still be there when they arrive. */
   pins: number;
+
+  /** The agent's <open> is loading; until it commits the page still reads about:blank. */
+  opening: boolean;
 
 }
 
@@ -416,7 +422,7 @@ async function tabFor(workspace: string): Promise<Tab> {
 
       }
 
-      const tab: Tab = { context, page: context.pages()[0] ?? (await context.newPage()), idle: setTimeout(() => {}, 0), watchers: new Set(), cast: null, casting: 0, hold: null, touched: false, size: VIEWPORT, pins: 0 };
+      const tab: Tab = { context, page: context.pages()[0] ?? (await context.newPage()), idle: setTimeout(() => {}, 0), watchers: new Set(), cast: null, casting: 0, hold: null, touched: false, size: VIEWPORT, pins: 0, opening: false };
 
       // a link that opens a new tab is where the agent meant to go
       context.on("page", (next) => {
@@ -582,6 +588,13 @@ export async function takeOver(workspace: string, size?: { width: number; height
 
     tab.size = { width: clamp(size.width, VIEWPORT.width), height: clamp(size.height, VIEWPORT.height) };
     await fit(tab.page, tab.size).catch(() => {});
+
+  }
+
+  // the agent's next <open> waits on the hold, so only one already loading could clash
+  if (!tab.opening && tab.page.url() === "about:blank") {
+
+    await tab.page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: LOAD_MS }).catch(() => {});
 
   }
 
@@ -759,9 +772,21 @@ function checkedUrl(url: string): string {
 export async function open(workspace: string, url: string, signal?: AbortSignal): Promise<string> {
 
   const target = checkedUrl(url);
-  const { page } = await agentTab(workspace, signal);
+  const tab = await agentTab(workspace, signal);
+  const { page } = tab;
 
-  await page.goto(target, { waitUntil: "domcontentloaded", timeout: LOAD_MS });
+  tab.opening = true;
+
+  try {
+
+    await page.goto(target, { waitUntil: "domcontentloaded", timeout: LOAD_MS });
+
+  } finally {
+
+    tab.opening = false;
+
+  }
+
   await settle(page);
 
   return snapshot(page);
