@@ -1,6 +1,6 @@
 // Tagged blocks in, tagged results out. No JSON, so nothing the model writes ever needs escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "say", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "routine", "say", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -47,6 +47,12 @@ const ALIASES: Record<string, Verb> = {
   input: "type",
 
   key: "press",
+
+  routines: "routine",
+  schedule: "routine",
+  remind: "routine",
+  cron: "routine",
+  watch: "routine",
 
   message: "say",
   tell: "say",
@@ -279,6 +285,7 @@ Put every block you already know you need in the same reply. They run top to bot
   <type>     fill a text field on the page
   <press>    press a key: Enter, Tab, Escape, ArrowDown
   <submit>   click the button that sends something — waits for the user's OK
+  <routine>  run a task on a schedule, or when something changes — bare, it lists yours
   <say>      tell the user something — the task keeps going
   <done>     final report — the only thing that ends a task
 
@@ -324,6 +331,29 @@ and to whom. The task waits until the user allows or refuses it.
 
 Prefer <run> with curl for plain fetches and APIs; use the browser when a page needs JavaScript,
 a login, or clicking through.
+
+## Routines
+
+When the user wants something done regularly, or wants to know when something changes, set a
+routine instead of promising to remember. It starts a fresh task for you each time it fires.
+
+  every weekday morning
+  <routine>
+  schedule: 0 8 * * 1-5
+  task: Summarise the five top stories on Hacker News.
+  </routine>
+
+  when the price moves
+  <routine>
+  watch: https://example.com/widget
+  every: 30
+  task: The widget page changed. If the price dropped below $50, tell the user.
+  </routine>
+
+schedule: is cron — minute hour day month weekday, server time. watch: is a URL, or a shell
+command whose output is compared, checked every: N minutes; you are woken with the lines that
+changed. Everything after task: is the task. A bare <routine> lists yours with their numbers;
+remove: 3 deletes one.
 
 ## Memory
 

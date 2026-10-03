@@ -10,7 +10,8 @@ import type { Agent, GroupMessage } from "./Store";
 // Routines reads the store, which opens its database at import
 process.env.PTS_HOME ??= mkdtempSync(join(tmpdir(), "pts-routines-"));
 
-const { cronMatches, lineChanges, parseCron, parseInterval, visibleText } = await import("./Routines");
+const { cronMatches, lineChanges, parseCron, parseInterval, routineBlock, visibleText } = await import("./Routines");
+const { createAgent, listRoutines } = await import("./Store");
 
 const at = (text: string) => new Date(text);
 
@@ -41,6 +42,32 @@ test("cron fields, steps, ranges and the day-or-weekday rule", () => {
   expect(() => parseCron("0 8 * * mon")).toThrow();
   expect(() => parseInterval("0")).toThrow();
   expect(parseInterval("5")).toBe(5);
+
+});
+
+test("an agent's routine block creates, lists and removes its own routines", () => {
+
+  const mine = createAgent(`Planner${Date.now()}`, "model-1");
+  const other = createAgent(`Other${Date.now()}`, "model-1");
+
+  expect(routineBlock(mine.id, "").text).toBe("You have no routines.");
+  expect(routineBlock(mine.id, "schedule: every morning\ntask: x").ok).toBe(false);
+  expect(routineBlock(mine.id, "schedule: 0 8 * * 1-5").ok).toBe(false);
+
+  const daily = routineBlock(mine.id, "schedule: 0 8 * * 1-5\ntask: Summarise HN.\nKeep it to five bullets.");
+  const watch = routineBlock(mine.id, "watch: curl -s https://example.com > page.txt && cat page.txt\nevery: 30\ntask: Report changes.");
+
+  expect(daily.ok && watch.ok).toBe(true);
+
+  const [first, second] = listRoutines(mine.id);
+
+  expect(first).toMatchObject({ kind: "schedule", spec: "0 8 * * 1-5", task: "Summarise HN.\nKeep it to five bullets." });
+  expect(second).toMatchObject({ kind: "watch", spec: "30", target: "curl -s https://example.com > page.txt && cat page.txt" });
+  expect(routineBlock(mine.id, "").text.split("\n").length).toBe(2);
+
+  expect(routineBlock(other.id, `remove: ${first.id}`).ok).toBe(false);
+  expect(routineBlock(mine.id, `remove: ${first.id}`).ok).toBe(true);
+  expect(listRoutines(mine.id).map((routine) => routine.id)).toEqual([second.id]);
 
 });
 

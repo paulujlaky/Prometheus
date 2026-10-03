@@ -3,6 +3,7 @@ import { BoodleClient, ChatSession } from "../../sdk/index";
 import { pageUrl } from "./Browser";
 import { execute } from "./Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
+import { routineBlock } from "../Routines";
 import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
 const MAX_STEPS = Number(process.env.PTS_MAX_STEPS ?? 60);
@@ -215,6 +216,22 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
           record("say", action.body.trim());
           results.push({ verb: "say", ok: true, text: "shown to the user" });
+          continue;
+
+        }
+
+        if (action.verb === "routine") {
+
+          const result = { verb: action.verb, ...routineBlock(agent.id, action.body) };
+
+          results.push(result);
+
+          if (!result.ok) {
+
+            break;
+
+          }
+
           continue;
 
         }

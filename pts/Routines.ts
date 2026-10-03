@@ -1,5 +1,5 @@
 import { runShell } from "./Agent/Shell";
-import { getAgentById, listRoutines, markRoutine, workspaceOf, type Agent, type Routine } from "./Store";
+import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, workspaceOf, type Agent, type Routine } from "./Store";
 
 const FIELDS = [
 
@@ -216,6 +216,112 @@ export function routineTask(routine: Routine, changes?: string): string {
   }
 
   return `[Watch: ${routine.target} changed. The user is not watching; report what matters in <done>.]\n\n${routine.task}\n\n${changes}`;
+
+}
+
+const BLOCK_KEY = /^\s*(schedule|watch|every|task|remove)\s*:\s*(.*)$/i;
+
+// an agent that schedules itself in a loop would quietly multiply its own runs
+const MAX_PER_AGENT = 20;
+
+function describe(routine: Routine): string {
+
+  const when = routine.kind === "schedule" ? `schedule ${routine.spec}` : `watch ${routine.target} every ${routine.spec} min`;
+
+  return `${routine.id}  ${when}${routine.enabled ? "" : "  (paused)"}  — ${routine.task.split("\n")[0]}`;
+
+}
+
+/**
+ * The agent's own `<routine>` block. A bare one lists its routines; `remove: 3` deletes one;
+ * `schedule:` or `watch:` + `every:` with a `task:` creates one. Everything after `task:` is the task.
+ */
+export function routineBlock(agentId: number, body: string): { ok: boolean; text: string } {
+
+  const fields = new Map<string, string>();
+
+  let task: string[] | null = null;
+
+  for (const line of body.split("\n")) {
+
+    if (task) {
+
+      task.push(line);
+      continue;
+
+    }
+
+    const match = BLOCK_KEY.exec(line);
+
+    if (!match) {
+
+      continue;
+
+    }
+
+    if (match[1].toLowerCase() === "task") {
+
+      task = [match[2]];
+      continue;
+
+    }
+
+    fields.set(match[1].toLowerCase(), match[2].trim());
+
+  }
+
+  const mine = listRoutines(agentId);
+
+  if (fields.has("remove")) {
+
+    const routine = mine.find((one) => one.id === Number(fields.get("remove")));
+
+    if (!routine) {
+
+      return { ok: false, text: `You have no routine ${fields.get("remove")}. Yours:\n${mine.map(describe).join("\n") || "none"}` };
+
+    }
+
+    deleteRoutine(routine.id);
+
+    return { ok: true, text: `removed routine ${routine.id}` };
+
+  }
+
+  if (!fields.has("schedule") && !fields.has("watch")) {
+
+    return { ok: true, text: mine.length ? mine.map(describe).join("\n") : "You have no routines." };
+
+  }
+
+  if (mine.length >= MAX_PER_AGENT) {
+
+    return { ok: false, text: `You already have ${MAX_PER_AGENT} routines. Remove one first.` };
+
+  }
+
+  const text = task?.join("\n").trim() ?? "";
+  const kind = fields.has("schedule") ? "schedule" : "watch";
+  const spec = kind === "schedule" ? fields.get("schedule")! : fields.get("every") ?? "";
+  const target = kind === "watch" ? fields.get("watch")! : "";
+
+  try {
+
+    if (!text) {
+
+      throw new Error("A routine needs a task: line saying what to do when it fires");
+
+    }
+
+    validateRoutine(kind, spec, target);
+
+  } catch (err) {
+
+    return { ok: false, text: err instanceof Error ? err.message : String(err) };
+
+  }
+
+  return { ok: true, text: `created routine ${describe(createRoutine(agentId, { kind, spec, target, task: text }))}` };
 
 }
 
