@@ -91,7 +91,7 @@ export class Group extends Component<GroupProps> {
 
         <div className="grow overflow-y-auto">
 
-          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-5 py-6 md:px-8">
+          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] py-6 md:px-8">
 
             {!messages.length && <Memo text="Everyone sees what you write here. @mention an agent to ask just them, or write to all of them at once." className="text-dim" />}
 
