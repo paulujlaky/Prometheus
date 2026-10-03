@@ -2,7 +2,7 @@
 
 import { BoodleClient } from "../sdk/index";
 
-import { runAgent } from "./Agent/Runner";
+import { runAgent, type RunEvent } from "./Agent/Runner";
 import { createAgent, getAgent, HOME, listAgents, listEvents, workspaceOf } from "./Store";
 
 const USAGE = `usage:
@@ -99,7 +99,11 @@ switch (command) {
 
     }
 
-    await runAgent(client(), agent, task.join(" "), (event) => {
+    const controller = new AbortController();
+
+    process.on("SIGINT", () => controller.abort());
+
+    const listen = (event: RunEvent) => {
 
       if (event.kind === "delta") {
 
@@ -117,7 +121,9 @@ switch (command) {
 
       console.log(`\n── ${event.kind} ──\n${event.text}\n`);
 
-    });
+    };
+
+    await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen });
 
     break;
 

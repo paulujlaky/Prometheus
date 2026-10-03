@@ -3,8 +3,11 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Queue, type AgentState } from "./Agent/Queue";
+import { runShell } from "./Agent/Shell";
 import { applyEdit, execute, relPath } from "./Agent/Tools";
 import { parseActions } from "./Agent/Protocol";
+import type { Agent } from "./Store";
 
 test("parses labelled blocks, aliases, targets and an unclosed tail", () => {
 
@@ -20,6 +23,10 @@ test("parses labelled blocks, aliases, targets and an unclosed tail", () => {
 
   expect(actions[1].body).toBe("hello");
   expect(actions[2].body).toBe("all good");
+
+  const mentioned = parseActions("I should use the `<run>` block here.\n\n<run>\nwhoami\n</run>");
+
+  expect(mentioned.map((action) => action.body)).toEqual(["whoami"]);
 
 });
 
@@ -47,5 +54,68 @@ test("paths cannot leave the workspace", async () => {
 
   expect(() => relPath("../secret", cwd)).toThrow();
   expect((await execute({ verb: "read", path: "", label: "", body: "../../etc/passwd" }, cwd)).ok).toBe(false);
+
+});
+
+test("queue caps concurrency, folds messages and stops runs", async () => {
+
+  const agent = (id: number) => ({ id, name: `a${id}` }) as Agent;
+  const finish = new Map<number, () => void>();
+  const started: string[] = [];
+  const states: [number, AgentState][] = [];
+
+  let notes: string[] = [];
+  let aborted = false;
+
+  const queue = new Queue((job, task, control) => {
+
+    started.push(`${job.id}:${task}`);
+    control.signal.addEventListener("abort", () => (aborted = true));
+
+    return new Promise<void>((resolve) => finish.set(job.id, () => {
+
+      notes = control.takeNotes();
+      resolve();
+
+    }));
+
+  }, () => {}, (id, state) => states.push([id, state]), 2);
+
+  queue.send(agent(1), "one");
+  queue.send(agent(2), "two");
+  queue.send(agent(3), "three");
+  queue.send(agent(3), "three again");
+  queue.send(agent(1), "note for one");
+
+  expect(started).toEqual(["1:one", "2:two"]);
+  expect(queue.state(3)).toBe("queued");
+
+  finish.get(1)!();
+  await Bun.sleep(0);
+
+  expect(notes).toEqual(["note for one"]);
+  expect(started).toEqual(["1:one", "2:two", "3:three\n\nthree again"]);
+
+  queue.stop(2);
+  expect(aborted).toBe(true);
+  expect(states).toContainEqual([3, "running"]);
+
+});
+
+test.skipIf(process.platform !== "linux")("commands run sandboxed in the workspace", async () => {
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  process.env.BOODLE_COOKIE = "secret-cookie";
+
+  const { output, exitCode } = await runShell("pwd; echo hi > made.txt; ls /home 2>&1; echo \"cookie=$BOODLE_COOKIE\"", cwd);
+
+  expect(exitCode).toBe(0);
+  expect(output).toContain("/work");
+  expect(output).toContain("No such file");
+  expect(output).not.toContain("secret-cookie");
+  expect(readFileSync(join(cwd, "made.txt"), "utf8")).toBe("hi\n");
+
+  expect((await runShell("sleep 5", cwd, undefined, 300)).exitCode).toBe(124);
 
 });

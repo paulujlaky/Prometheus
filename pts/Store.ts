@@ -7,7 +7,7 @@ export const HOME = process.env.PTS_HOME ?? join(homedir(), ".pts");
 
 const NAME = /^[A-Za-z][\w -]{0,31}$/;
 
-export type EventKind = "task" | "assistant" | "result" | "say" | "done" | "error";
+export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "done" | "error";
 
 export interface Agent {
 
@@ -121,6 +121,12 @@ export function createAgent(name: string, modelId: string, persona = ""): Agent 
 export function getAgent(name: string): Agent | null {
 
   return db.query<Agent, [string]>(`select ${AGENT_COLUMNS} from agents where name = ?`).get(name);
+
+}
+
+export function getAgentById(id: number): Agent | null {
+
+  return db.query<Agent, [number]>(`select ${AGENT_COLUMNS} from agents where id = ?`).get(id);
 
 }
 

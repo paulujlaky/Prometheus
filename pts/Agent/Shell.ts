@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 
 const TIMEOUT_MS = Number(process.env.PTS_CMD_TIMEOUT_MS ?? 600_000);
+const MEMORY_MAX = process.env.PTS_MEMORY_MAX ?? "1G";
+const CPU_QUOTA = process.env.PTS_CPU_QUOTA ?? "100%";
+const TASKS_MAX = process.env.PTS_TASKS_MAX ?? "512";
+
 const HEAD = 4_000;
 const TAIL = 20_000;
-
-// the agent's commands must never see the server's credentials
-const HIDDEN_ENV = ["BOODLE_COOKIE", "PTS_TOKEN"];
 
 export interface ShellResult {
 
@@ -14,32 +16,70 @@ export interface ShellResult {
 
 }
 
-function shellEnv(): NodeJS.ProcessEnv {
+/** systemd-run caps the command's cgroup; bwrap shows it only /usr, /etc and the workspace, mounted at /work. */
+function sandboxArgv(command: string, workspace: string): string[] {
 
-  const env = { ...process.env };
+  const binds = ["--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc"];
 
-  for (const key of HIDDEN_ENV) {
+  // resolv.conf is usually a symlink (systemd-resolved, WSL), and its target is not under /etc
+  const resolv = existsSync("/etc/resolv.conf") ? realpathSync("/etc/resolv.conf") : "";
 
-    delete env[key];
+  if (resolv && resolv !== "/etc/resolv.conf") {
+
+    binds.push("--ro-bind", resolv, resolv);
 
   }
 
-  return env;
+  return [
+
+    "systemd-run", "--user", "--scope", "--quiet", "--collect",
+    "-p", `MemoryMax=${MEMORY_MAX}`, "-p", "MemorySwapMax=0", "-p", `CPUQuota=${CPU_QUOTA}`, "-p", `TasksMax=${TASKS_MAX}`,
+    "--",
+
+    "bwrap",
+    ...binds,
+    "--symlink", "usr/bin", "/bin",
+    "--symlink", "usr/sbin", "/sbin",
+    "--symlink", "usr/lib", "/lib",
+    "--symlink", "usr/lib64", "/lib64",
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    "--bind", workspace, "/work",
+    "--chdir", "/work",
+    "--unshare-all", "--share-net",
+    "--die-with-parent", "--new-session",
+    "--clearenv",
+    "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+    "--setenv", "HOME", "/work",
+    "--setenv", "LANG", "C.UTF-8",
+    "--setenv", "TERM", "dumb",
+
+    "bash", "-c", command,
+
+  ];
 
 }
 
-// ponytail: unsandboxed; phase 2 wraps this in bwrap + systemd-run
-export function runShell(command: string, cwd: string, timeoutMs = TIMEOUT_MS): Promise<ShellResult> {
+export function runShell(command: string, workspace: string, signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<ShellResult> {
+
+  if (process.platform !== "linux") {
+
+    return Promise.resolve({ output: "Commands only run on Linux, where they can be sandboxed. Start pts under WSL.", exitCode: -1 });
+
+  }
 
   return new Promise((resolve) => {
 
-    // detached makes bash a process-group leader, so a timeout kills everything it started
-    const child = spawn("bash", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: shellEnv() });
+    const [bin, ...argv] = sandboxArgv(command, workspace);
+
+    // detached makes the sandbox a process-group leader; killing it takes bwrap, and --die-with-parent takes the rest
+    const child = spawn(bin, argv, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
 
     let head = "";
     let tail = "";
     let total = 0;
-    let timedOut = false;
+    let killedFor = "";
     let settled = false;
 
     // keep the head and a rolling tail: failures are explained at the end, so a plain cap loses what matters
@@ -62,27 +102,9 @@ export function runShell(command: string, cwd: string, timeoutMs = TIMEOUT_MS): 
 
     };
 
-    const done = (exitCode: number, extra = "") => {
+    const kill = (reason: string) => {
 
-      if (settled) {
-
-        return;
-
-      }
-
-      settled = true;
-      clearTimeout(timer);
-
-      const gap = total > HEAD + TAIL ? `\n\n... ${total - HEAD - TAIL} characters cut ...\n\n` : "";
-      const note = timedOut ? `\n\ntimed out after ${Math.round(timeoutMs / 1000)}s` : "";
-
-      resolve({ output: `${head}${gap}${tail}${note}${extra}`.trim(), exitCode: timedOut ? 124 : exitCode });
-
-    };
-
-    const timer = setTimeout(() => {
-
-      timedOut = true;
+      killedFor = reason;
 
       try {
 
@@ -94,12 +116,36 @@ export function runShell(command: string, cwd: string, timeoutMs = TIMEOUT_MS): 
 
       }
 
-    }, timeoutMs);
+    };
+
+    const onAbort = () => kill("stopped");
+
+    const timer = setTimeout(() => kill(`timed out after ${Math.round(timeoutMs / 1000)}s`), timeoutMs);
+
+    const done = (exitCode: number, extra = "") => {
+
+      if (settled) {
+
+        return;
+
+      }
+
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+
+      const gap = total > HEAD + TAIL ? `\n\n... ${total - HEAD - TAIL} characters cut ...\n\n` : "";
+
+      resolve({ output: `${head}${gap}${tail}${killedFor ? `\n\n${killedFor}` : ""}${extra}`.trim(), exitCode: killedFor ? 124 : exitCode });
+
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", take);
     child.stderr.on("data", take);
 
-    child.on("error", (err) => done(-1, `\n\nfailed to start bash: ${err.message}`));
+    child.on("error", (err) => done(-1, `\n\nfailed to start the sandbox: ${err.message}`));
 
     // "exit", not "close": a backgrounded grandchild can hold the pipes open forever
     child.on("exit", (code) => setTimeout(() => done(code ?? 1), 50));

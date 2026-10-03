@@ -129,7 +129,8 @@ export function parseActions(text: string): Action[] {
 
     const verb = asVerb(open[1]);
 
-    if (!verb) {
+    // "`<run>`" is the model talking about a block, not opening one
+    if (!verb || text[open.index - 1] === "`") {
 
       cursor = open.index + open[0].length;
       continue;
@@ -237,6 +238,8 @@ const GUIDE = `You are an always-on agent running on a Linux server. You have yo
 ## Replying
 
 Write a short title line, three to six words, directly above every block. Only blocks run; never describe an action instead of taking it.
+
+The chat you are in may offer built-in tools such as web search or file creation. Never call them: their results do not reach your workspace. Use the blocks below — <run> with curl reaches the web.
 
 Put every block you already know you need in the same reply. They run top to bottom and stop at the first failure. Blocks after a failure do not run — send them again once the failure is fixed.
 

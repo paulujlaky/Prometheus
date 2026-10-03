@@ -2,7 +2,7 @@ import { BoodleClient, ChatSession } from "../../sdk/index";
 
 import { execute } from "./Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
-import { addEvent, readMemory, readUserDoc, recentRuns, saveBot, workspaceOf, type Agent, type AgentEvent } from "../Store";
+import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
 const MAX_STEPS = Number(process.env.PTS_MAX_STEPS ?? 60);
 
@@ -14,7 +14,20 @@ const MAX_ACTIONS_PER_TURN = 8;
 
 const RECENT_CHARS = 300;
 
-export type RunListener = (event: AgentEvent | { kind: "delta"; text: string }) => void;
+export type RunEvent = AgentEvent | { kind: "delta"; agentId: number; text: string };
+
+export type RunListener = (event: RunEvent) => void;
+
+export interface RunControl {
+
+  signal: AbortSignal;
+
+  /** Messages the user sent while this run was going; each call takes them. */
+  takeNotes: () => string[];
+
+  listen: RunListener;
+
+}
 
 function clip(text: string, max = RECENT_CHARS): string {
 
@@ -68,8 +81,12 @@ async function ensureBot(client: BoodleClient, agent: Agent): Promise<string> {
 }
 
 /** One task, start to <done>, in a fresh chat. Everything the agent did lands in the store as it happens. */
-export async function runAgent(client: BoodleClient, agent: Agent, task: string, listen: RunListener = () => {}): Promise<void> {
+export async function runAgent(client: BoodleClient, queued: Agent, task: string, control: RunControl): Promise<void> {
 
+  // the row may have changed while this run waited in the queue, e.g. an earlier run minted the bot
+  const agent = getAgentById(queued.id) ?? queued;
+
+  const { signal, listen } = control;
   const runId = crypto.randomUUID();
   const cwd = workspaceOf(agent);
 
@@ -81,9 +98,25 @@ export async function runAgent(client: BoodleClient, agent: Agent, task: string,
 
   let session: ChatSession | null = null;
 
+  // a stop has to reach a reply that is still streaming, not just the gap between steps
+  const onAbort = () => {
+
+    session?.cancel().catch(() => {});
+    session?.dispose();
+
+  };
+
+  signal.addEventListener("abort", onAbort, { once: true });
+
   try {
 
     const assistantId = await ensureBot(client, agent);
+
+    if (signal.aborted) {
+
+      throw new Error("aborted");
+
+    }
 
     session = await ChatSession.create(client, { assistantId, refreshOnComplete: false, reuseEmpty: false });
 
@@ -91,7 +124,7 @@ export async function runAgent(client: BoodleClient, agent: Agent, task: string,
 
       if (event.type === "stream" && event.change.kind === "delta" && event.change.sectionType?.toLowerCase() !== "reasoning") {
 
-        listen({ kind: "delta", text: event.change.text });
+        listen({ kind: "delta", agentId: agent.id, text: event.change.text });
 
       }
 
@@ -101,6 +134,20 @@ export async function runAgent(client: BoodleClient, agent: Agent, task: string,
     let misses = 0;
 
     for (let step = 1; step <= MAX_STEPS; step += 1) {
+
+      const notes = control.takeNotes();
+
+      for (const note of notes) {
+
+        record("user", note);
+
+      }
+
+      if (notes.length) {
+
+        message += `\n\n[user]\nThe user sent this while you were working — take it into account:\n\n${notes.join("\n\n")}`;
+
+      }
 
       const turn = await session.send(message, { assistantId });
 
@@ -146,7 +193,13 @@ export async function runAgent(client: BoodleClient, agent: Agent, task: string,
 
         }
 
-        const result = await execute(action, cwd);
+        const result = await execute(action, cwd, signal);
+
+        if (signal.aborted) {
+
+          throw new Error("aborted");
+
+        }
 
         results.push(result);
 
@@ -177,10 +230,11 @@ export async function runAgent(client: BoodleClient, agent: Agent, task: string,
 
   } catch (err) {
 
-    record("error", err instanceof Error ? err.message : String(err));
+    record("error", signal.aborted ? "Stopped by the user." : err instanceof Error ? err.message : String(err));
 
   } finally {
 
+    signal.removeEventListener("abort", onAbort);
     session?.dispose();
 
   }

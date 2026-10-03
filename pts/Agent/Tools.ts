@@ -780,7 +780,7 @@ function bodyLines(body: string): string[] {
 }
 
 /** Every verb except say and done, which belong to the loop. Throws become failed results. */
-export async function execute(action: Action, cwd: string): Promise<Result> {
+export async function execute(action: Action, cwd: string, signal?: AbortSignal): Promise<Result> {
 
   const ok = (text: string): Result => ({ verb: action.verb, ok: true, text });
 
@@ -828,7 +828,7 @@ export async function execute(action: Action, cwd: string): Promise<Result> {
 
         }
 
-        const { output, exitCode } = await runShell(command, cwd);
+        const { output, exitCode } = await runShell(command, cwd, signal);
 
         return { verb: "run", ok: exitCode === 0, text: `exit ${exitCode}\n\n${output || "(no output)"}` };
 
