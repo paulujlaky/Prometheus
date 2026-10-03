@@ -1,6 +1,6 @@
 import { Component } from "react";
 
-import { Autosave, Bar, Button, inputClass, Section, Switch } from "./ui";
+import { Autosave, Bar, Button, Confirm, inputClass, Section, Select, Switch } from "./ui";
 
 import { api, type Agent, type Model, type Routine } from "./api";
 import { describeSchedule, describeWatch } from "./thread";
@@ -25,6 +25,9 @@ interface DetailsState {
 
   note: string;
 
+  /** The destructive action waiting on the confirm dialog. */
+  confirming: { title: string; body: string; confirm: string; run: () => void } | null;
+
 }
 
 function when(routine: Routine): string {
@@ -35,7 +38,7 @@ function when(routine: Routine): string {
 
 export class Details extends Component<DetailsProps, DetailsState> {
 
-  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, note: "" };
+  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, note: "", confirming: null };
 
   private saver = new Autosave((note) => this.flash(note));
   private noteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -83,15 +86,33 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
   patch = (changes: Partial<Pick<Agent, "persona" | "modelId">>) => api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", changes).then(this.props.onChanged);
 
-  deleteAgent = () => {
+  deleteAgent = () => this.setState({
 
-    if (confirm(`Delete ${this.props.agent.name}? Its chat and routines go too; its files stay on the server.`)) {
+    confirming: {
 
-      api(`/agents/${this.props.agent.id}`, "DELETE").then(this.props.onDeleted).catch((err) => this.flash(String(err)));
+      title: `Delete ${this.props.agent.name}?`,
+      body: "Its chat and routines go. Its files stay on the server.",
+      confirm: "Delete",
 
-    }
+      run: () => api(`/agents/${this.props.agent.id}`, "DELETE").then(this.props.onDeleted).catch((err) => this.flash(String(err))),
 
-  };
+    },
+
+  });
+
+  deleteRoutine = (routine: Routine) => this.setState({
+
+    confirming: {
+
+      title: "Delete this routine?",
+      body: routine.task.split("\n")[0],
+      confirm: "Delete",
+
+      run: () => this.routineAction(() => api(`/routines/${routine.id}`, "DELETE")),
+
+    },
+
+  });
 
   renderRoutine(routine: Routine) {
 
@@ -119,7 +140,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
           <div className="flex gap-5 pb-3 text-[14px]">
 
             <button type="button" className="text-fg" onClick={() => this.routineAction(() => api(`/routines/${routine.id}/run`, "POST")).then(() => this.flash("Started"))}>Run now</button>
-            <button type="button" className="text-dim hover:text-fg" onClick={() => this.routineAction(() => api(`/routines/${routine.id}`, "DELETE"))}>Delete</button>
+            <button type="button" className="text-danger" onClick={() => this.deleteRoutine(routine)}>Delete</button>
 
           </div>
 
@@ -134,7 +155,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
   render() {
 
     const { agent, models } = this.props;
-    const { routines, note } = this.state;
+    const { routines, note, confirming } = this.state;
 
     return (
 
@@ -146,7 +167,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
           <div className="mx-auto flex w-full max-w-lg flex-col gap-9 px-6 py-6">
 
-            <Section title="Who it is" description="Read before every task.">
+            <Section title="Who it is">
 
               <textarea rows={3} value={this.state.persona} aria-label="Who it is" onChange={(event) => { const persona = event.target.value; this.setState({ persona }); this.saver.queue("persona", () => this.patch({ persona })); }} className={inputClass} />
 
@@ -156,29 +177,39 @@ export class Details extends Component<DetailsProps, DetailsState> {
               title="Model"
               action={(
 
-                <select value={agent.modelId} aria-label="Model" onChange={(event) => this.patch({ modelId: event.target.value }).then(() => this.flash("Saved"), (err) => this.flash(String(err)))} className="max-w-48 rounded-xl border border-line bg-panel px-3 py-2.5 text-[15px] text-fg">
-
-                  {(models ?? [{ id: agent.modelId, name: "Current model" }]).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-
-                </select>
+                <Select
+                  label="Model"
+                  value={agent.modelId}
+                  options={(models ?? [{ id: agent.modelId, name: "Current model" }]).map((model) => ({ value: model.id, label: model.name }))}
+                  onChange={(modelId) => this.patch({ modelId }).then(() => this.flash("Saved"), (err) => this.flash(String(err)))}
+                />
 
               )}
-
             />
 
-            <Section title="Routines" description={routines.length ? "Tap one for more." : `None yet. Ask ${agent.name} in chat: “every weekday at 9…”.`}>
+            <Section title="Routines" description={routines.length ? undefined : "None yet. Ask in chat."}>
 
               {routines.length > 0 && <ul className="m-0 flex list-none flex-col p-0">{routines.map((routine) => this.renderRoutine(routine))}</ul>}
 
             </Section>
 
-            <Section title="Memory" description={`What ${agent.name} carries between tasks. It edits this too.`}>
+            <Section title="Memory" description="It edits this too.">
 
               <textarea rows={8} value={this.state.memory} aria-label="Memory" onChange={(event) => { const memory = event.target.value; this.setState({ memory }); this.saver.queue("memory", () => api(`/agents/${agent.id}/memory`, "PUT", { text: memory })); }} className={`${inputClass} font-mono text-[13px]`} />
 
             </Section>
 
-            <Section title="Delete agent" description="Its chat and routines go; its files stay." action={<Button onClick={this.deleteAgent}>Delete</Button>} />
+            <Section title="Delete agent" action={<Button tone="danger" onClick={this.deleteAgent}>Delete</Button>} />
+
+            <Confirm
+              open={Boolean(confirming)}
+              title={confirming?.title ?? ""}
+              body={confirming?.body}
+              confirm={confirming?.confirm ?? "OK"}
+              danger
+              onCancel={() => this.setState({ confirming: null })}
+              onConfirm={() => { confirming?.run(); this.setState({ confirming: null }); }}
+            />
 
           </div>
 

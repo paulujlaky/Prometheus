@@ -90,7 +90,7 @@ export function groupTask(agent: Agent, agents: Agent[], recent: GroupMessage[],
     `[Group thread. You share it with the user${others.length ? ` and the other agents: ${others.join(", ")}` : ""}.]`,
     history ? `Recent messages:\n\n${history}` : "",
     `New message from ${message.author}:\n\n${message.text}`,
-    `Your <done> is posted to the thread as your reply, so write it for everyone there. To hand part of the work to another agent, @mention them by name in your <done> and say exactly what you need. Mention no one you do not need.`,
+    `Your <done> is posted to the thread as your reply, so keep it to a sentence, like a message in a group chat. To hand part of the work to another agent, @mention them in it and say what you need. Mention no one you do not need.`,
     `If your part has to wait for another agent's result, do nothing yet: reply with only <done>wait</done>. Nothing is posted, and you are woken when they @mention you.`,
 
   ].filter(Boolean).join("\n\n");

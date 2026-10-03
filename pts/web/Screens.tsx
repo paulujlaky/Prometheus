@@ -1,7 +1,7 @@
 import { Component, createRef, type FormEvent } from "react";
 
 import { Composer } from "./Chat";
-import { Autosave, Bar, Button, Field, inputClass, Memo, Section, Torch } from "./ui";
+import { Autosave, Bar, Button, Field, inputClass, Memo, Section, Select, Torch } from "./ui";
 
 import { api, enablePush, pushEnabled, type Account, type Agent, type GroupMessage, type Model } from "./api";
 
@@ -193,17 +193,14 @@ export class NewAgent extends Component<NewAgentProps, { name: string; modelId: 
 
           </Field>
 
-          <Field label="Model">
+          <div className="flex flex-col gap-2">
 
-            <select value={this.state.modelId || models?.[0]?.id || ""} onChange={(event) => this.setState({ modelId: event.target.value })} disabled={!models} className={inputClass}>
+            <span className="text-[14px] text-dim">Model</span>
+            <Select label="Model" wide disabled={!models} value={this.state.modelId || models?.[0]?.id || ""} options={(models ?? []).map((model) => ({ value: model.id, label: model.name }))} onChange={(modelId) => this.setState({ modelId })} />
 
-              {(models ?? []).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+          </div>
 
-            </select>
-
-          </Field>
-
-          <Field label="Who it is" hint="A line or two. You can change it later.">
+          <Field label="Who it is">
 
             <textarea rows={3} value={this.state.persona} onChange={(event) => this.setState({ persona: event.target.value })} placeholder="A careful research assistant. Checks sources and says when it isn’t sure." className={inputClass} />
 
@@ -293,7 +290,6 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
   render() {
 
     const { account, push, note } = this.state;
-    const who = account?.name ?? account?.email;
 
     return (
 
@@ -305,7 +301,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
           <div className="mx-auto flex w-full max-w-lg flex-col gap-9 px-6 py-6">
 
-            <Section title="Boodle" description={account?.set ? `Connected${who ? ` as ${who}` : ""}. Paste a new cookie if agents start failing.` : "Paste the Cookie header from a signed-in box.boodle.ai tab."}>
+            <Section title="Boodle" description={account?.set ? "Connected" : "Paste your Boodle cookie"}>
 
               <div className="flex gap-2">
 
@@ -318,17 +314,17 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
             <Section
               title="Notifications"
-              description={push ? "On for this device." : "When an agent finishes or needs your OK."}
-              action={push ? <span className="text-[14px] text-dim">On</span> : <Button onClick={() => this.attempt(async () => { await enablePush(); this.setState({ push: true }); }, "Notifications on")}>Turn on</Button>}
+              description={push ? "On" : "Off"}
+              action={push ? undefined : <Button onClick={() => this.attempt(async () => { await enablePush(); this.setState({ push: true }); }, "Notifications on")}>Turn on</Button>}
             />
 
-            <Section title="About you" description="Every agent reads this before each task.">
+            <Section title="About you" description="Shared with every agent">
 
               <textarea rows={6} value={this.state.user} aria-label="About you" placeholder="Name, time zone, how you like answers…" onChange={(event) => { const text = event.target.value; this.setState({ user: text }); this.saver.queue("user", () => api("/user", "PUT", { text })); }} className={inputClass} />
 
             </Section>
 
-            <Section title="Sign out" description="Only on this device; agents keep working." action={<Button onClick={this.props.onSignOut}>Sign out</Button>} />
+            <Section title="Sign out" action={<Button onClick={this.props.onSignOut}>Sign out</Button>} />
 
           </div>
 
