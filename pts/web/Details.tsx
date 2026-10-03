@@ -95,30 +95,38 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
     return (
 
-      <Section title="Look">
+      <Section title="Look" description={NAMES[shape]} action={<Glyph glyph={this.props.agent.glyph} size={52} live />}>
 
-        <div role="radiogroup" aria-label="Shape" className="grid grid-cols-4 gap-2">
+        {/* shapes and colours share one 8-column grid, so every swatch sits under a shape and both rows span the section edge to edge */}
+        <div className="grid grid-cols-8 gap-y-2">
 
-          {SHAPES.map((option) => (
+          <div role="radiogroup" aria-label="Shape" className="contents">
 
-            <button key={option} type="button" role="radio" aria-checked={option === shape} onClick={() => this.setGlyph(`${option}:${color}`)} className={`flex flex-col items-center gap-2 rounded-xl py-3 ${option === shape ? "bg-raised" : "hover:bg-panel"}`}>
+            {SHAPES.map((option) => (
 
-              <Glyph glyph={`${option}:${color}`} size={48} live={option === shape} />
-              <span className={`text-[12px] ${option === shape ? "text-fg" : "text-dim"}`}>{NAMES[option]}</span>
+              <button key={option} type="button" role="radio" aria-checked={option === shape} aria-label={NAMES[option]} title={NAMES[option]} onClick={() => this.setGlyph(`${option}:${color}`)} className={`flex aspect-square items-center justify-center rounded-xl ${option === shape ? "bg-raised" : "hover:bg-panel"}`}>
 
-            </button>
+                <Glyph glyph={`${option}:${color}`} size={34} />
 
-          ))}
+              </button>
 
-        </div>
+            ))}
 
-        <div role="radiogroup" aria-label="Colour" className="flex flex-wrap justify-center gap-3 pt-1">
+          </div>
 
-          {COLORS.map((option) => (
+          <div role="radiogroup" aria-label="Colour" className="contents">
 
-            <button key={option} type="button" role="radio" aria-checked={option === color} aria-label={option} title={option} onClick={() => this.setGlyph(`${shape}:${option}`)} className={`size-8 rounded-full ${option === color ? "ring-2 ring-fg ring-offset-2 ring-offset-ink" : ""}`} style={{ background: PALETTE[option] }} />
+            {COLORS.map((option) => (
 
-          ))}
+              <button key={option} type="button" role="radio" aria-checked={option === color} aria-label={option} title={option} onClick={() => this.setGlyph(`${shape}:${option}`)} className="flex aspect-square items-center justify-center rounded-xl hover:bg-panel">
+
+                <span className={`size-6 rounded-full ${option === color ? "ring-2 ring-fg ring-offset-2 ring-offset-ink" : ""}`} style={{ background: PALETTE[option] }} />
+
+              </button>
+
+            ))}
+
+          </div>
 
         </div>
 

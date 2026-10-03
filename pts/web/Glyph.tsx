@@ -191,9 +191,9 @@ export function Glyph({ glyph, size = 32, live = false }: GlyphProps) {
 
   return (
 
-    <span aria-hidden="true" className={`glyph glyph-${shape} ${live ? "is-live" : ""}`} style={{ width: size, height: size, borderRadius: Math.round(size * 0.32), background: `${hex}24`, color: hex }}>
+    <span aria-hidden="true" className={`glyph glyph-${shape} ${live ? "is-live" : ""}`} style={{ width: size, height: size, color: hex }}>
 
-      <svg viewBox="0 0 24 24" width={Math.round(size * 0.82)} height={Math.round(size * 0.82)}>{DRAWINGS[shape]}</svg>
+      <svg viewBox="0 0 24 24" width={size} height={size} overflow="visible">{DRAWINGS[shape]}</svg>
 
     </span>
 
@@ -206,9 +206,9 @@ export function EveryoneGlyph({ size = 32 }: { size?: number }) {
 
   return (
 
-    <span aria-hidden="true" className="glyph bg-raised text-dim" style={{ width: size, height: size, borderRadius: Math.round(size * 0.32) }}>
+    <span aria-hidden="true" className="glyph text-dim" style={{ width: size, height: size }}>
 
-      <Users size={Math.round(size * 0.55)} strokeWidth={1.8} />
+      <Users size={Math.round(size * 0.78)} strokeWidth={1.7} />
 
     </span>
 
