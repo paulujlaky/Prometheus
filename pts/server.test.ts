@@ -72,6 +72,30 @@ test("agents can be created, changed, remembered and deleted", async () => {
 
 });
 
+test("routines are validated, edited and removed; the group needs a cookie", async () => {
+
+  const agent = await (await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "Router", modelId: "model-1" }) })).json();
+  const create = (routine: object) => call(`/api/agents/${agent.id}/routines`, { method: "POST", body: JSON.stringify(routine) });
+
+  expect((await create({ kind: "schedule", spec: "every morning", task: "x" })).status).toBe(400);
+  expect((await create({ kind: "watch", spec: "5", task: "x" })).status).toBe(400);
+
+  const routine = await (await create({ kind: "watch", spec: "5", target: "https://example.com", task: "Tell me what changed" })).json();
+
+  expect(routine).toMatchObject({ kind: "watch", enabled: true, lastOutput: null });
+
+  const paused = await (await call(`/api/routines/${routine.id}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) })).json();
+
+  expect(paused.enabled).toBe(false);
+  expect((await (await call(`/api/agents/${agent.id}/routines`)).json()).length).toBe(1);
+  expect((await call(`/api/routines/${routine.id}`, { method: "DELETE" })).status).toBe(200);
+  expect((await call(`/api/routines/${routine.id}`, { method: "DELETE" })).status).toBe(404);
+
+  expect((await call("/api/group", { method: "POST", body: JSON.stringify({ text: "hi all" }) })).status).toBe(503);
+  expect(await (await call("/api/group")).json()).toEqual([]);
+
+});
+
 test("push hands out a stable VAPID key", async () => {
 
   const first = await (await call("/api/push")).json();

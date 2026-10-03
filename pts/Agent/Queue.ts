@@ -1,4 +1,5 @@
 import type { RunControl, RunListener } from "./Runner";
+import type { Origin } from "../Group";
 import type { Agent } from "../Store";
 
 const MAX_RUNNING = Number(process.env.PTS_MAX_RUNNING ?? 3);
@@ -8,12 +9,14 @@ const ANSWER_MS = Number(process.env.PTS_ANSWER_MS ?? 30 * 60_000);
 
 export type AgentState = "idle" | "queued" | "running" | "waiting";
 
-export type StartRun = (agent: Agent, task: string, control: RunControl) => Promise<void>;
+export type StartRun = (agent: Agent, task: string, control: RunControl, origin?: Origin) => Promise<unknown>;
 
 interface Job {
 
   agent: Agent;
   task: string;
+
+  origin?: Origin;
 
 }
 
@@ -23,6 +26,8 @@ interface Slot {
   notes: string[];
 
   pending: { question: string; answer: (allow: boolean) => void } | null;
+
+  origin?: Origin;
 
 }
 
@@ -45,6 +50,19 @@ export class Queue {
     }
 
     return this.waiting.some((job) => job.agent.id === agentId) ? "queued" : "idle";
+
+  }
+
+  /** Already running or queued for this group chain, so a hand-off to it would only repeat the work. */
+  busyIn(agentId: number, chain: number): boolean {
+
+    if (this.running.get(agentId)?.origin?.chain === chain) {
+
+      return true;
+
+    }
+
+    return this.waiting.some((job) => job.agent.id === agentId && job.origin?.chain === chain);
 
   }
 
@@ -83,18 +101,19 @@ export class Queue {
   }
 
   /** A fresh run. Two waiting for the same agent fold into one, since the agent would only see them back to back. */
-  enqueue(agent: Agent, task: string) {
+  enqueue(agent: Agent, task: string, origin?: Origin) {
 
     const queued = this.waiting.find((job) => job.agent.id === agent.id);
 
     if (queued) {
 
       queued.task += `\n\n${task}`;
+      queued.origin ??= origin;
       return;
 
     }
 
-    this.waiting.push({ agent, task });
+    this.waiting.push({ agent, task, origin });
     this.onState(agent.id, "queued");
     this.pump();
 
@@ -129,7 +148,7 @@ export class Queue {
       }
 
       const [job] = this.waiting.splice(index, 1);
-      const slot: Slot = { controller: new AbortController(), notes: [], pending: null };
+      const slot: Slot = { controller: new AbortController(), notes: [], pending: null, origin: job.origin };
       const id = job.agent.id;
 
       this.running.set(job.agent.id, slot);
@@ -160,7 +179,7 @@ export class Queue {
 
       const control: RunControl = { signal: slot.controller.signal, takeNotes: () => slot.notes.splice(0), listen: this.listen, ask };
 
-      this.start(job.agent, job.task, control).catch(() => {}).finally(() => {
+      this.start(job.agent, job.task, control, job.origin).catch(() => {}).finally(() => {
 
         this.running.delete(job.agent.id);
 

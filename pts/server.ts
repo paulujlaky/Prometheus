@@ -6,13 +6,16 @@ import { BoodleClient, parseSession } from "../sdk/index";
 
 import { closeAll } from "./Agent/Browser";
 import { Queue, type AgentState } from "./Agent/Queue";
-import { runAgent, type RunEvent } from "./Agent/Runner";
+import { runAgent, type RunControl, type RunEvent } from "./Agent/Runner";
+import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "./Group";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
-import { createAgent, deleteAgent, deletePushSub, getAgentById, listAgents, listEvents, readCookie, readMemory, readUserDoc, savePushSub, updateAgent, writeCookie, writeMemory, writeUserDoc, type Agent } from "./Store";
+import { routineTask, startScheduler, validateRoutine } from "./Routines";
+import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeUserDoc, type Agent } from "./Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
 const SESSION_COOKIE = "pts_session";
+const RECENT_GROUP = 20;
 const TOPIC = "events";
 
 if (TOKEN.length < 24) {
@@ -73,6 +76,12 @@ function onRunEvent(event: RunEvent) {
 
   const name = getAgentById(event.agentId)?.name ?? "An agent";
 
+  if (event.kind === "done" && isWaiting(event.text)) {
+
+    return;
+
+  }
+
   if (event.kind === "done" || event.kind === "ask") {
 
     notify({ title: event.kind === "ask" ? `${name} needs your OK` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
@@ -99,7 +108,61 @@ function onRunEvent(event: RunEvent) {
 
 }
 
-const queue = new Queue((agent, task, control) => runAgent(boodle(), agent, task, control), onRunEvent, (agentId: number, state: AgentState) => broadcast({ type: "state", agentId, state }));
+/** Saves and shows a thread message, then wakes whoever it routes to. */
+function postGroup(author: string, agentId: number | null, text: string, origin: Origin | null = null) {
+
+  const recent = listGroupMessages(RECENT_GROUP);
+  const message = addGroupMessage(author, agentId, text);
+  const agents = listAgents();
+
+  broadcast({ type: "group", message });
+
+  const next = route(message, agents, origin);
+
+  if ("capped" in next) {
+
+    // posted directly: routed like a user message, the note would wake everyone
+    broadcast({ type: "group", message: addGroupMessage("system", null, `Hand-off limit reached (${MAX_HOPS} in a row). @mention an agent to keep going.`) });
+    return;
+
+  }
+
+  for (const agent of next.recipients) {
+
+    if (agentId !== null && queue.busyIn(agent.id, next.origin.chain)) {
+
+      continue;
+
+    }
+
+    queue.enqueue(agent, groupTask(agent, agents, recent, message), next.origin);
+
+  }
+
+}
+
+async function start(agent: Agent, task: string, control: RunControl, origin?: Origin) {
+
+  const end = await runAgent(boodle(), agent, task, control);
+
+  if (!origin || end.text === "Stopped by the user." || isWaiting(end.text)) {
+
+    return;
+
+  }
+
+  if (end.kind === "done") {
+
+    postGroup(agent.name, agent.id, end.text, origin);
+    return;
+
+  }
+
+  broadcast({ type: "group", message: addGroupMessage(agent.name, agent.id, `Could not finish: ${end.text}`) });
+
+}
+
+const queue = new Queue(start, onRunEvent, (agentId: number, state: AgentState) => broadcast({ type: "state", agentId, state }));
 
 function view(agent: Agent) {
 
@@ -298,6 +361,24 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
   }
 
+  if (action === "routines" && method === "GET") {
+
+    return json(listRoutines(agent.id));
+
+  }
+
+  if (action === "routines" && method === "POST") {
+
+    const input = await body<{ kind?: unknown; spec?: unknown; target?: unknown; task?: unknown }>(req);
+    const spec = text(input.spec, "spec").trim();
+    const target = input.target === undefined ? "" : text(input.target, "target").trim();
+
+    validateRoutine(input.kind, spec, target);
+
+    return json(createRoutine(agent.id, { kind: input.kind as "schedule" | "watch", spec, target, task: text(input.task, "task").trim() }), 201);
+
+  }
+
   throw new HttpError(404, "Not found");
 
 }
@@ -351,6 +432,82 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
   if (match) {
 
     return agentRoute(req, url, agentOr404(Number(match[1])), match[2]);
+
+  }
+
+  const routineMatch = /^\/api\/routines\/(\d+)(\/run)?$/.exec(path);
+
+  if (routineMatch) {
+
+    const routine = getRoutine(Number(routineMatch[1]));
+
+    if (!routine) {
+
+      throw new HttpError(404, "No such routine");
+
+    }
+
+    if (routineMatch[2] && method === "POST") {
+
+      // a watch run by hand skips the check and just does its task
+      queue.enqueue(agentOr404(routine.agentId), routineTask({ ...routine, kind: "schedule" }));
+
+      return json({ ok: true });
+
+    }
+
+    if (method === "DELETE") {
+
+      deleteRoutine(routine.id);
+
+      return json({ ok: true });
+
+    }
+
+    if (method === "PATCH") {
+
+      const changes = await body<{ spec?: unknown; target?: unknown; task?: unknown; enabled?: unknown }>(req);
+      const spec = changes.spec === undefined ? undefined : text(changes.spec, "spec").trim();
+      const target = changes.target === undefined ? undefined : text(changes.target, "target").trim();
+
+      if (changes.enabled !== undefined && typeof changes.enabled !== "boolean") {
+
+        throw new HttpError(400, "enabled must be true or false");
+
+      }
+
+      validateRoutine(routine.kind, spec ?? routine.spec, target ?? routine.target);
+      updateRoutine(routine.id, { spec, target, task: changes.task === undefined ? undefined : text(changes.task, "task"), enabled: changes.enabled as boolean | undefined });
+
+      return json(getRoutine(routine.id));
+
+    }
+
+  }
+
+  if (method === "GET" && path === "/api/group") {
+
+    const limit = Math.min(500, Number(url.searchParams.get("limit") ?? 200));
+    const before = Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
+
+    return json(listGroupMessages(limit, before));
+
+  }
+
+  if (method === "POST" && path === "/api/group") {
+
+    const message = text((await body<{ text?: unknown }>(req)).text, "text").trim();
+
+    if (!message) {
+
+      throw new HttpError(400, "text is empty");
+
+    }
+
+    boodle();
+    postGroup("user", null, message);
+
+    return json({ ok: true }, 201);
 
   }
 
@@ -487,6 +644,8 @@ if (import.meta.main) {
     process.on(signal, () => closeAll().finally(() => process.exit(0)));
 
   }
+
+  startScheduler((agent, task) => queue.enqueue(agent, task));
 
   console.log(`pts listening on http://localhost:${server.port}`);
 

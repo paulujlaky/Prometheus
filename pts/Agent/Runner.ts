@@ -87,8 +87,8 @@ async function ensureBot(client: BoodleClient, agent: Agent): Promise<string> {
 
 }
 
-/** One task, start to <done>, in a fresh chat. Everything the agent did lands in the store as it happens. */
-export async function runAgent(client: BoodleClient, queued: Agent, task: string, control: RunControl): Promise<void> {
+/** One task, start to <done>, in a fresh chat. Everything lands in the store as it happens; resolves with the ending event. */
+export async function runAgent(client: BoodleClient, queued: Agent, task: string, control: RunControl): Promise<AgentEvent> {
 
   // the row may have changed while this run waited in the queue, e.g. an earlier run minted the bot
   const agent = getAgentById(queued.id) ?? queued;
@@ -97,7 +97,15 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
   const runId = crypto.randomUUID();
   const cwd = workspaceOf(agent);
 
-  const record = (kind: AgentEvent["kind"], text: string) => listen(addEvent(agent.id, runId, kind, text));
+  const record = (kind: AgentEvent["kind"], text: string) => {
+
+    const event = addEvent(agent.id, runId, kind, text);
+
+    listen(event);
+
+    return event;
+
+  };
 
   const recent = recentRuns(agent.id).map((run) => `- ${new Date(run.at).toISOString().slice(0, 16).replace("T", " ")} — ${clip(run.task)} → ${clip(run.outcome) || "no outcome"}`);
 
@@ -168,8 +176,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         if (misses >= MAX_MISSES) {
 
-          record("error", `${misses} replies in a row had no block, so nothing could run.`);
-          return;
+          return record("error", `${misses} replies in a row had no block, so nothing could run.`);
 
         }
 
@@ -198,8 +205,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         if (action.verb === "done") {
 
-          record("done", action.body.trim() || "Done.");
-          return;
+          return record("done", action.body.trim() || "Done.");
 
         }
 
@@ -286,11 +292,11 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
     }
 
-    record("error", `Stopped after ${MAX_STEPS} steps without <done>.`);
+    return record("error", `Stopped after ${MAX_STEPS} steps without <done>.`);
 
   } catch (err) {
 
-    record("error", signal.aborted ? "Stopped by the user." : err instanceof Error ? err.message : String(err));
+    return record("error", signal.aborted ? "Stopped by the user." : err instanceof Error ? err.message : String(err));
 
   } finally {
 

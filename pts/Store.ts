@@ -71,10 +71,63 @@ db.exec(`
     endpoint text primary key,
     json text not null
   );
+
+  create table if not exists routines (
+    id integer primary key,
+    agent_id integer not null references agents(id) on delete cascade,
+    kind text not null,
+    spec text not null,
+    target text not null default '',
+    task text not null,
+    enabled integer not null default 1,
+    last_output text,
+    last_at integer
+  );
+
+  create table if not exists group_messages (
+    id integer primary key,
+    author text not null,
+    agent_id integer,
+    text text not null,
+    at integer not null
+  );
 `);
 
 const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, created_at as createdAt";
 const EVENT_COLUMNS = "id, agent_id as agentId, run_id as runId, kind, text, at";
+const ROUTINE_COLUMNS = "id, agent_id as agentId, kind, spec, target, task, enabled, last_output as lastOutput, last_at as lastAt";
+const GROUP_COLUMNS = "id, author, agent_id as agentId, text, at";
+
+/** `schedule` runs on a cron spec; `watch` checks `target` every `spec` minutes and runs only when it changes. */
+export interface Routine {
+
+  id: number;
+  agentId: number;
+
+  kind: "schedule" | "watch";
+  spec: string;
+  target: string;
+  task: string;
+
+  enabled: boolean;
+
+  lastOutput: string | null;
+  lastAt: number | null;
+
+}
+
+/** `author` is "user", "system" or the agent's name; `agentId` is set only for agents. */
+export interface GroupMessage {
+
+  id: number;
+  author: string;
+  agentId: number | null;
+
+  text: string;
+
+  at: number;
+
+}
 
 /** The folder an agent's commands run in. Its name is the agent's, lower-cased, so it reads well in a shell. */
 export function workspaceOf(agent: Pick<Agent, "name">): string {
@@ -249,5 +302,81 @@ export function recentRuns(agentId: number, runs = 6): { task: string; outcome: 
   }
 
   return [...byRun.values()];
+
+}
+
+type RoutineRow = Omit<Routine, "enabled"> & { enabled: number };
+
+function routineOf(row: RoutineRow): Routine {
+
+  return { ...row, enabled: row.enabled === 1 };
+
+}
+
+export function listRoutines(agentId?: number): Routine[] {
+
+  const rows = agentId === undefined
+    ? db.query<RoutineRow, []>(`select ${ROUTINE_COLUMNS} from routines order by id`).all()
+    : db.query<RoutineRow, [number]>(`select ${ROUTINE_COLUMNS} from routines where agent_id = ? order by id`).all(agentId);
+
+  return rows.map(routineOf);
+
+}
+
+export function getRoutine(id: number): Routine | null {
+
+  const row = db.query<RoutineRow, [number]>(`select ${ROUTINE_COLUMNS} from routines where id = ?`).get(id);
+
+  return row && routineOf(row);
+
+}
+
+export function createRoutine(agentId: number, input: Pick<Routine, "kind" | "spec" | "target" | "task">): Routine {
+
+  const row = db.query<RoutineRow, [number, string, string, string, string]>(`insert into routines (agent_id, kind, spec, target, task) values (?, ?, ?, ?, ?) returning ${ROUTINE_COLUMNS}`).get(agentId, input.kind, input.spec, input.target, input.task)!;
+
+  return routineOf(row);
+
+}
+
+/** A changed spec or target starts the watch over, so the next check sets a fresh baseline instead of waking the agent. */
+export function updateRoutine(id: number, changes: Partial<Pick<Routine, "spec" | "target" | "task" | "enabled">>) {
+
+  const reset = changes.spec !== undefined || changes.target !== undefined;
+
+  db.query(`
+    update routines set
+      spec = coalesce(?, spec),
+      target = coalesce(?, target),
+      task = coalesce(?, task),
+      enabled = coalesce(?, enabled),
+      last_output = case when ? then null else last_output end
+    where id = ?
+  `).run(changes.spec ?? null, changes.target ?? null, changes.task ?? null, changes.enabled === undefined ? null : Number(changes.enabled), reset ? 1 : 0, id);
+
+}
+
+export function markRoutine(id: number, lastOutput: string | null, lastAt: number) {
+
+  db.query("update routines set last_output = coalesce(?, last_output), last_at = ? where id = ?").run(lastOutput, lastAt, id);
+
+}
+
+export function deleteRoutine(id: number) {
+
+  db.query("delete from routines where id = ?").run(id);
+
+}
+
+export function addGroupMessage(author: string, agentId: number | null, text: string): GroupMessage {
+
+  return db.query<GroupMessage, [string, number | null, string, number]>(`insert into group_messages (author, agent_id, text, at) values (?, ?, ?, ?) returning ${GROUP_COLUMNS}`).get(author, agentId, text, Date.now())!;
+
+}
+
+/** The newest `limit` messages before `before`, oldest first. */
+export function listGroupMessages(limit = 200, before = Number.MAX_SAFE_INTEGER): GroupMessage[] {
+
+  return db.query<GroupMessage, [number, number]>(`select * from (select ${GROUP_COLUMNS} from group_messages where id < ? order by id desc limit ?) order by id`).all(before, limit);
 
 }
