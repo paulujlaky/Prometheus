@@ -66,6 +66,11 @@ db.exec(`
   );
 
   create index if not exists events_by_agent on events(agent_id, id);
+
+  create table if not exists push_subs (
+    endpoint text primary key,
+    json text not null
+  );
 `);
 
 const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, created_at as createdAt";
@@ -90,9 +95,36 @@ export function readUserDoc(): string {
 
 }
 
+export function writeUserDoc(text: string) {
+
+  writeFileSync(join(HOME, "USER.md"), text);
+
+}
+
 export function readMemory(agent: Agent): string {
 
   return readOr(join(workspaceOf(agent), "MEMORY.md"), "");
+
+}
+
+export function writeMemory(agent: Agent, text: string) {
+
+  writeFileSync(join(workspaceOf(agent), "MEMORY.md"), text);
+
+}
+
+const COOKIE_FILE = join(HOME, "cookie");
+
+/** Pasted in the PWA, it outlives restarts; the env var is only the first-boot default. */
+export function readCookie(): string | null {
+
+  return readOr(COOKIE_FILE, "").trim() || process.env.BOODLE_COOKIE?.trim() || null;
+
+}
+
+export function writeCookie(cookie: string) {
+
+  writeFileSync(COOKIE_FILE, cookie.trim(), { mode: 0o600 });
 
 }
 
@@ -130,6 +162,19 @@ export function getAgentById(id: number): Agent | null {
 
 }
 
+export function updateAgent(id: number, changes: { modelId?: string; persona?: string }) {
+
+  db.query("update agents set model_id = coalesce(?, model_id), persona = coalesce(?, persona) where id = ?").run(changes.modelId ?? null, changes.persona ?? null, id);
+
+}
+
+/** The workspace stays on disk: an agent's files are worth more than the row that pointed at them. */
+export function deleteAgent(id: number) {
+
+  db.query("delete from agents where id = ?").run(id);
+
+}
+
 export function listAgents(): Agent[] {
 
   return db.query<Agent, []>(`select ${AGENT_COLUMNS} from agents order by name`).all();
@@ -148,9 +193,28 @@ export function addEvent(agentId: number, runId: string, kind: EventKind, text: 
 
 }
 
-export function listEvents(agentId: number, limit = 200): AgentEvent[] {
+/** The newest `limit` events before `before`, oldest first — a page of chat history scrolling upward. */
+export function listEvents(agentId: number, limit = 200, before = Number.MAX_SAFE_INTEGER): AgentEvent[] {
 
-  return db.query<AgentEvent, [number, number]>(`select * from (select ${EVENT_COLUMNS} from events where agent_id = ? order by id desc limit ?) order by id`).all(agentId, limit);
+  return db.query<AgentEvent, [number, number, number]>(`select * from (select ${EVENT_COLUMNS} from events where agent_id = ? and id < ? order by id desc limit ?) order by id`).all(agentId, before, limit);
+
+}
+
+export function listPushSubs(): string[] {
+
+  return db.query<{ json: string }, []>("select json from push_subs").all().map((row) => row.json);
+
+}
+
+export function savePushSub(endpoint: string, json: string) {
+
+  db.query("insert into push_subs (endpoint, json) values (?, ?) on conflict (endpoint) do update set json = excluded.json").run(endpoint, json);
+
+}
+
+export function deletePushSub(endpoint: string) {
+
+  db.query("delete from push_subs where endpoint = ?").run(endpoint);
 
 }
 
