@@ -2,6 +2,7 @@
 
 import { BoodleClient } from "../sdk/index";
 
+import { closeAll } from "./Agent/Browser";
 import { runAgent, type RunEvent } from "./Agent/Runner";
 import { createAgent, getAgent, HOME, listAgents, listEvents, workspaceOf } from "./Store";
 
@@ -123,7 +124,10 @@ switch (command) {
 
     };
 
-    await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen });
+    await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen, ask: async (question) => confirm(`\n${question}\nAllow?`) });
+
+    // the browser keeps the process alive until its contexts close
+    await closeAll();
 
     break;
 

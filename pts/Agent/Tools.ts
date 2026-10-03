@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
+import * as browser from "./Browser";
 import { runShell } from "./Shell";
 import { parsePairs, type Action, type Result } from "./Protocol";
 
@@ -833,6 +834,26 @@ export async function execute(action: Action, cwd: string, signal?: AbortSignal)
         return { verb: "run", ok: exitCode === 0, text: `exit ${exitCode}\n\n${output || "(no output)"}` };
 
       }
+
+      case "open":
+
+        return ok(await browser.open(cwd, action.path || bodyLines(action.body)[0] || ""));
+
+      case "look":
+
+        return ok(await browser.look(cwd));
+
+      case "click":
+
+        return ok(await browser.click(cwd, action.path || bodyLines(action.body)[0] || ""));
+
+      case "type":
+
+        return ok(await browser.type(cwd, action.path, action.body));
+
+      case "press":
+
+        return ok(await browser.press(cwd, action.path || bodyLines(action.body)[0] || ""));
 
       default:
 

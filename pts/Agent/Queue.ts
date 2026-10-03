@@ -3,7 +3,10 @@ import type { Agent } from "../Store";
 
 const MAX_RUNNING = Number(process.env.PTS_MAX_RUNNING ?? 3);
 
-export type AgentState = "idle" | "queued" | "running";
+// a run waiting on the user still holds one of the MAX_RUNNING slots, so an unanswered question must end
+const ANSWER_MS = Number(process.env.PTS_ANSWER_MS ?? 30 * 60_000);
+
+export type AgentState = "idle" | "queued" | "running" | "waiting";
 
 export type StartRun = (agent: Agent, task: string, control: RunControl) => Promise<void>;
 
@@ -19,6 +22,8 @@ interface Slot {
   controller: AbortController;
   notes: string[];
 
+  pending: { question: string; answer: (allow: boolean) => void } | null;
+
 }
 
 /** At most MAX_RUNNING agents think at once, one run per agent; everything else waits its turn in arrival order. */
@@ -31,13 +36,33 @@ export class Queue {
 
   state(agentId: number): AgentState {
 
-    if (this.running.has(agentId)) {
+    const slot = this.running.get(agentId);
 
-      return "running";
+    if (slot) {
+
+      return slot.pending ? "waiting" : "running";
 
     }
 
     return this.waiting.some((job) => job.agent.id === agentId) ? "queued" : "idle";
+
+  }
+
+  /** The approval this agent is waiting on, if any. */
+  question(agentId: number): string | null {
+
+    return this.running.get(agentId)?.pending?.question ?? null;
+
+  }
+
+  /** False when nothing was waiting, e.g. the question already timed out. */
+  answer(agentId: number, allow: boolean): boolean {
+
+    const pending = this.running.get(agentId)?.pending;
+
+    pending?.answer(allow);
+
+    return Boolean(pending);
 
   }
 
@@ -80,6 +105,7 @@ export class Queue {
     const before = this.waiting.length;
 
     this.waiting = this.waiting.filter((job) => job.agent.id !== agentId);
+    this.answer(agentId, false);
     this.running.get(agentId)?.controller.abort();
 
     if (before !== this.waiting.length && !this.running.has(agentId)) {
@@ -103,12 +129,36 @@ export class Queue {
       }
 
       const [job] = this.waiting.splice(index, 1);
-      const slot: Slot = { controller: new AbortController(), notes: [] };
+      const slot: Slot = { controller: new AbortController(), notes: [], pending: null };
+      const id = job.agent.id;
 
       this.running.set(job.agent.id, slot);
       this.onState(job.agent.id, "running");
 
-      const control: RunControl = { signal: slot.controller.signal, takeNotes: () => slot.notes.splice(0), listen: this.listen };
+      const ask = (question: string) => new Promise<boolean>((resolve) => {
+
+        const timer = setTimeout(() => slot.pending?.answer(false), ANSWER_MS);
+
+        slot.pending = {
+
+          question,
+
+          answer: (allow) => {
+
+            clearTimeout(timer);
+            slot.pending = null;
+            this.onState(id, "running");
+            resolve(allow);
+
+          },
+
+        };
+
+        this.onState(id, "waiting");
+
+      });
+
+      const control: RunControl = { signal: slot.controller.signal, takeNotes: () => slot.notes.splice(0), listen: this.listen, ask };
 
       this.start(job.agent, job.task, control).catch(() => {}).finally(() => {
 

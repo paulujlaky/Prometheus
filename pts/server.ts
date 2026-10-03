@@ -4,6 +4,7 @@ import type { ServerWebSocket } from "bun";
 
 import { BoodleClient, parseSession } from "../sdk/index";
 
+import { closeAll } from "./Agent/Browser";
 import { Queue, type AgentState } from "./Agent/Queue";
 import { runAgent, type RunEvent } from "./Agent/Runner";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
@@ -72,9 +73,9 @@ function onRunEvent(event: RunEvent) {
 
   const name = getAgentById(event.agentId)?.name ?? "An agent";
 
-  if (event.kind === "done") {
+  if (event.kind === "done" || event.kind === "ask") {
 
-    notify({ title: name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
+    notify({ title: event.kind === "ask" ? `${name} needs your OK` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
     return;
 
   }
@@ -102,7 +103,7 @@ const queue = new Queue((agent, task, control) => runAgent(boodle(), agent, task
 
 function view(agent: Agent) {
 
-  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, createdAt: agent.createdAt, state: queue.state(agent.id) };
+  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id) };
 
 }
 
@@ -250,6 +251,26 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
     // fail now rather than queue a run that can only error once it starts
     boodle();
     queue.send(agent, message);
+
+    return json(view(agent));
+
+  }
+
+  if (action === "answer" && method === "POST") {
+
+    const { allow } = await body<{ allow?: unknown }>(req);
+
+    if (typeof allow !== "boolean") {
+
+      throw new HttpError(400, "allow must be true or false");
+
+    }
+
+    if (!queue.answer(agent.id, allow)) {
+
+      throw new HttpError(409, "Nothing is waiting for an answer");
+
+    }
 
     return json(view(agent));
 
@@ -459,6 +480,13 @@ export const server = Bun.serve({
 });
 
 if (import.meta.main) {
+
+  // closing the browser writes each agent's logins to its workspace; a hard kill would lose the latest
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+
+    process.on(signal, () => closeAll().finally(() => process.exit(0)));
+
+  }
 
   console.log(`pts listening on http://localhost:${server.port}`);
 

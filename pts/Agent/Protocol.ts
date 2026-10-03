@@ -1,6 +1,6 @@
 // Tagged blocks in, tagged results out. No JSON, so nothing the model writes ever needs escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "say", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "say", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -13,7 +13,6 @@ const ALIASES: Record<string, Verb> = {
   dir: "ls",
 
   cat: "read",
-  open: "read",
   view: "read",
 
   search: "grep",
@@ -35,6 +34,19 @@ const ALIASES: Record<string, Verb> = {
   shell: "run",
   exec: "run",
   command: "run",
+
+  goto: "open",
+  visit: "open",
+  navigate: "open",
+  browse: "open",
+
+  snapshot: "look",
+  page: "look",
+
+  fill: "type",
+  input: "type",
+
+  key: "press",
 
   message: "say",
   tell: "say",
@@ -261,6 +273,12 @@ Put every block you already know you need in the same reply. They run top to bot
   <write>    create a file, or replace one entirely
   <delete>   remove files
   <run>      a shell command: curl, python, git, scripts — anything installed
+  <open>     load a web page in your browser and see it
+  <look>     see the page your browser is on now
+  <click>    click an element on the page
+  <type>     fill a text field on the page
+  <press>    press a key: Enter, Tab, Escape, ArrowDown
+  <submit>   click the button that sends something — waits for the user's OK
   <say>      tell the user something — the task keeps going
   <done>     final report — the only thing that ends a task
 
@@ -277,6 +295,36 @@ A tag takes a target: <read notes.md>, <grep notes>, <edit notes.md>.
   # Hello
   </write>
 
+## Browser
+
+You have a real browser that keeps its logins between tasks. A page comes back as an outline of
+its elements, each with a ref like [ref=e12]. Act on an element by its ref; refs change whenever
+the page does, so use the ones from the latest outline.
+
+  find the search box
+  <open https://news.ycombinator.com>
+  </open>
+
+  search for agents
+  <type e14>
+  ai agents
+  </type>
+
+  run the search
+  <press Enter>
+  </press>
+
+Anything that sends, posts, books, buys or messages someone on the user's behalf is a <submit>,
+never a <click>. Put the button's ref on the tag and, in the body, one line saying what it sends
+and to whom. The task waits until the user allows or refuses it.
+
+  <submit e31>
+  Book a table for 2 at Nopa, Friday 7pm, under the user's name
+  </submit>
+
+Prefer <run> with curl for plain fetches and APIs; use the browser when a page needs JavaScript,
+a login, or clicking through.
+
 ## Memory
 
 MEMORY.md in your workspace is your long-term memory. It is shown to you at the start of every task; nothing else carries over between tasks. When you learn something worth keeping — a preference, an account, a standing commitment, where you left something — edit MEMORY.md in the same reply. Keep it short and current, and delete what has gone stale.
@@ -288,7 +336,7 @@ MEMORY.md in your workspace is your long-term memory. It is shown to you at the 
   Use <ls>, <read> and <grep> to look at files. <run> is for everything else.
   Commands get no input, so anything that prompts fails. Pass flags like -y instead.
   Do the task and only the task. When it is done, end with <done> in that same reply —
-  but never in a reply whose <run>, <read>, <grep> or <ls> output you have not seen yet.
+  but never in a reply whose output you have not seen yet: <run>, <read>, <grep>, <ls> or a page.
   Lead <done> with one sentence of the outcome, then a bullet per thing done or found.
   Keep <say> and <done> short and plain: everyday words, no preamble.
   If you are blocked on something only the user can do, say exactly what you need in <done>.`;

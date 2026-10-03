@@ -1,5 +1,6 @@
 import { BoodleClient, ChatSession } from "../../sdk/index";
 
+import { pageUrl } from "./Browser";
 import { execute } from "./Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
 import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, workspaceOf, type Agent, type AgentEvent } from "../Store";
@@ -14,7 +15,8 @@ const MAX_ACTIONS_PER_TURN = 8;
 
 const RECENT_CHARS = 300;
 
-const LOOKING = new Set(["run", "read", "grep", "ls"]);
+// verbs whose output the model has to see before it can honestly report
+const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "submit"]);
 
 export type RunEvent = AgentEvent | { kind: "delta"; agentId: number; text: string };
 
@@ -26,6 +28,9 @@ export interface RunControl {
 
   /** Messages the user sent while this run was going; each call takes them. */
   takeNotes: () => string[];
+
+  /** Parks the run until the user allows or refuses; resolves false on stop or timeout. */
+  ask: (question: string) => Promise<boolean>;
 
   listen: RunListener;
 
@@ -208,7 +213,41 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         }
 
-        const result = await execute(action, cwd, signal);
+        if (action.verb === "submit") {
+
+          const what = action.body.trim();
+
+          if (!action.path || !what) {
+
+            results.push({ verb: "submit", ok: false, text: "submit needs the button's ref on the tag and one line saying what it sends:\n\n  <submit e31>\n  Send the reply to Sam\n  </submit>" });
+            break;
+
+          }
+
+          const question = `${what}\n${pageUrl(cwd)}`;
+
+          record("ask", question);
+
+          const allowed = await control.ask(question);
+
+          if (signal.aborted) {
+
+            throw new Error("aborted");
+
+          }
+
+          record("user", allowed ? "Allowed." : "Not allowed.");
+
+          if (!allowed) {
+
+            results.push({ verb: "submit", ok: false, text: "The user did not allow this. Do not send it another way. If the task cannot go on without it, say so in <done>." });
+            break;
+
+          }
+
+        }
+
+        const result = await execute(action.verb === "submit" ? { ...action, verb: "click" } : action, cwd, signal);
 
         if (signal.aborted) {
 
@@ -216,7 +255,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         }
 
-        results.push(result);
+        results.push({ ...result, verb: action.verb });
 
         // a failed block usually invalidates the ones behind it; let the model look first
         if (!result.ok) {

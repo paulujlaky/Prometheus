@@ -3,10 +3,11 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { closeAll } from "./Agent/Browser";
 import { Queue, type AgentState } from "./Agent/Queue";
 import { runShell } from "./Agent/Shell";
 import { applyEdit, execute, relPath } from "./Agent/Tools";
-import { parseActions } from "./Agent/Protocol";
+import { parseActions, type Action } from "./Agent/Protocol";
 import type { Agent } from "./Store";
 
 test("parses labelled blocks, aliases, targets and an unclosed tail", () => {
@@ -119,3 +120,84 @@ test.skipIf(process.platform !== "linux")("commands run sandboxed in the workspa
   expect((await runShell("sleep 5", cwd, undefined, 300)).exitCode).toBe(124);
 
 });
+
+test("a run asking for approval waits, then hears the answer or a stop", async () => {
+
+  const agent = { id: 7, name: "a7" } as Agent;
+  const answers: boolean[] = [];
+
+  let asked = Promise.resolve();
+
+  const queue = new Queue((_, __, control) => {
+
+    asked = (async () => {
+
+      answers.push(await control.ask("Send it?"));
+      answers.push(await control.ask("And this?"));
+
+    })();
+
+    return asked;
+
+  }, () => {}, () => {}, 1);
+
+  queue.send(agent, "go");
+
+  expect(queue.state(7)).toBe("waiting");
+  expect(queue.question(7)).toBe("Send it?");
+  expect(queue.answer(7, true)).toBe(true);
+
+  await Bun.sleep(0);
+
+  expect(queue.question(7)).toBe("And this?");
+
+  queue.stop(7);
+  await asked;
+
+  expect(answers).toEqual([true, false]);
+  expect(queue.answer(7, true)).toBe(false);
+
+});
+
+test.skipIf(process.platform !== "linux")("the browser opens, reads, types and clicks by ref", async () => {
+
+  const site = Bun.serve({
+
+    port: 0,
+
+    fetch(req) {
+
+      const name = new URL(req.url).searchParams.get("name");
+      const page = name ? `<h1>Hello ${name}</h1>` : `<form><label>Name <input name="name"></label><button>Greet</button></form>`;
+
+      return new Response(`<!doctype html><title>Greeter</title>${page}`, { headers: { "Content-Type": "text/html" } });
+
+    },
+
+  });
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+  const run = (verb: Action["verb"], path = "", body = "") => execute({ verb, path, label: "", body }, cwd);
+
+  try {
+
+    expect((await run("open", "file:///etc/passwd")).ok).toBe(false);
+
+    const opened = await run("open", `http://localhost:${site.port}/`);
+    const ref = (role: string) => /\[ref=(e\d+)\]/.exec(opened.text.split("\n").find((line) => line.includes(role))!)![1];
+
+    expect(opened.text).toContain("Greeter");
+    expect((await run("type", ref("textbox"), "Ada")).ok).toBe(true);
+
+    const greeted = await run("click", ref("button"));
+
+    expect(greeted.text).toContain("Hello Ada");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
