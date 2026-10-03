@@ -380,6 +380,13 @@ async function follow(tab: Tab, page: Page) {
   await fit(page, tab.size).catch(() => {});
   recast(tab);
 
+  // a crashed renderer (out of memory, usually) streams nothing and hangs startScreencast; closing it moves on to a fresh page
+  page.on("crash", () => {
+
+    page.close().catch(() => {});
+
+  });
+
   // a sign-in popup closes itself when done; the agent carries on in the page it came from
   page.on("close", () => {
 
