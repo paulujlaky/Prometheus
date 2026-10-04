@@ -1,8 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 
-import { userZone } from "../../Store";
-
 const TIMEOUT_MS = Number(process.env.PTS_CMD_TIMEOUT_MS ?? 600_000);
 const MEMORY_MAX = process.env.PTS_MEMORY_MAX ?? "1G";
 const CPU_QUOTA = process.env.PTS_CPU_QUOTA ?? "100%";
@@ -19,7 +17,7 @@ export interface ShellResult {
 }
 
 /** systemd-run caps the command's cgroup; bwrap shows it only /usr, /etc and the workspace, mounted at /work. */
-function sandboxArgv(command: string, workspace: string): string[] {
+function sandboxArgv(command: string, workspace: string, zone?: string): string[] {
 
   const binds = ["--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc"];
 
@@ -58,7 +56,7 @@ function sandboxArgv(command: string, workspace: string): string[] {
     "--setenv", "TERM", "dumb",
 
     // date in the sandbox should agree with the clock schedules run on
-    "--setenv", "TZ", userZone(),
+    ...(zone ? ["--setenv", "TZ", zone] : []),
 
     "bash", "-c", command,
 
@@ -66,7 +64,8 @@ function sandboxArgv(command: string, workspace: string): string[] {
 
 }
 
-export function runShell(command: string, workspace: string, signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<ShellResult> {
+/** `zone` is the user's time zone; taken as an argument so this module never opens the store. */
+export function runShell(command: string, workspace: string, signal?: AbortSignal, timeoutMs = TIMEOUT_MS, zone?: string): Promise<ShellResult> {
 
   if (process.platform !== "linux") {
 
@@ -76,7 +75,7 @@ export function runShell(command: string, workspace: string, signal?: AbortSigna
 
   return new Promise((resolve) => {
 
-    const [bin, ...argv] = sandboxArgv(command, workspace);
+    const [bin, ...argv] = sandboxArgv(command, workspace, zone);
 
     // detached makes the sandbox a process-group leader; killing it takes bwrap, and --die-with-parent takes the rest
     const child = spawn(bin, argv, { detached: true, stdio: ["ignore", "pipe", "pipe"] });

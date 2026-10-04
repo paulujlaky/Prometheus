@@ -236,7 +236,7 @@ export async function observe(routine: Routine, agent: Agent): Promise<string> {
 
   }
 
-  const { output, exitCode } = await runShell(routine.target, workspaceOf(agent), undefined, CHECK_TIMEOUT_MS);
+  const { output, exitCode } = await runShell(routine.target, workspaceOf(agent), undefined, CHECK_TIMEOUT_MS, userZone());
 
   return `exit ${exitCode}\n${output}`.slice(0, MAX_OUTPUT);
 

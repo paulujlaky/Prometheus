@@ -330,7 +330,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         }
 
-        const result = await execute(action.verb === "submit" ? { ...action, verb: "click" } : action, cwd, signal);
+        const result = await execute(action.verb === "submit" ? { ...action, verb: "click" } : action, cwd, signal, userZone());
 
         if (signal.aborted) {
 

@@ -823,7 +823,8 @@ export const server = Bun.serve({
 
 });
 
-if (import.meta.main) {
+// not import.meta.main: pm2 loads the file through its own wrapper, which made that false and left the scheduler off
+if (process.env.NODE_ENV !== "test") {
 
   // closing the browser writes each agent's logins to its workspace; a hard kill would lose the latest
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
