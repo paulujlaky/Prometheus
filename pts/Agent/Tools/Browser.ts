@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { freemem, loadavg, totalmem } from "node:os";
 import { join } from "node:path";
 
 import { chromium, type BrowserContext, type CDPSession, type Page } from "playwright";
@@ -29,12 +31,13 @@ type Watcher = (frame: Buffer | null) => void;
 
 interface Tab {
 
+  workspace: string;
+
   context: BrowserContext;
   page: Page;
 
   idle: ReturnType<typeof setTimeout>;
 
-  watchers: Set<Watcher>;
   cast: CDPSession | null;
 
   // bumped by every recast, so a slower earlier one that finishes late knows to back out
@@ -58,6 +61,24 @@ interface Tab {
 }
 
 const tabs = new Map<string, Promise<Tab>>();
+
+// kept apart from the tab, so viewers carry on streaming when a wedged browser is restarted under them
+const viewers = new Map<string, Set<Watcher>>();
+
+function watchersOf(workspace: string): Set<Watcher> {
+
+  let set = viewers.get(workspace);
+
+  if (!set) {
+
+    set = new Set();
+    viewers.set(workspace, set);
+
+  }
+
+  return set;
+
+}
 
 let fallback = false;
 
@@ -356,7 +377,7 @@ export async function close(workspace: string, force = false) {
   }
 
   // someone looking at, holding or about to be handed the browser counts as using it
-  if (!force && (tab.watchers.size || tab.hold || tab.pins)) {
+  if (!force && (watchersOf(workspace).size || tab.hold || tab.pins)) {
 
     keepAlive(workspace, tab);
     return;
@@ -366,7 +387,86 @@ export async function close(workspace: string, force = false) {
   tabs.delete(workspace);
   clearTimeout(tab.idle);
 
-  await tab.context.close().catch(() => {});
+  await shutDown(tab);
+
+}
+
+/** A wedged Chromium never answers the close, so after a few seconds it is killed instead. */
+async function shutDown(tab: Tab) {
+
+  await bounded(tab.context.close(), 5000).catch(() => {
+
+    if (process.platform === "linux") {
+
+      // every Chromium process of this profile, the browser and its renderers, carries its profile path
+      spawnSync("pkill", ["-KILL", "-f", "--", `--user-data-dir=${profilePath(tab.workspace).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`]);
+
+    }
+
+  });
+
+}
+
+/** One line on how the machine and its browsers are doing, for the log when a browser stops answering. */
+function health(): string {
+
+  const memory = `free memory ${Math.round(freemem() / 2 ** 20)} of ${Math.round(totalmem() / 2 ** 20)} MB, load ${loadavg().map((load) => load.toFixed(1)).join(" ")}`;
+
+  if (process.platform !== "linux") {
+
+    return memory;
+
+  }
+
+  const rows = (spawnSync("ps", ["-eo", "stat=,pcpu=,rss=,comm="], { encoding: "utf8" }).stdout ?? "").split("\n").filter((row) => /chrom/i.test(row)).map((row) => row.trim().split(/\s+/));
+  const states = rows.reduce<Record<string, number>>((count, [stat]) => ({ ...count, [stat[0]]: (count[stat[0]] ?? 0) + 1 }), {});
+  const rss = rows.reduce((sum, [, , kb]) => sum + Number(kb), 0);
+  const cpu = rows.reduce((sum, [, pcpu]) => sum + Number(pcpu), 0);
+
+  return `${memory}; ${rows.length} Chromium processes using ${Math.round(rss / 1024)} MB and ${cpu.toFixed(0)}% CPU, by state ${JSON.stringify(states)}`;
+
+}
+
+const restarting = new WeakSet<Tab>();
+
+/** Chromium itself stopped answering, so no fresh tab can help: it is restarted on the same profile, logins and all. */
+async function restart(tab: Tab) {
+
+  if (restarting.has(tab) || (await tabs.get(tab.workspace)?.catch(() => null)) !== tab) {
+
+    return;
+
+  }
+
+  restarting.add(tab);
+  console.warn(`browser: Chromium for ${tab.page.url()} stopped answering; restarting it. ${health()}`);
+
+  tabs.delete(tab.workspace);
+  clearTimeout(tab.idle);
+
+  // taken off first, so the close does not hand the agent a browser the user still holds
+  const hold = tab.hold;
+  const url = tab.page.url();
+
+  tab.hold = null;
+
+  await shutDown(tab);
+
+  const next = await tabFor(tab.workspace);
+
+  if (url !== "about:blank") {
+
+    await next.page.goto(url, { waitUntil: "domcontentloaded", timeout: LOAD_MS }).catch(() => {});
+
+  }
+
+  if (hold) {
+
+    next.hold = hold;
+    next.size = tab.size;
+    await bounded(fit(next.page, next.size), ACTION_MS).catch(() => {});
+
+  }
 
 }
 
@@ -407,10 +507,17 @@ async function revive(tab: Tab, stuck: Page) {
 
   const url = stuck.url();
 
-  console.warn(`browser: ${url} stopped responding; opening it again in a fresh tab`);
+  console.warn(`browser: ${url} stopped responding; opening it again in a fresh tab. ${health()}`);
 
   // the context's "page" event makes the fresh page the tab's before newPage resolves, so the close below does not open another
-  const fresh = await tab.context.newPage();
+  const fresh = await bounded(tab.context.newPage(), ACTION_MS).catch(() => null);
+
+  if (!fresh) {
+
+    await restart(tab);
+    return;
+
+  }
 
   await bounded(stuck.close({ runBeforeUnload: false }), ACTION_MS).catch(() => {});
 
@@ -480,7 +587,7 @@ async function tabFor(workspace: string): Promise<Tab> {
 
       }
 
-      const tab: Tab = { context, page: context.pages()[0] ?? (await context.newPage()), idle: setTimeout(() => {}, 0), watchers: new Set(), cast: null, casting: 0, hold: null, touched: false, size: VIEWPORT, pins: 0, opening: false };
+      const tab: Tab = { workspace, context, page: context.pages()[0] ?? (await context.newPage()), idle: setTimeout(() => {}, 0), cast: null, casting: 0, hold: null, touched: false, size: VIEWPORT, pins: 0, opening: false };
 
       // a link that opens a new tab is where the agent meant to go
       context.on("page", (next) => {
@@ -534,7 +641,7 @@ async function recast(tab: Tab) {
   // a hung page never answers the detach, and waiting on it would leave the new page unstreamed
   await bounded(old?.detach() ?? Promise.resolve(), 1000).catch(() => {});
 
-  if (!tab.watchers.size || tab.page.isClosed()) {
+  if (!watchersOf(tab.workspace).size || tab.page.isClosed()) {
 
     return;
 
@@ -543,7 +650,7 @@ async function recast(tab: Tab) {
   const page = tab.page;
   const cdp = await tab.context.newCDPSession(page);
 
-  if (turn !== tab.casting || !tab.watchers.size) {
+  if (turn !== tab.casting || !watchersOf(tab.workspace).size) {
 
     await cdp.detach().catch(() => {});
     return;
@@ -556,7 +663,7 @@ async function recast(tab: Tab) {
 
     const frame = page.url() === "about:blank" ? null : Buffer.from(data, "base64");
 
-    for (const watcher of tab.watchers) {
+    for (const watcher of watchersOf(tab.workspace)) {
 
       watcher(frame);
 
@@ -601,10 +708,11 @@ export async function pinned<T>(workspace: string, work: () => Promise<T>): Prom
 export async function watch(workspace: string, watcher: Watcher): Promise<() => void> {
 
   const tab = await tabFor(workspace);
+  const watchers = watchersOf(workspace);
 
-  tab.watchers.add(watcher);
+  watchers.add(watcher);
 
-  if (tab.watchers.size === 1) {
+  if (watchers.size === 1) {
 
     await recast(tab);
 
@@ -625,15 +733,20 @@ export async function watch(workspace: string, watcher: Watcher): Promise<() => 
 
   return () => {
 
-    tab.watchers.delete(watcher);
+    watchers.delete(watcher);
 
-    if (!tab.watchers.size) {
+    // the browser may have been restarted since; it is the current one that stops streaming
+    void tabs.get(workspace)?.then((current) => {
 
-      recast(tab);
+      if (!watchers.size) {
 
-    }
+        recast(current);
 
-    keepAlive(workspace, tab);
+      }
+
+      keepAlive(workspace, current);
+
+    }).catch(() => {});
 
   };
 
@@ -780,7 +893,7 @@ async function perform(page: Page, event: Input, at: (x: number, y: number) => r
 /** The agent's way in: waits out a take-over, then refuses ref-based actions the user may have made stale. */
 async function agentTab(workspace: string, signal?: AbortSignal, refs = false): Promise<Tab> {
 
-  const tab = await tabFor(workspace);
+  let tab = await tabFor(workspace);
 
   while (tab.hold) {
 
@@ -798,6 +911,9 @@ async function agentTab(workspace: string, signal?: AbortSignal, refs = false): 
       throw new Error("aborted");
 
     }
+
+    // a browser restarted during the take-over is a different tab now
+    tab = await tabFor(workspace);
 
   }
 
@@ -836,7 +952,7 @@ async function snapshot(tab: Tab): Promise<string> {
     const stuck = tab.page;
     const answers = await bounded(stuck.evaluate(() => true), 3000).catch(() => false);
 
-    console.warn(`browser: reading ${stuck.url()} failed (${String(err).split("\n")[0]}); the page ${answers ? "still answers" : "does not answer"}`);
+    console.warn(`browser: reading ${stuck.url()} failed (${String(err).split("\n")[0]}); the page ${answers ? "still answers" : "does not answer"}. ${health()}`);
 
     if (answers) {
 
@@ -845,9 +961,26 @@ async function snapshot(tab: Tab): Promise<string> {
     }
 
     await revive(tab, stuck);
-    await settle(tab.page);
 
-    return read(tab.page);
+    const current = await tabFor(tab.workspace);
+
+    await settle(current.page);
+
+    try {
+
+      return await read(current.page);
+
+    } catch {
+
+      await restart(current);
+
+      const restarted = await tabFor(tab.workspace);
+
+      await settle(restarted.page);
+
+      return read(restarted.page);
+
+    }
 
   }
 
@@ -974,7 +1107,12 @@ export async function closeAll() {
     const tab = await tabs.get(workspace)?.catch(() => null);
 
     tabs.delete(workspace);
-    await tab?.context.close().catch(() => {});
+
+    if (tab) {
+
+      await shutDown(tab);
+
+    }
 
   }));
 
