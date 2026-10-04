@@ -46,15 +46,22 @@ function clip(text: string, max = RECENT_CHARS): string {
 
 }
 
-/** The agent's bot, re-minted only when its persona or model changes. Memory rides in each task instead. */
+/** The agent's bot, re-minted when its persona or model changes, or when that bot is gone. Memory rides in each task instead. */
 async function ensureBot(client: BoodleClient, agent: Agent): Promise<string> {
 
   const instructions = botInstructions(agent.name, agent.persona);
   const hash = Bun.hash(`${agent.modelId}\n${instructions}`).toString(36);
 
+  // a delete in Boodle leaves the stored id behind, so reuse it only while the bot is still listed
   if (agent.botAssistantId && agent.botHash === hash) {
 
-    return agent.botAssistantId;
+    const { entries } = await client.listCustomBotDrafts();
+
+    if (entries.some((entry) => entry.published?.id === agent.botAssistantId)) {
+
+      return agent.botAssistantId;
+
+    }
 
   }
 
