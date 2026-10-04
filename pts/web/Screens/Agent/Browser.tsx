@@ -33,6 +33,12 @@ const TAP_SLOP = 8;
 // keys a phone keyboard reports while composing; the text arrives through the change event instead
 const PASSIVE_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "Unidentified", "Process", "Dead", "Backspace"]);
 
+function needsYou(agent: Agent): boolean {
+
+  return agent.state === "waiting" && agent.waitingOn === "handoff";
+
+}
+
 /** One agent's browser, live. Watching is free; taking over pauses the agent's browser work until it is handed back. */
 export class Browser extends Component<BrowserProps, BrowserState> {
 
@@ -53,7 +59,18 @@ export class Browser extends Component<BrowserProps, BrowserState> {
     this.unsubscribe = this.props.live.subscribe(this.onLive);
     this.props.live.send({ live: "watch", agentId: this.props.agent.id });
 
-    if (this.props.agent.state === "waiting" && this.props.agent.waitingOn === "handoff") {
+    if (needsYou(this.props.agent)) {
+
+      this.take();
+
+    }
+
+  }
+
+  componentDidUpdate(previous: BrowserProps) {
+
+    // a handoff asked for while the user is already looking is theirs at once
+    if (needsYou(this.props.agent) && !needsYou(previous.agent) && !this.state.mine) {
 
       this.take();
 
@@ -80,7 +97,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     if (event.type === "frame") {
 
-      // straight onto the element: ten frames a second through state would re-render for nothing
+      // straight onto the element: several frames a second through state would re-render for nothing
       const previous = this.shown;
 
       this.shown = URL.createObjectURL(event.data);
@@ -103,7 +120,17 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     }
 
-    this.setState((state) => ({ ready: state.ready || !!event.blank, blank: event.blank ?? state.blank, mine: event.mine ?? state.mine, error: event.error ?? state.error }));
+    this.setState((state) => ({
+
+      ready: state.ready || !!event.blank,
+      blank: event.blank ?? state.blank,
+      mine: event.mine ?? state.mine,
+      error: event.error ?? state.error,
+
+      // what was typed belonged to a hold that has ended
+      typed: event.mine === false ? "" : state.typed,
+
+    }));
 
     // over a live page an error is a passing notice; before the first frame it is all there is to show, so it stays
     if (event.error && this.state.ready) {
@@ -164,8 +191,8 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     requestAnimationFrame(() => {
 
-      const { x, y, dx, dy } = this.scroll;
       const cap = (value: number) => Math.max(-10, Math.min(10, value));
+      const { x, y, dx, dy } = this.scroll;
 
       this.scroll = { x, y, dx: 0, dy: 0, queued: false };
       this.input({ kind: "scroll", x, y, dx: cap(dx), dy: cap(dy) });
@@ -194,13 +221,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     const press = this.press;
 
-    if (!press) {
-
-      return;
-
-    }
-
-    if (!press.moved && Math.hypot(event.clientX - press.startX, event.clientY - press.startY) < TAP_SLOP) {
+    if (!press || (!press.moved && Math.hypot(event.clientX - press.startX, event.clientY - press.startY) < TAP_SLOP)) {
 
       return;
 
@@ -333,7 +354,6 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     const { agent } = this.props;
     const { ready, blank, mine, error, typed } = this.state;
-    const handoff = agent.state === "waiting" && agent.waitingOn === "handoff";
 
     return (
 
@@ -355,7 +375,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
           )}
         />
 
-        {handoff && (
+        {needsYou(agent) && (
 
           <div className="mx-[23px] mb-3 flex items-center gap-4 rounded-2xl bg-panel px-4 py-3 md:mx-8">
 

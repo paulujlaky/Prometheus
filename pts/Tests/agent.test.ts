@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeAll, handBack, input, takeOver, watch } from "../Agent/Tools/Browser";
+import { close, closeAll, handBack, input, look, open, takeOver, watch } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
 import { runShell } from "../Agent/Tools/Shell";
 import { applyEdit, execute, relPath } from "../Agent/Tools/Tools";
@@ -225,23 +225,30 @@ test.skipIf(process.platform !== "linux")("a watched browser streams, and a take
   const cwd = mkdtempSync(join(tmpdir(), "pts-"));
   const run = (verb: Action["verb"], path = "") => execute({ verb, path, label: "", body: "" }, cwd);
   const frames: Buffer[] = [];
+  const failures: string[] = [];
 
   try {
 
     const opened = await run("open", `http://localhost:${site.port}/`);
     const link = /\[ref=(e\d+)\]/.exec(opened.text.split("\n").find((line) => line.includes("link"))!)![1];
-    const stop = await watch(cwd, (frame) => frame && frames.push(frame));
+    const stop = watch(cwd, { frame: (frame) => frame && frames.push(frame), fail: (message) => failures.push(message) });
 
-    for (let i = 0; i < 50 && !frames.length; i += 1) {
-
-      await Bun.sleep(100);
-
-    }
+    await until(() => frames.length > 0);
 
     // a JPEG starts FF D8
     expect([...frames[0].subarray(0, 2)]).toEqual([0xff, 0xd8]);
 
+    // a static page sends no new frames, so a second viewer is handed the latest at once
+    const second: (Buffer | null)[] = [];
+    const stopSecond = watch(cwd, { frame: (frame) => second.push(frame), fail: () => {} });
+
+    expect(second.length).toBe(1);
+    stopSecond();
+
     await takeOver(cwd, { width: 400, height: 700 });
+
+    // a phone gets frames of its own width
+    await until(() => widthOf(frames[frames.length - 1]) === 400);
 
     let settled = false;
     const held = run("click", link).finally(() => (settled = true));
@@ -258,8 +265,201 @@ test.skipIf(process.platform !== "linux")("a watched browser streams, and a take
 
     expect(result.ok).toBe(false);
     expect(result.text).toContain("Hello Grace");
+    expect(failures).toEqual([]);
 
     stop();
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
+async function until(ready: () => boolean) {
+
+  for (let i = 0; i < 100 && !ready(); i += 1) {
+
+    await Bun.sleep(100);
+
+  }
+
+  expect(ready()).toBe(true);
+
+}
+
+/** A baseline JPEG's width sits in its SOF0 segment. */
+function widthOf(jpeg: Buffer): number {
+
+  const at = jpeg.indexOf(Buffer.from([0xff, 0xc0]));
+
+  return at === -1 ? 0 : jpeg.readUInt16BE(at + 7);
+
+}
+
+function chromePid(cwd: string): number {
+
+  return Number(readlinkSync(join(cwd, ".browser", "SingletonLock")).split("-").pop());
+
+}
+
+/** Gone, or a zombie waiting to be reaped. */
+function dead(pid: number): boolean {
+
+  return !existsSync(`/proc/${pid}/stat`) || readFileSync(`/proc/${pid}/stat`, "utf8").includes(") Z ");
+
+}
+
+function page(title: string, body = "") {
+
+  return new Response(`<!doctype html><title>${title}</title><h1>${title}</h1>${body}`, { headers: { "Content-Type": "text/html" } });
+
+}
+
+test.skipIf(process.platform !== "linux")("a Chromium that dies is replaced on the next use", async () => {
+
+  const site = Bun.serve({ port: 0, fetch: () => page("Alive") });
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    expect(await open(cwd, `http://localhost:${site.port}/`)).toContain("Alive");
+
+    process.kill(-chromePid(cwd), "SIGKILL");
+    await Bun.sleep(500);
+
+    await expect(look(cwd)).rejects.toThrow(/No page is open|closed unexpectedly/);
+    expect(await open(cwd, `http://localhost:${site.port}/`)).toContain("Alive");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
+test.skipIf(process.platform !== "linux")("a frozen Chromium is killed instead of waited on, and another agent's browser carries on", async () => {
+
+  const site = Bun.serve({ port: 0, fetch: () => page("Fine") });
+  const url = `http://localhost:${site.port}/`;
+  const frozen = mkdtempSync(join(tmpdir(), "pts-"));
+  const other = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    await Promise.all([open(frozen, url), open(other, url)]);
+
+    const pid = chromePid(frozen);
+
+    process.kill(-pid, "SIGSTOP");
+
+    const started = Date.now();
+    const stuck = look(frozen).then(() => "answered", (err: Error) => err.message);
+
+    expect(await look(other)).toContain("Fine");
+    expect(await stuck).toContain("restarted");
+    expect(Date.now() - started).toBeLessThan(25_000);
+    await until(() => dead(pid));
+
+    expect(await open(frozen, url)).toContain("Fine");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 90_000);
+
+test.skipIf(process.platform !== "linux")("closing a frozen Chromium kills it within seconds", async () => {
+
+  const site = Bun.serve({ port: 0, fetch: () => page("Stuck") });
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    await open(cwd, `http://localhost:${site.port}/`);
+
+    const pid = chromePid(cwd);
+
+    process.kill(-pid, "SIGSTOP");
+
+    const started = Date.now();
+
+    await close(cwd);
+
+    expect(Date.now() - started).toBeLessThan(8000);
+    await until(() => dead(pid));
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
+test.skipIf(process.platform !== "linux")("deleting an agent mid-take-over lets its waiting action go", async () => {
+
+  const site = Bun.serve({ port: 0, fetch: () => page("Held") });
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    await open(cwd, `http://localhost:${site.port}/`);
+    await takeOver(cwd);
+
+    const waiting = look(cwd).then(() => "ran", () => "refused");
+
+    await Bun.sleep(300);
+    await close(cwd, true);
+
+    expect(["ran", "refused"]).toContain(await waiting);
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
+test.skipIf(process.platform !== "linux")("a popup becomes the page, and closing it goes back to its opener", async () => {
+
+  const site = Bun.serve({
+
+    port: 0,
+
+    fetch(req) {
+
+      return new URL(req.url).pathname === "/pop" ? page("Popup", `<button onclick="window.close()">Done</button>`) : page("Opener", `<a href="/pop" target="_blank">Pop</a>`);
+
+    },
+
+  });
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+  const run = (verb: Action["verb"], path = "") => execute({ verb, path, label: "", body: "" }, cwd);
+  const ref = (text: string, role: string) => /\[ref=(e\d+)\]/.exec(text.split("\n").find((line) => line.includes(role))!)![1];
+
+  try {
+
+    const opened = await run("open", `http://localhost:${site.port}/`);
+    const popup = await run("click", ref(opened.text, "link"));
+
+    expect(popup.text).toContain("Popup");
+
+    await run("click", ref(popup.text, "button"));
+    await Bun.sleep(500);
+
+    expect((await run("look")).text).toContain("Opener");
 
   } finally {
 

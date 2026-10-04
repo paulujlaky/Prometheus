@@ -71,9 +71,10 @@ export class App extends Component<{}, AppState> {
   // frames skip React state: at ten a second they would re-render every screen
   private liveListeners = new Set<(event: LiveEvent) => void>();
 
-  // what a reconnect has to ask for again: the browser being watched, and whether this device had taken it over
+  // what a reconnect has to ask for again: the browser being watched, and the take-over this device had, phone size and all
   private watched: number | null = null;
   private holding = false;
+  private taken: LiveCommand = { live: "take" };
 
   live: LiveChannel = {
 
@@ -82,6 +83,12 @@ export class App extends Component<{}, AppState> {
       if (command.live === "watch") {
 
         this.watched = command.agentId;
+
+      }
+
+      if (command.live === "take") {
+
+        this.taken = command;
 
       }
 
@@ -258,7 +265,7 @@ export class App extends Component<{}, AppState> {
 
         if (this.holding) {
 
-          this.sendSocket({ live: "take" });
+          this.sendSocket(this.taken);
 
         }
 

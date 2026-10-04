@@ -14,9 +14,6 @@ const GRACE_MS = Number(process.env.PTS_HOLD_GRACE_MS ?? 2 * 60_000);
 // a slow connection gets fewer frames rather than a growing backlog of stale ones; a few frames is already a lag
 const MAX_BUFFERED = 300_000;
 
-// taps on a page that has stopped answering would otherwise queue up and replay long after
-const MAX_PENDING = 5;
-
 export type LiveMessage =
 
   | { live: "watch"; agentId: number }
@@ -24,6 +21,14 @@ export type LiveMessage =
   | { live: "take"; width?: number; height?: number }
   | { live: "give" }
   | { live: "input"; event: Input };
+
+interface View {
+
+  agentId: number;
+  workspace: string;
+  stop: () => void;
+
+}
 
 function validInput(event: unknown): Input | null {
 
@@ -76,14 +81,10 @@ function reason(err: unknown): string {
  */
 export class Live {
 
-  private views = new Map<Socket, { agentId: number; workspace: string; stop: Promise<() => void> }>();
+  private views = new Map<Socket, View>();
 
   /** `ws` is null while the device that took over is reconnecting. */
   private holders = new Map<number, { ws: Socket | null; workspace: string; timer: ReturnType<typeof setTimeout> }>();
-
-  // take, keys, clicks and give must land in the order they were made; Playwright runs concurrent calls in any order
-  private lanes = new Map<number, Promise<unknown>>();
-  private pending = new Map<number, number>();
 
   constructor(private onGive: (agentId: number) => void) {}
 
@@ -115,7 +116,7 @@ export class Live {
 
       const size = Number.isFinite(message.width) && Number.isFinite(message.height) ? { width: message.width!, height: message.height! } : undefined;
 
-      this.take(ws, view.agentId, view.workspace, size);
+      this.take(ws, view, size);
       return;
 
     }
@@ -135,26 +136,12 @@ export class Live {
 
     const event = validInput(message.event);
 
-    if (!event) {
+    if (event) {
 
-      return;
-
-    }
-
-    const pending = this.pending.get(view.agentId) ?? 0;
-
-    if (pending >= MAX_PENDING) {
-
-      return;
+      this.renew(view.agentId, HOLD_MS);
+      input(view.workspace, event).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
 
     }
-
-    this.pending.set(view.agentId, pending + 1);
-    this.renew(view.agentId, HOLD_MS);
-
-    this.queue(view.agentId, () => input(view.workspace, event))
-      .catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }))
-      .finally(() => this.pending.set(view.agentId, (this.pending.get(view.agentId) ?? 1) - 1));
 
   }
 
@@ -172,16 +159,6 @@ export class Live {
     }
 
     this.unwatch(ws);
-
-  }
-
-  private queue<T>(agentId: number, work: () => Promise<T>): Promise<T> {
-
-    const next = (this.lanes.get(agentId) ?? Promise.resolve()).catch(() => {}).then(work);
-
-    this.lanes.set(agentId, next);
-
-    return next;
 
   }
 
@@ -219,25 +196,30 @@ export class Live {
 
     }
 
+    const workspace = workspaceOf(agent);
+
     // frames go as raw JPEG bytes: a third smaller than base64, and the socket only ever streams the one browser it watches
-    const stop = watch(workspaceOf(agent), (frame) => {
+    const stop = watch(workspace, {
 
-      if (!frame) {
+      frame: (jpeg) => {
 
-        this.send(ws, { type: "browser", agentId: agent.id, blank: true });
+        if (!jpeg) {
 
-      } else if (ws.getBufferedAmount() < MAX_BUFFERED) {
+          this.send(ws, { type: "browser", agentId: agent.id, blank: true });
 
-        ws.send(frame);
+        } else if (ws.getBufferedAmount() < MAX_BUFFERED) {
 
-      }
+          ws.send(jpeg);
+
+        }
+
+      },
+
+      fail: (message) => this.send(ws, { type: "browser", agentId: agent.id, error: message }),
 
     });
 
-    // a browser that will not start is worth saying so, not a blank screen
-    stop.catch((err) => this.send(ws, { type: "browser", agentId: agent.id, error: reason(err) }));
-
-    this.views.set(ws, { agentId: agent.id, workspace: workspaceOf(agent), stop });
+    this.views.set(ws, { agentId: agent.id, workspace, stop });
     this.status(agent.id);
 
   }
@@ -253,7 +235,7 @@ export class Live {
     }
 
     this.views.delete(ws);
-    view.stop.then((stop) => stop()).catch(() => {});
+    view.stop();
 
     if (this.holders.get(view.agentId)?.ws === ws) {
 
@@ -264,13 +246,13 @@ export class Live {
   }
 
   /** The latest device to ask gets the browser; the one that had it drops back to watching. */
-  private take(ws: Socket, agentId: number, workspace: string, size?: { width: number; height: number }) {
+  private take(ws: Socket, view: View, size?: { width: number; height: number }) {
 
-    clearTimeout(this.holders.get(agentId)?.timer);
-    this.holders.set(agentId, { ws, workspace, timer: setTimeout(() => this.give(agentId), HOLD_MS) });
+    clearTimeout(this.holders.get(view.agentId)?.timer);
+    this.holders.set(view.agentId, { ws, workspace: view.workspace, timer: setTimeout(() => this.give(view.agentId), HOLD_MS) });
 
-    this.queue(agentId, () => takeOver(workspace, size)).catch(() => {});
-    this.status(agentId);
+    takeOver(view.workspace, size).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
+    this.status(view.agentId);
 
   }
 
@@ -300,7 +282,7 @@ export class Live {
     clearTimeout(holder.timer);
     this.holders.delete(agentId);
 
-    this.queue(agentId, () => handBack(holder.workspace)).catch(() => {});
+    handBack(holder.workspace).catch(() => {});
 
     this.onGive(agentId);
     this.status(agentId);
