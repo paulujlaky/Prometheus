@@ -256,6 +256,174 @@ test.skipIf(process.platform !== "linux")("the browser does not call itself head
 
 }, 60_000);
 
+test.skipIf(process.platform !== "linux")("a worker's requests do not say HeadlessChrome", async () => {
+
+  const taken = (req: Request) => ({
+
+    ua: req.headers.get("user-agent") ?? "",
+    hint: req.headers.get("sec-ch-ua") ?? "",
+    mobile: req.headers.get("sec-ch-ua-mobile") ?? "",
+    platform: req.headers.get("sec-ch-ua-platform") ?? "",
+    language: req.headers.get("accept-language") ?? "",
+    full: req.headers.get("sec-ch-ua-full-version-list") ?? "",
+    arch: req.headers.get("sec-ch-ua-arch") ?? "",
+
+  });
+
+  const hits: ReturnType<typeof taken>[] = [];
+  let documentHint = taken(new Request("http://127.0.0.1/"));
+  let later = taken(new Request("http://127.0.0.1/"));
+  const workerSource = [
+
+    "const brands = navigator.userAgentData ? navigator.userAgentData.brands.map((brand) => brand.brand).join(',') : '';",
+
+    "fetch('/hit?from=worker').then(() => postMessage(brands + ' ' + navigator.userAgent));",
+
+  ].join("\n");
+
+  const site = Bun.serve({
+
+    port: 0,
+
+    fetch(req) {
+
+      const url = new URL(req.url);
+
+      if (url.pathname === "/sw.js") {
+
+        return new Response([
+
+          "self.addEventListener('install', (event) => event.waitUntil(self.skipWaiting()));",
+
+          "self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));",
+
+          "self.addEventListener('fetch', (event) => {",
+
+          "  if (new URL(event.request.url).pathname === '/from-sw') event.respondWith(fetch('/hit?from=sw').then(() => new Response('ok')));",
+
+          "});",
+
+        ].join("\n"), { headers: { "Content-Type": "text/javascript" } });
+
+      }
+
+      if (url.pathname === "/hit") {
+
+        hits.push(taken(req));
+
+        return new Response("ok");
+
+      }
+
+      if (url.pathname === "/later") {
+
+        later = taken(req);
+
+        return new Response("ok");
+
+      }
+
+      if (url.pathname === "/") {
+
+        documentHint = taken(req);
+
+      }
+
+      return new Response(`<!doctype html><title>wait</title><h1></h1><script>
+
+        const status = { worker: "", sw: "", net: "" };
+
+        const show = () => {
+
+          document.title = status.worker && status.sw && status.net ? status.worker + " || " + status.sw + " || " + status.net : "wait";
+          document.querySelector("h1").textContent = document.title;
+
+        };
+
+        const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(workerSource)}], { type: "text/javascript" })));
+
+        worker.onmessage = (event) => {
+
+          status.worker = event.data;
+          show();
+
+        };
+
+        navigator.serviceWorker.register("/sw.js").then(() => navigator.serviceWorker.ready).then(() => fetch("/from-sw")).then(() => {
+
+          status.sw = "sw-sent";
+          show();
+
+        });
+
+        fetch("/later").then(() => {
+
+          status.net = "net-sent";
+          show();
+
+        });
+
+      </script>`, { headers: { "Content-Type": "text/html", "Accept-CH": "Sec-CH-UA-Full-Version-List, Sec-CH-UA-Arch, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors", "Critical-CH": "Sec-CH-UA-Full-Version-List" } });
+
+    },
+
+  });
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    let text = await open(cwd, `http://127.0.0.1:${site.port}/`);
+
+    for (let i = 0; i < 40 && (hits.length < 2 || !text.includes("sw-sent") || !later.full); i += 1) {
+
+      await Bun.sleep(250);
+      text = await look(cwd).catch(() => text);
+
+    }
+
+    expect(documentHint.hint).not.toContain("HeadlessChrome");
+    expect(documentHint.hint).toContain("Google Chrome");
+    expect(documentHint.mobile).toBe("?0");
+    expect(documentHint.platform.length).toBeGreaterThan(2);
+    expect(documentHint.language.length).toBeGreaterThan(0);
+    expect(later.full).toContain("Google Chrome");
+    expect(later.full).not.toContain("HeadlessChrome");
+    expect(later.arch.length).toBeGreaterThan(0);
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+
+    for (const hit of hits) {
+
+      expect(hit.ua).not.toContain("HeadlessChrome");
+      expect(hit.hint).not.toContain("HeadlessChrome");
+      expect(hit.hint).toContain("Google Chrome");
+      expect(hit.mobile).toBe("?0");
+      expect(hit.platform.length).toBeGreaterThan(2);
+      expect(hit.language.length).toBeGreaterThan(0);
+
+      if (hit.full) {
+
+        expect(hit.full).toContain("Google Chrome");
+        expect(hit.full).not.toContain("HeadlessChrome");
+
+      }
+
+    }
+
+    expect(text).not.toContain("HeadlessChrome");
+    expect(text).toContain("Google Chrome");
+    expect(text).toContain("sw-sent");
+    expect(text).toContain("net-sent");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
 test.skipIf(process.platform !== "linux")("a watched browser streams, and a take-over holds the agent then refuses its stale refs", async () => {
 
   const site = Bun.serve({

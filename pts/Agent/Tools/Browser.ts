@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
+import { setPriority } from "node:os";
 import { join } from "node:path";
 
 import { chromium, errors, type BrowserContext, type CDPSession, type Page } from "playwright";
@@ -34,6 +35,20 @@ const FRAME_MS = 150;
 
 // a page's cache otherwise grows with every site the agent visits, on a disk the VPS may not have to spare
 const DISK_CACHE_BYTES = 50 * 1024 * 1024;
+
+// each agent is its own Chromium, and a site's iframes otherwise become a process each
+const RENDERERS = 4;
+
+// a browser nobody is watching or driving gives the CPU back, so the one in use stays quick
+const REST_MS = 5_000;
+const SLOW = 6;
+
+// auto-attach matches the first entry; the last one drops every target we do not rewrite
+const ROOT_TARGETS = [{ type: "service_worker" }, { type: "shared_worker" }, { type: "page" }, { exclude: true }];
+const CHILD_TARGETS = [{ type: "iframe" }, { type: "worker" }, { exclude: true }];
+
+// Playwright writes an empty user-agent onto a service worker while it is still paused; the second write is the one the first fetch sees
+const REWRITE_MS = 100;
 
 // older Bun closes a dead Chromium's pipe fds a second time, later, cutting whichever browser got those numbers next
 const MIN_BUN = "1.4.2";
@@ -73,6 +88,13 @@ interface Chrome {
   sessions: Map<Page, Promise<CDPSession>>;
   cast: CDPSession | null;
 
+  /** Serializes throttle changes; a wake that overlaps a rest must not leave the slow rate on. */
+  pace: Promise<void>;
+
+  /** False once the browser has been asked to yield. Undefined until the first request. */
+  full?: boolean;
+  foreground?: boolean;
+
 }
 
 /** An agent's browser as the agent and the user share it; it outlives any one Chromium. */
@@ -109,7 +131,11 @@ interface Tab {
   lane: Promise<unknown>;
   pending: number;
 
+  /** Browser calls in flight. A rest must not throttle one of these. */
+  acting: number;
+
   idle?: ReturnType<typeof setTimeout>;
+  nap?: ReturnType<typeof setTimeout>;
 
 }
 
@@ -138,6 +164,12 @@ type Identity = {
 
   } | null;
 
+  // empty when the probe could not read navigator.languages; sending "" would clear Accept-Language
+  acceptLanguage: string;
+
+  // navigator.platform; empty when the probe did not read it. Sent beside Sec-CH-UA-Platform so the two agree
+  platform: string;
+
 };
 
 let fallback = false;
@@ -151,7 +183,7 @@ function tabOf(workspace: string): Tab {
 
   if (!tab) {
 
-    tab = { workspace, chrome: null, launching: null, closing: null, viewers: new Set(), hold: null, phone: null, touched: false, pins: 0, opening: false, lane: Promise.resolve(), pending: 0 };
+    tab = { workspace, chrome: null, launching: null, closing: null, viewers: new Set(), hold: null, phone: null, touched: false, pins: 0, opening: false, lane: Promise.resolve(), pending: 0, acting: 0 };
     tabs.set(workspace, tab);
 
   }
@@ -198,6 +230,28 @@ function headed(list: Brand[]): Brand[] {
 
 }
 
+/** `--accept-lang` takes tags. The q-values belong on the header, which the network override writes. */
+function acceptLangFlag(header: string): string {
+
+  return header.split(",").map((part) => part.split(";")[0].trim()).filter(Boolean).join(",");
+
+}
+
+/** `en-US,en;q=0.9`, the shape Chrome puts on Accept-Language. An empty list must not clear the header. */
+function languageHeader(languages: string[]): string {
+
+  const list = languages.filter((language) => language);
+
+  if (!list.length) {
+
+    return "";
+
+  }
+
+  return list.map((language, index) => index === 0 ? language : `${language};q=${Math.max(0.1, 1 - index * 0.1).toFixed(1)}`).join(",");
+
+}
+
 /** Probe the real client hints once. A metadata-less userAgent override drops Sec-CH-UA and never reaches workers. */
 function browserIdentity(): Promise<Identity> {
 
@@ -218,9 +272,13 @@ function browserIdentity(): Promise<Identity> {
 
         const data = (navigator as Navigator & { userAgentData?: UAData }).userAgentData;
 
+        const languages = [...navigator.languages];
+
+        const navPlatform = navigator.platform;
+
         if (!data) {
 
-          return null;
+          return { ua: navigator.userAgent, brands: [] as { brand: string; version: string }[], mobile: false, platform: "", navPlatform, languages, high: null };
 
         }
 
@@ -233,6 +291,8 @@ function browserIdentity(): Promise<Identity> {
           brands: data.brands,
           mobile: data.mobile,
           platform: data.platform,
+          navPlatform,
+          languages,
           high,
 
         };
@@ -243,7 +303,7 @@ function browserIdentity(): Promise<Identity> {
 
         const ua = read?.ua ?? await page.evaluate(() => navigator.userAgent).catch(() => "");
 
-        return { ua: ua.replace("HeadlessChrome", "Chrome"), metadata: null };
+        return { ua: ua.replace("HeadlessChrome", "Chrome"), acceptLanguage: languageHeader(read?.languages ?? []), platform: read?.navPlatform ?? "", metadata: null };
 
       }
 
@@ -252,6 +312,8 @@ function browserIdentity(): Promise<Identity> {
       return {
 
         ua: read.ua.replace("HeadlessChrome", "Chrome"),
+        acceptLanguage: languageHeader(read.languages ?? []),
+        platform: read.navPlatform ?? "",
 
         metadata: {
 
@@ -265,7 +327,8 @@ function browserIdentity(): Promise<Identity> {
           mobile: read.mobile,
           ...(read.high.bitness ? { bitness: read.high.bitness } : {}),
           ...(typeof read.high.wow64 === "boolean" ? { wow64: read.high.wow64 } : {}),
-          ...(read.high.formFactors?.length ? { formFactors: read.high.formFactors } : {}),
+          // a headless probe often omits the form factor a site asks for with Accept-CH; desktop Chrome answers "Desktop"
+          ...(read.high.formFactors?.length ? { formFactors: read.high.formFactors } : !read.mobile ? { formFactors: ["Desktop"] } : {}),
 
         },
 
@@ -290,7 +353,7 @@ function browserIdentity(): Promise<Identity> {
 async function start(profile: string): Promise<BrowserContext> {
 
   // --headless and the debugging pipe each enable AutomationControlled, which is what makes navigator.webdriver true
-  const args = [`--window-size=${WINDOW.width},${WINDOW.height}`, `--screen-info=${SCREEN}`, `--disk-cache-size=${DISK_CACHE_BYTES}`, "--disable-blink-features=AutomationControlled"];
+  const args = [`--window-size=${WINDOW.width},${WINDOW.height}`, `--screen-info=${SCREEN}`, `--disk-cache-size=${DISK_CACHE_BYTES}`, `--renderer-process-limit=${RENDERERS}`, "--disable-blink-features=AutomationControlled"];
   const options = { headless: true, viewport: null, timeout: LOAD_MS };
 
   if (!fallback) {
@@ -298,9 +361,10 @@ async function start(profile: string): Promise<BrowserContext> {
     try {
 
       const id = await browserIdentity();
+      const acceptLang = acceptLangFlag(id.acceptLanguage);
 
-      // Playwright's userAgent option is metadata-less and erases Sec-CH-UA; the flag does not, and it reaches workers
-      return await chromium.launchPersistentContext(profile, { ...options, channel: "chromium", args: id.ua ? [...args, `--user-agent=${id.ua}`] : args });
+      // Playwright's userAgent option drops Sec-CH-UA; the flag reaches workers, and --accept-lang covers the first packet
+      return await chromium.launchPersistentContext(profile, { ...options, channel: "chromium", args: [...args, ...(id.ua ? [`--user-agent=${id.ua}`] : []), ...(acceptLang ? [`--accept-lang=${acceptLang}`] : [])] });
 
     } catch (err) {
 
@@ -362,7 +426,17 @@ async function launch(tab: Tab): Promise<Chrome> {
   const fresh = !existsSync(profile);
   const context = await start(profile);
   const page = context.pages()[0] ?? (await context.newPage());
-  const chrome: Chrome = { context, pid: pidOf(profile), born: Date.now(), dead: false, page, sessions: new Map(), cast: null };
+  const chrome: Chrome = { context, pid: pidOf(profile), born: Date.now(), dead: false, page, sessions: new Map(), cast: null, pace: Promise.resolve() };
+  const browser = context.browser();
+
+  // service workers are not children of a page. A new page is paused so its first request waits for the headed client hints
+  if (browser) {
+
+    const root = await browser.newBrowserCDPSession();
+
+    await watchTargets(root, ROOT_TARGETS, true).catch(() => {});
+
+  }
 
   context.on("close", () => gone(tab, chrome));
   context.on("page", (next) => void adopt(tab, chrome, next).catch(() => {}));
@@ -429,8 +503,16 @@ async function show(tab: Tab, chrome: Chrome, page: Page) {
 
   chrome.page = page;
 
-  // before any navigation: the launch flag cleaned the UA string, this puts the headed brand on Sec-CH-UA
+  // before any navigation: the launch flag cleaned the UA string, this puts the headed brand on the request
   await reveal(tab, chrome, page).catch(() => {});
+
+  if (chrome.full === false) {
+
+    const session = await sessionOf(tab, chrome, page).catch(() => null);
+
+    await session?.send("Emulation.setCPUThrottlingRate", { rate: SLOW }).catch(() => {});
+
+  }
 
   // nobody sees the other tabs, so they only hold memory; what opened this one stays, for its sign-in popups
   const keep = new Set<Page>();
@@ -461,7 +543,234 @@ async function show(tab: Tab, chrome: Chrome, page: Page) {
 
 }
 
-/** Puts the headed brand on Sec-CH-UA. Detaching the session would clear it, so it stays for the life of the page. */
+type Reply = (method: string, params: object) => Promise<unknown>;
+
+type Arrived = { sessionId?: string; waitingForDebugger?: boolean; targetInfo?: { type?: string } };
+
+type Delivered = { sessionId?: string; message?: string };
+
+const WORKER = new Set(["worker", "service_worker", "shared_worker"]);
+
+const listening = new WeakSet<CDPSession>();
+
+/** User-Agent and Sec-CH-UA-* for one target. Emulation is what script reads; Network is what the request carries. */
+async function apply(reply: Reply, id: Identity, deep: boolean) {
+
+  const metadata = id.metadata;
+
+  if (!metadata || !id.ua) {
+
+    return;
+
+  }
+
+  const attempt = async (formFactors: boolean) => {
+
+    const params = {
+
+      userAgent: id.ua,
+      ...(id.acceptLanguage ? { acceptLanguage: id.acceptLanguage } : {}),
+      ...(id.platform ? { platform: id.platform } : {}),
+      userAgentMetadata: formFactors ? metadata : { ...metadata, formFactors: undefined },
+
+    };
+
+    await reply("Emulation.setUserAgentOverride", params);
+    await network(reply, params, deep);
+
+  };
+
+  try {
+
+    await attempt(true);
+
+  } catch {
+
+    // an older build rejects formFactors and would otherwise keep the headless brand
+    await attempt(false);
+
+  }
+
+}
+
+/** The network-stack override. Enabling the domain on a page would deliver every request, so only a worker gets that fallback. */
+async function network(reply: Reply, params: object, deep: boolean) {
+
+  try {
+
+    await reply("Network.setUserAgentOverride", params);
+
+  } catch {
+
+    if (!deep) {
+
+      return;
+
+    }
+
+    await reply("Network.enable", {});
+    await reply("Network.setUserAgentOverride", params);
+
+  }
+
+}
+
+/** A flat child session is not addressable from here, so the command goes the old way and the reply comes back as an event. */
+function command(root: CDPSession, sessionId: string, method: string, params: object, next: () => number): Promise<void> {
+
+  const id = next();
+
+  return new Promise((resolve, reject) => {
+
+    const timer = setTimeout(() => {
+
+      root.off("Target.receivedMessageFromTarget", on);
+      reject(new Error("no answer"));
+
+    }, 2_000);
+
+    const on = (event: Delivered) => {
+
+      if (event.sessionId !== sessionId || !event.message) {
+
+        return;
+
+      }
+
+      let body: { id?: number; error?: { message?: string } };
+
+      try {
+
+        body = JSON.parse(event.message);
+
+      } catch {
+
+        return;
+
+      }
+
+      if (body.id !== id) {
+
+        return;
+
+      }
+
+      clearTimeout(timer);
+      root.off("Target.receivedMessageFromTarget", on);
+
+      if (body.error) {
+
+        reject(new Error(body.error.message ?? "failed"));
+
+      } else {
+
+        resolve();
+
+      }
+
+    };
+
+    root.on("Target.receivedMessageFromTarget", on);
+
+    root.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id, method, params }) }).catch((err) => {
+
+      clearTimeout(timer);
+      root.off("Target.receivedMessageFromTarget", on);
+      reject(err);
+
+    });
+
+  });
+
+}
+
+/** Pauses a new target, rewrites its request headers, then lets it run. A worker's first fetch happens before any page script. */
+async function watchTargets(root: CDPSession, filter: { type?: string; exclude?: boolean }[], pause: boolean) {
+
+  if (fallback || listening.has(root)) {
+
+    return;
+
+  }
+
+  const id = await browserIdentity().catch(() => null);
+
+  if (!id?.metadata) {
+
+    return;
+
+  }
+
+  listening.add(root);
+
+  let n = 0;
+  const next = () => (n += 1);
+
+  root.on("Target.attachedToTarget", (event: Arrived) => {
+
+    const sessionId = event.sessionId;
+    const type = event.targetInfo?.type;
+
+    if (!sessionId || !type) {
+
+      return;
+
+    }
+
+    const reply: Reply = (method, params) => command(root, sessionId, method, params, next);
+    const deep = WORKER.has(type);
+
+    void stamp(reply, id, !!event.waitingForDebugger, deep);
+
+  });
+
+  // held once, at creation, until the headed hints are on the wire. A later navigation of the same page is not held
+  await root.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: pause, flatten: false, filter });
+
+}
+
+/** The override has to land before the target is released, or its first request still says HeadlessChrome. */
+async function stamp(reply: Reply, id: Identity, waiting: boolean, deep: boolean) {
+
+  try {
+
+    await apply(reply, id, deep);
+
+    if (deep) {
+
+      await new Promise((resolve) => setTimeout(resolve, REWRITE_MS));
+      await apply(reply, id, deep);
+
+    }
+
+  } catch {
+
+    // the target is released below either way
+
+  } finally {
+
+    if (waiting) {
+
+      await reply("Runtime.runIfWaitingForDebugger", {}).catch(() => {});
+
+    }
+
+  }
+
+  if (!deep) {
+
+    return;
+
+  }
+
+  // Playwright's own worker override can land after ours and put the headless brand back on the wire
+  const again = setTimeout(() => void apply(reply, id, deep).catch(() => {}), 250);
+
+  again.unref();
+
+}
+
+/** Puts the headed brand on the page's script and on its requests. The session stays: detaching clears both. */
 async function reveal(tab: Tab, chrome: Chrome, page: Page) {
 
   if (fallback) {
@@ -478,17 +787,11 @@ async function reveal(tab: Tab, chrome: Chrome, page: Page) {
 
   }
 
-  const metadata = id.metadata;
   const session = await sessionOf(tab, chrome, page);
-  const send = (formFactors: boolean) => session.send("Emulation.setUserAgentOverride", {
 
-    userAgent: id.ua,
-    userAgentMetadata: formFactors ? metadata : { ...metadata, formFactors: undefined },
-
-  });
-
-  // a worker's own requests still carry the headless brand; the page, and its document request, do not
-  await send(true).catch(() => send(false).catch(() => {}));
+  // a dedicated worker is a child of the page, not of the browser, so the page session is what hears it
+  await watchTargets(session, CHILD_TARGETS, true).catch(() => {});
+  await apply((method, params) => session.send(method, params), id, false).catch(() => {});
 
 }
 
@@ -744,43 +1047,164 @@ async function chromeOf(tab: Tab): Promise<Chrome> {
 
 }
 
+/** True while someone is looking, holding, signing in, or a call is in flight. */
+function busy(tab: Tab): boolean {
+
+  return tab.viewers.size > 0 || !!tab.hold || tab.pending > 0 || tab.pins > 0 || tab.opening || tab.acting > 0;
+
+}
+
+/** Background Chromiums otherwise run at full speed, and a few of them make the one in front sluggish. */
+function prefer(chrome: Chrome, foreground: boolean) {
+
+  if (chrome.pid <= 1 || chrome.foreground === foreground) {
+
+    return;
+
+  }
+
+  chrome.foreground = foreground;
+
+  const level = foreground ? 0 : 10;
+
+  if (process.platform === "linux") {
+
+    // the browser is a process group, so the renderers have to drop with it
+    const child = Bun.spawn(["renice", "-n", String(level), "-g", String(chrome.pid)], { stdout: "ignore", stderr: "ignore" });
+
+    child.unref();
+    void child.exited.catch(() => {});
+
+    return;
+
+  }
+
+  try {
+
+    setPriority(chrome.pid, level);
+
+  } catch {
+
+    // the lock can name a pid that has already gone
+
+  }
+
+}
+
+function pace(tab: Tab, chrome: Chrome, full: boolean): Promise<void> {
+
+  const job = chrome.pace.then(async () => {
+
+    if (chrome.dead || tab.chrome !== chrome || chrome.full === full || (!full && busy(tab))) {
+
+      return;
+
+    }
+
+    prefer(chrome, full);
+
+    const rate = full ? 1 : SLOW;
+
+    await Promise.all(chrome.context.pages().map(async (page) => {
+
+      const session = await sessionOf(tab, chrome, page).catch(() => null);
+
+      await session?.send("Emulation.setCPUThrottlingRate", { rate }).catch(() => {});
+
+    }));
+
+    chrome.full = full;
+
+  });
+
+  chrome.pace = job.then(() => {}, () => {});
+
+  return job;
+
+}
+
+function wake(tab: Tab, chrome: Chrome): Promise<void> {
+
+  clearTimeout(tab.nap);
+
+  return pace(tab, chrome, true);
+
+}
+
+function rest(tab: Tab) {
+
+  clearTimeout(tab.nap);
+
+  if (busy(tab) || !tab.chrome) {
+
+    return;
+
+  }
+
+  tab.nap = setTimeout(() => {
+
+    const chrome = tab.chrome;
+
+    if (!chrome || busy(tab) || chrome.dead) {
+
+      return;
+
+    }
+
+    void pace(tab, chrome, false);
+
+  }, REST_MS);
+
+  tab.nap.unref();
+
+}
+
 /** Every use of the browser goes through here: bounded, and a Chromium that stopped answering is killed, not waited on. */
 async function act<T>(tab: Tab, ms: number, work: (chrome: Chrome) => Promise<T>): Promise<T> {
 
   touch(tab);
-
-  const chrome = await chromeOf(tab);
+  tab.acting += 1;
 
   try {
 
-    return await within(work(chrome), ms + STALL_MS);
+    const chrome = await chromeOf(tab);
 
-  } catch (err) {
+    await wake(tab, chrome);
 
-    // a timeout is a slow page or a gone Chromium; only the second is worth a restart
-    if (err instanceof Stalled || (err instanceof errors.TimeoutError && !(await alive(tab, chrome)))) {
+    try {
 
-      if (!chrome.dead) {
+      return await within(work(chrome), ms + STALL_MS);
 
-        restart(tab, chrome, err instanceof Stalled ? "left a call unanswered" : "stopped answering");
+    } catch (err) {
+
+      // a timeout is a slow page or a gone Chromium; only the second is worth a restart
+      if (err instanceof Stalled || (err instanceof errors.TimeoutError && !(await alive(tab, chrome)))) {
+
+        if (!chrome.dead) {
+
+          restart(tab, chrome, err instanceof Stalled ? "left a call unanswered" : "stopped answering");
+
+        }
+
+        throw new Error("The browser stopped responding, so it was restarted. Open the page again.");
 
       }
 
-      throw new Error("The browser stopped responding, so it was restarted. Open the page again.");
+      if (chrome.dead) {
+
+        throw new Error("The browser closed unexpectedly. Open the page again.");
+
+      }
+
+      throw err;
 
     }
-
-    if (chrome.dead) {
-
-      throw new Error("The browser closed unexpectedly. Open the page again.");
-
-    }
-
-    throw err;
 
   } finally {
 
+    tab.acting -= 1;
     touch(tab);
+    rest(tab);
 
   }
 
@@ -812,7 +1236,12 @@ function enqueue<T>(tab: Tab, work: () => Promise<T>): Promise<T> {
 
   tab.lane = next.catch(() => {});
 
-  return next.finally(() => (tab.pending -= 1));
+  return next.finally(() => {
+
+    tab.pending -= 1;
+    rest(tab);
+
+  });
 
 }
 
@@ -862,6 +1291,7 @@ export async function close(workspace: string, force = false) {
   }
 
   clearTimeout(tab.idle);
+  clearTimeout(tab.nap);
 
   if (force) {
 
@@ -881,6 +1311,7 @@ export async function closeAll() {
   await Promise.all([...tabs.values()].map((tab) => {
 
     clearTimeout(tab.idle);
+    clearTimeout(tab.nap);
 
     return shut(tab);
 
@@ -895,6 +1326,12 @@ export async function pinned<T>(workspace: string, work: () => Promise<T>): Prom
 
   tab.pins += 1;
 
+  if (tab.chrome) {
+
+    void wake(tab, tab.chrome);
+
+  }
+
   try {
 
     return await work();
@@ -903,6 +1340,7 @@ export async function pinned<T>(workspace: string, work: () => Promise<T>): Prom
 
     tab.pins -= 1;
     touch(tab);
+    rest(tab);
 
   }
 
@@ -939,6 +1377,7 @@ export function watch(workspace: string, viewer: Viewer): () => void {
     }
 
     touch(tab);
+    rest(tab);
 
   };
 
@@ -979,11 +1418,14 @@ export async function handBack(workspace: string) {
 
   if (!phone || !chrome) {
 
+    rest(tab);
+
     return;
 
   }
 
   await enqueue(tab, () => within(Promise.all(chrome.context.pages().map((page) => fit(tab, chrome, page, null))), ACTION_MS)).catch(() => {});
+  rest(tab);
 
 }
 
@@ -1164,6 +1606,7 @@ export async function open(workspace: string, url: string, signal?: AbortSignal)
   } finally {
 
     tab.opening = false;
+    rest(tab);
 
   }
 
