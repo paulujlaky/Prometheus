@@ -8,13 +8,13 @@ import { BoodleClient, parseSession } from "../../sdk/index";
 
 import { close as closeBrowser, closeAll } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
-import { runAgent, type RunControl, type RunEvent } from "../Agent/Runner";
+import { dropChats, runAgent, type RunControl, type RunEvent } from "../Agent/Runner";
 import { isGlyph } from "../Features/Glyph";
 import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/Group";
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { isTimeZone, nextAt, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
-import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
+import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, trackedChats, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
@@ -831,6 +831,13 @@ if (process.env.NODE_ENV !== "test") {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
     process.on(signal, () => closeAll().finally(() => process.exit(0)));
+
+  }
+
+  // nothing runs yet, so every tracked chat was left by a crash or a failed delete
+  if (readCookie()) {
+
+    dropChats(boodle(), trackedChats());
 
   }
 

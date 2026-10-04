@@ -94,6 +94,12 @@ db.exec(`
     value text not null
   );
 
+  -- no cascade: a deleted agent's chats still have to be deleted from Boodle
+  create table if not exists chats (
+    id text primary key,
+    agent_id integer not null
+  );
+
   create table if not exists group_messages (
     id integer primary key,
     author text not null,
@@ -272,6 +278,25 @@ export function listAgents(): Agent[] {
 export function saveBot(agentId: number, draftId: string, assistantId: string, hash: string) {
 
   db.query("update agents set bot_draft_id = ?, bot_assistant_id = ?, bot_hash = ? where id = ?").run(draftId, assistantId, hash, agentId);
+
+}
+
+/** Boodle chats a run opened and has not deleted yet. */
+export function trackChat(id: string, agentId: number) {
+
+  db.query("insert or ignore into chats (id, agent_id) values (?, ?)").run(id, agentId);
+
+}
+
+export function untrackChat(id: string) {
+
+  db.query("delete from chats where id = ?").run(id);
+
+}
+
+export function trackedChats(agentId?: number): string[] {
+
+  return db.query<{ id: string }, [number | null, number | null]>("select id from chats where ? is null or agent_id = ?").all(agentId ?? null, agentId ?? null).map((row) => row.id);
 
 }
 

@@ -5,7 +5,7 @@ import type { WaitKind } from "./Queue";
 import { execute } from "./Tools/Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
 import { localTime, routineBlock } from "../Features/Routines";
-import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, userZone, workspaceOf, type Agent, type AgentEvent } from "../Store";
+import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, trackChat, trackedChats, untrackChat, userZone, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
 const MAX_STEPS = Number(process.env.PTS_MAX_STEPS ?? 60);
 
@@ -89,6 +89,32 @@ async function ensureBot(client: BoodleClient, agent: Agent): Promise<string> {
 
 }
 
+/** Deletes the given chats from Boodle; one that fails stays tracked for the next sweep. */
+export async function dropChats(client: BoodleClient, ids: string[]) {
+
+  await Promise.all(ids.map(async (id) => {
+
+    try {
+
+      await client.deleteChat(id);
+
+    } catch (err) {
+
+      // already gone, or left behind on an account whose cookie was swapped out; retrying cannot help
+      if (!/ (403|404) /.test(String(err))) {
+
+        return;
+
+      }
+
+    }
+
+    untrackChat(id);
+
+  }));
+
+}
+
 /** One task, start to <done>, in a fresh chat. Everything lands in the store as it happens; resolves with the ending event. */
 export async function runAgent(client: BoodleClient, queued: Agent, task: string, control: RunControl): Promise<AgentEvent> {
 
@@ -138,7 +164,12 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
     }
 
-    session = await ChatSession.create(client, { assistantId, refreshOnComplete: false, reuseEmpty: false });
+    // tracked before connecting, so a chat whose socket never opens is still cleaned up
+    const chat = await client.createChat();
+
+    trackChat(chat.id, agent.id);
+
+    session = await ChatSession.open(client, chat.id, { assistantId, refreshOnComplete: false });
 
     session.on((event) => {
 
@@ -380,6 +411,9 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
     signal.removeEventListener("abort", onAbort);
     session?.dispose();
+
+    // an agent runs one task at a time, so every chat tracked for it is finished, including earlier failed deletes
+    await dropChats(client, trackedChats(agent.id));
 
   }
 

@@ -137,3 +137,42 @@ test("a hand-off skips an agent already working on the same chain", () => {
   expect(queue.busyIn(3, 5)).toBe(false);
 
 });
+
+test("finished chats are deleted from Boodle, and a failed delete stays tracked for the next sweep", async () => {
+
+  const { dropChats } = await import("../Agent/Runner");
+  const { trackChat, trackedChats } = await import("../Store");
+
+  const statuses: Record<string, number> = { ok: 200, gone: 404, down: 503 };
+  const deleted: string[] = [];
+
+  const client = {
+
+    deleteChat: async (id: string) => {
+
+      deleted.push(id);
+
+      if (statuses[id] !== 200) {
+
+        throw new Error(`DELETE /chat/${id} failed: ${statuses[id]} Error`);
+
+      }
+
+    },
+
+  };
+
+  for (const id of Object.keys(statuses)) {
+
+    trackChat(id, 7);
+
+  }
+
+  trackChat("other", 8);
+
+  await dropChats(client as never, trackedChats(7));
+
+  expect(deleted.sort()).toEqual(["down", "gone", "ok"]);
+  expect(trackedChats().sort()).toEqual(["down", "other"]);
+
+});
