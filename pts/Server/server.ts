@@ -13,7 +13,7 @@ import { isGlyph } from "../Features/Glyph";
 import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/Group";
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
-import { isTimeZone, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
+import { isTimeZone, nextAt, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
 import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
@@ -424,7 +424,7 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
   if (action === "routines" && method === "GET") {
 
-    return json(listRoutines(agent.id));
+    return json(listRoutines(agent.id).map((routine) => ({ ...routine, nextAt: nextAt(routine) })));
 
   }
 

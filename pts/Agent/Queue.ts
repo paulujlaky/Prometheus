@@ -122,7 +122,13 @@ export class Queue {
 
     if (queued) {
 
-      queued.task += `\n\n${task}`;
+      // a routine that fires every minute behind a long run would otherwise pile up one copy per minute
+      if (!queued.task.includes(task)) {
+
+        queued.task += `\n\n${task}`;
+
+      }
+
       queued.origin ??= origin;
       return;
 
@@ -195,7 +201,7 @@ export class Queue {
 
       const control: RunControl = { signal: slot.controller.signal, takeNotes: () => slot.notes.splice(0), listen: this.listen, ask };
 
-      this.start(job.agent, job.task, control, job.origin).catch(() => {}).finally(() => {
+      this.start(job.agent, job.task, control, job.origin).catch((err) => console.error(`run for ${job.agent.name} failed:`, err)).finally(() => {
 
         this.running.delete(job.agent.id);
 

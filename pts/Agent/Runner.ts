@@ -4,8 +4,8 @@ import { look, pageUrl, pinned } from "./Tools/Browser";
 import type { WaitKind } from "./Queue";
 import { execute } from "./Tools/Tools";
 import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
-import { routineBlock } from "../Features/Routines";
-import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, workspaceOf, type Agent, type AgentEvent } from "../Store";
+import { localTime, routineBlock } from "../Features/Routines";
+import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, userZone, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
 const MAX_STEPS = Number(process.env.PTS_MAX_STEPS ?? 60);
 
@@ -149,7 +149,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
     });
 
-    let message = taskMessage({ user: readUserDoc(), memory: readMemory(agent), recent }, task);
+    let message = taskMessage({ user: readUserDoc(), memory: readMemory(agent), recent, now: `${localTime(Date.now())} (${userZone()})` }, task);
     let misses = 0;
 
     for (let step = 1; step <= MAX_STEPS; step += 1) {

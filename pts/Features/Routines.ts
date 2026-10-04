@@ -1,5 +1,5 @@
 import { runShell } from "../Agent/Tools/Shell";
-import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, readSetting, workspaceOf, type Agent, type Routine } from "../Store";
+import { createRoutine, deleteRoutine, getAgentById, listRoutines, markRoutine, userZone, workspaceOf, type Agent, type Routine } from "../Store";
 
 const FIELDS = [
 
@@ -77,6 +77,9 @@ export function parseCron(spec: string): Cron {
 
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
+// five years: the longest wait a cron can name is a February 29th
+const SEARCH_MS = 5 * 366 * 86_400_000;
+
 export function isTimeZone(zone: string): boolean {
 
   try {
@@ -92,62 +95,71 @@ export function isTimeZone(zone: string): boolean {
 
 }
 
-/** Empty until Settings has one, which the server checked on the way in. */
-export function userTimeZone(): string | undefined {
+const clocks = new Map<string, Intl.DateTimeFormat>();
 
-  return readSetting("timezone") || undefined;
+/** The wall clock at `at` in `zone`. */
+export function clockOf(at: number, zone: string) {
 
-}
+  let format = clocks.get(zone);
 
-/** Wall clock of `date` in `timeZone`, or on this machine when no zone is given. */
-export function clockOf(date: Date, timeZone?: string) {
+  if (!format) {
 
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    format = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", weekday: "short", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
+    clocks.set(zone, format);
 
-    timeZone,
-    hourCycle: "h23",
-    weekday: "short",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
+  }
 
-  }).formatToParts(date).map((part) => [part.type, part.value]));
+  const parts = Object.fromEntries(format.formatToParts(at).map((part) => [part.type, part.value]));
 
-  return {
-
-    minute: Number(parts.minute),
-    hour: Number(parts.hour),
-    day: Number(parts.day),
-    month: Number(parts.month),
-    weekday: WEEKDAY_INDEX[parts.weekday],
-
-  };
+  return { minute: Number(parts.minute), hour: Number(parts.hour), day: Number(parts.day), month: Number(parts.month), weekday: WEEKDAY_INDEX[parts.weekday] };
 
 }
 
-export function cronMatches(cron: Cron, date: Date, timeZone?: string): boolean {
-
-  const clock = clockOf(date, timeZone);
+/** The first whole minute after `after` that `cron` names on `zone`'s wall clock; null for a date that never comes, like February 30th. */
+export function nextRun(cron: Cron, zone: string, after: number): number | null {
 
   const [minutes, hours, days, months, weekdays] = cron.sets;
 
-  if (!minutes.has(clock.minute) || !hours.has(clock.hour) || !months.has(clock.month)) {
+  for (let at = Math.floor(after / 60_000) * 60_000 + 60_000; at < after + SEARCH_MS;) {
 
-    return false;
+    const clock = clockOf(at, zone);
+    const day = days.has(clock.day);
+    const weekday = weekdays.has(clock.weekday);
+    const dayMatches = cron.anyDay || cron.anyWeekday ? day && weekday : day || weekday;
+
+    if (months.has(clock.month) && dayMatches && hours.has(clock.hour)) {
+
+      if (minutes.has(clock.minute)) {
+
+        return at;
+
+      }
+
+      at += 60_000;
+      continue;
+
+    }
+
+    // on to the top of the next hour; clocks change on the hour, so a skipped stretch never hides a matching minute
+    at += (60 - clock.minute) * 60_000;
 
   }
 
-  const day = days.has(clock.day);
-  const weekday = weekdays.has(clock.weekday);
+  return null;
 
-  if (cron.anyDay || cron.anyWeekday) {
+}
 
-    return day && weekday;
+/** How the agent and its notes read a time: on the user's clock, with the zone's short name. */
+export function localTime(at: number, zone = userZone()): string {
 
-  }
+  return new Date(at).toLocaleString("en-US", { timeZone: zone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 
-  return day || weekday;
+}
+
+/** When a routine next fires; null for watches and paused ones. */
+export function nextAt(routine: Routine, now = Date.now()): number | null {
+
+  return routine.kind === "schedule" && routine.enabled ? nextRun(parseCron(routine.spec), userZone(), now) : null;
 
 }
 
@@ -274,9 +286,7 @@ export function routineTask(routine: Routine, changes?: string): string {
 
   if (routine.kind === "schedule") {
 
-    const zone = userTimeZone();
-
-    return `[Scheduled routine${named}: ${routine.spec}${zone ? ` (${zone})` : ""}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
+    return `[Scheduled routine${named}: ${routine.spec}, ${localTime(Date.now())}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
 
   }
 
@@ -291,7 +301,8 @@ const MAX_PER_AGENT = 20;
 
 function describe(routine: Routine): string {
 
-  const when = routine.kind === "schedule" ? `schedule ${routine.spec}` : `watch ${routine.target} every ${routine.spec} min`;
+  const next = nextAt(routine);
+  const when = routine.kind === "schedule" ? `schedule ${routine.spec}${next ? `, next ${localTime(next)}` : ""}` : `watch ${routine.target} every ${routine.spec} min`;
 
   return `${routine.id}  ${when}${routine.enabled ? "" : "  (paused)"}  — ${routineTitle(routine)}`;
 
@@ -393,10 +404,19 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
 
 }
 
-/** Ticks once a minute, on the minute. `wake` hands the agent a task; queueing and folding are its business. */
+// how often the scheduler looks; schedules fire on the first check at or after their minute
+const CHECK_MS = 15_000;
+
+/**
+ * Each schedule keeps the instant it fires next, worked out on the user's clock, so a late check still fires it once
+ * and a skipped minute is not lost to timer drift. `wake` hands the agent a task; queueing and folding are its business.
+ */
 export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
   const checking = new Set<number>();
+
+  // the spec and zone each plan was worked out for; a change to either works it out again
+  const plans = new Map<number, { key: string; at: number | null }>();
 
   const watch = async (routine: Routine, agent: Agent, now: number) => {
 
@@ -429,10 +449,8 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
   const tick = () => {
 
-    const now = new Date();
-
-    // every schedule is read in the user's zone, so one Settings change moves them all, including across daylight saving
-    const timeZone = userTimeZone();
+    const now = Date.now();
+    const zone = userZone();
 
     for (const routine of listRoutines()) {
 
@@ -440,30 +458,54 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
       if (!agent) {
 
+        // a resumed routine plans from then, instead of firing for a time that passed while it was paused
+        plans.delete(routine.id);
         continue;
 
       }
 
-      if (routine.kind === "schedule") {
+      // one broken routine must not stop the rest
+      try {
 
-        const firedThisMinute = routine.lastAt !== null && Math.floor(routine.lastAt / 60_000) === Math.floor(now.getTime() / 60_000);
+        if (routine.kind === "schedule") {
 
-        if (!firedThisMinute && cronMatches(parseCron(routine.spec), now, timeZone)) {
+          const cron = parseCron(routine.spec);
+          const key = `${routine.spec} ${zone}`;
 
-          markRoutine(routine.id, null, now.getTime());
-          wake(agent, routineTask(routine));
+          let plan = plans.get(routine.id);
+
+          if (plan?.key !== key) {
+
+            // looking back one check catches a minute that passed just before a restart; lastAt keeps it from firing twice
+            plan = { key, at: nextRun(cron, zone, Math.max(routine.lastAt ?? 0, now - CHECK_MS)) };
+            plans.set(routine.id, plan);
+
+          }
+
+          if (plan.at !== null && now >= plan.at) {
+
+            console.log(`routine ${routine.id} fired for ${agent.name}`);
+            markRoutine(routine.id, null, now);
+            wake(agent, routineTask(routine));
+            plan.at = nextRun(cron, zone, now);
+
+          }
+
+          continue;
 
         }
 
-        continue;
+        const due = routine.lastAt === null || now - routine.lastAt >= parseInterval(routine.spec) * 60_000 - 1000;
 
-      }
+        if (due && !checking.has(routine.id)) {
 
-      const due = routine.lastAt === null || now.getTime() - routine.lastAt >= parseInterval(routine.spec) * 60_000 - 1000;
+          watch(routine, agent, now);
 
-      if (due && !checking.has(routine.id)) {
+        }
 
-        watch(routine, agent, now.getTime());
+      } catch (err) {
+
+        console.error(`routine ${routine.id} failed:`, err);
 
       }
 
@@ -471,13 +513,7 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
   };
 
-  const untilNextMinute = 60_000 - (Date.now() % 60_000);
-
-  setTimeout(() => {
-
-    tick();
-    setInterval(tick, 60_000);
-
-  }, untilNextMinute);
+  setInterval(tick, CHECK_MS);
+  tick();
 
 }

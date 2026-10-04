@@ -255,23 +255,18 @@ async function fit(page: Page, size: { width: number; height: number }) {
 
   }
 
-  if (!desktop) {
-
-    return;
-
-  }
-
   const session = await sessionFor(page);
 
+  // a phone gets a phone's layout: a wide desktop page scales down to fit instead of scrolling sideways out of view
   await session.send("Emulation.setDeviceMetricsOverride", {
 
-    mobile: false,
+    mobile: !desktop,
     width: size.width,
     height: size.height,
     deviceScaleFactor: 1,
-    screenWidth: SCREEN.width,
-    screenHeight: SCREEN.height,
-    screenOrientation: { angle: 0, type: "landscapePrimary" },
+    screenWidth: desktop ? SCREEN.width : size.width,
+    screenHeight: desktop ? SCREEN.height : size.height,
+    screenOrientation: { angle: 0, type: desktop ? "landscapePrimary" : "portraitPrimary" },
 
   });
 
@@ -657,8 +652,10 @@ export async function input(workspace: string, event: Input) {
   tab.touched = true;
 
   const page = tab.page;
-  const size = tab.size;
-  const at = (x: number, y: number) => [Math.round(x * size.width), Math.round(y * size.height)] as const;
+
+  // the frame shows the visual viewport, which a scaled-down phone page makes wider than the screen; the mouse takes page pixels
+  const view = await page.evaluate(() => ({ left: visualViewport!.offsetLeft, top: visualViewport!.offsetTop, width: visualViewport!.width, height: visualViewport!.height })).catch(() => ({ left: 0, top: 0, ...tab.size }));
+  const at = (x: number, y: number) => [Math.round(view.left + x * view.width), Math.round(view.top + y * view.height)] as const;
 
   switch (event.kind) {
 
@@ -670,7 +667,7 @@ export async function input(workspace: string, event: Input) {
     case "scroll":
 
       await page.mouse.move(...at(event.x, event.y));
-      await page.mouse.wheel(event.dx * size.width, event.dy * size.height);
+      await page.mouse.wheel(event.dx * view.width, event.dy * view.height);
       break;
 
     case "text":

@@ -170,10 +170,24 @@ export class App extends Component<{}, AppState> {
       this.setState({ authed: true });
       this.connect();
       this.loadFor(this.state.route);
+      this.adoptZone().catch(this.guard);
 
     } catch (err) {
 
       this.guard(err);
+
+    }
+
+  };
+
+  /** Schedules run on the user's clock; until Settings names one, it is this device's rather than the server's. */
+  adoptZone = async () => {
+
+    const { timezone } = await api<{ timezone: string | null }>("/settings");
+
+    if (!timezone) {
+
+      await api("/settings", "PUT", { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
 
     }
 

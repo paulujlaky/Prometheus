@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 
+import { userZone } from "../../Store";
+
 const TIMEOUT_MS = Number(process.env.PTS_CMD_TIMEOUT_MS ?? 600_000);
 const MEMORY_MAX = process.env.PTS_MEMORY_MAX ?? "1G";
 const CPU_QUOTA = process.env.PTS_CPU_QUOTA ?? "100%";
@@ -54,6 +56,9 @@ function sandboxArgv(command: string, workspace: string): string[] {
     "--setenv", "HOME", "/work",
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "TERM", "dumb",
+
+    // date in the sandbox should agree with the clock schedules run on
+    "--setenv", "TZ", userZone(),
 
     "bash", "-c", command,
 

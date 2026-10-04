@@ -10,43 +10,46 @@ import type { Agent, GroupMessage } from "../Store";
 // Routines reads the store, which opens its database at import
 process.env.PTS_HOME ??= mkdtempSync(join(tmpdir(), "pts-routines-"));
 
-const { clockOf, cronMatches, lineChanges, parseCron, parseInterval, routineBlock, visibleText } = await import("../Features/Routines");
+const { clockOf, lineChanges, nextRun, parseCron, parseInterval, routineBlock, visibleText } = await import("../Features/Routines");
 const { createAgent, listRoutines } = await import("../Store");
 
-const at = (text: string) => new Date(text);
+test("schedules fire on the next matching minute of the user's clock", () => {
 
-test("cron fields, steps, ranges and the day-or-weekday rule", () => {
+  const next = (spec: string, zone: string, after: string) => {
 
-  const weekdays8am = parseCron("0 8 * * 1-5");
+    const at = nextRun(parseCron(spec), zone, Date.parse(after));
 
-  expect(cronMatches(weekdays8am, at("2026-10-05T08:00:00"))).toBe(true);
-  expect(cronMatches(weekdays8am, at("2026-10-04T08:00:00"))).toBe(false);
-  expect(cronMatches(weekdays8am, at("2026-10-05T08:01:00"))).toBe(false);
+    return at === null ? null : new Date(at).toISOString();
 
-  const quarterHours = parseCron("*/15 * * * *");
+  };
 
-  expect([0, 15, 30, 45].every((minute) => cronMatches(quarterHours, at(`2026-10-05T10:${String(minute).padStart(2, "0")}:00`)))).toBe(true);
-  expect(cronMatches(quarterHours, at("2026-10-05T10:20:00"))).toBe(false);
+  // a Saturday noon UTC; 8:00 in New York is 12:00 UTC while daylight saving lasts
+  expect(next("0 8 * * 1-5", "America/New_York", "2026-10-03T12:00:00Z")).toBe("2026-10-05T12:00:00.000Z");
 
-  // the 1st of the month OR a Sunday, as in standard cron
-  const firstOrSunday = parseCron("0 9 1 * 0");
+  // strictly after: a check at 10:15 sharp has already had 10:15
+  expect(next("*/15 * * * *", "UTC", "2026-10-05T10:07:00Z")).toBe("2026-10-05T10:15:00.000Z");
+  expect(next("*/15 * * * *", "UTC", "2026-10-05T10:15:00Z")).toBe("2026-10-05T10:30:00.000Z");
+  expect(next("* * * * *", "UTC", "2026-10-05T10:15:30Z")).toBe("2026-10-05T10:16:00.000Z");
 
-  expect(cronMatches(firstOrSunday, at("2026-10-01T09:00:00"))).toBe(true);
-  expect(cronMatches(firstOrSunday, at("2026-10-04T09:00:00"))).toBe(true);
-  expect(cronMatches(firstOrSunday, at("2026-10-05T09:00:00"))).toBe(false);
-
-  expect(cronMatches(parseCron("0 0 * * 7"), at("2026-10-04T00:00:00"))).toBe(true);
-
-  // 12:00 UTC is 08:00 in New York on this date (EDT, UTC-4), a Monday
-  expect(cronMatches(weekdays8am, new Date("2026-10-05T12:00:00Z"), "America/New_York")).toBe(true);
-  expect(cronMatches(weekdays8am, new Date("2026-10-05T08:00:00Z"), "America/New_York")).toBe(false);
+  // the 1st of the month OR a Sunday, as in standard cron; 7 is Sunday too
+  expect(next("0 9 1 * 0", "UTC", "2026-10-01T10:00:00Z")).toBe("2026-10-04T09:00:00.000Z");
+  expect(next("0 0 * * 7", "UTC", "2026-10-01T00:00:00Z")).toBe("2026-10-04T00:00:00.000Z");
 
   // Sunday 22:00 in New York is Monday 02:00 UTC, so the zone decides the weekday
-  expect(cronMatches(parseCron("0 22 * * 0"), new Date("2026-10-05T02:00:00Z"), "America/New_York")).toBe(true);
+  expect(next("0 22 * * 0", "America/New_York", "2026-10-04T00:00:00Z")).toBe("2026-10-05T02:00:00.000Z");
 
-  // 03:00 UTC is 08:30 in Kolkata (UTC+5:30)
-  expect(cronMatches(parseCron("30 8 * * *"), new Date("2026-10-05T03:00:00Z"), "Asia/Kolkata")).toBe(true);
-  expect(clockOf(new Date("2026-10-05T03:00:00Z"), "Asia/Kolkata")).toMatchObject({ hour: 8, minute: 30 });
+  // Kolkata is UTC+5:30, so its 8:30 is 3:00 UTC
+  expect(next("30 8 * * *", "Asia/Kolkata", "2026-10-04T12:00:00Z")).toBe("2026-10-05T03:00:00.000Z");
+  expect(clockOf(Date.parse("2026-10-05T03:00:00Z"), "Asia/Kolkata")).toMatchObject({ hour: 8, minute: 30, weekday: 1 });
+
+  // 9:00 stays 9:00 across the autumn change, which moves it from 13:00 to 14:00 UTC
+  expect(next("0 9 * * *", "America/New_York", "2026-10-31T14:00:00Z")).toBe("2026-11-01T14:00:00.000Z");
+
+  // 2:30 never happens on the spring-forward night, so the next one is the night after
+  expect(next("30 2 * * *", "America/New_York", "2027-03-13T12:00:00Z")).toBe("2027-03-15T06:30:00.000Z");
+
+  expect(next("0 0 29 2 *", "UTC", "2026-10-01T00:00:00Z")).toBe("2028-02-29T00:00:00.000Z");
+  expect(next("0 0 30 2 *", "UTC", "2026-10-01T00:00:00Z")).toBe(null);
 
   expect(() => parseCron("0 8 * *")).toThrow();
   expect(() => parseCron("60 8 * * *")).toThrow();

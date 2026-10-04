@@ -38,7 +38,15 @@ interface DetailsState {
 
 function when(routine: Routine, timeZone: string | null): string {
 
-  return routine.kind === "schedule" ? describeSchedule(routine.spec, timeZone) : describeWatch(routine.target, routine.spec);
+  if (routine.kind === "watch") {
+
+    return describeWatch(routine.target, routine.spec);
+
+  }
+
+  const next = routine.nextAt ? new Date(routine.nextAt).toLocaleString("en-US", { timeZone: timeZone ?? undefined, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+
+  return `${describeSchedule(routine.spec, timeZone)}${next ? ` · next ${next}` : ""}`;
 
 }
 

@@ -372,8 +372,9 @@ routine instead of promising to remember. It starts a fresh task for you each ti
   task: The widget page changed. If the price dropped below $50, tell the user.
   </routine>
 
-schedule: is cron — minute hour day month weekday, on the user's clock from Settings.
-With no time zone set, it is the server's clock. watch: is a URL, or a shell
+schedule: is cron — minute hour day month weekday, on the user's clock: the zone under Now, which
+date in your shell also uses. Creating one tells you when it first fires; check that it is what
+the user meant. watch: is a URL, or a shell
 command whose output is compared, checked every: N minutes; you are woken with the lines that
 changed. title: is what the user sees in the app — a few words, not a sentence. Everything
 after task: is the task. A bare <routine> lists yours with their numbers; remove: 3 deletes one.
@@ -442,6 +443,9 @@ export interface TaskContext {
   /** Recent tasks and how they ended, oldest first. */
   recent: string[];
 
+  /** The time on the user's clock, with its zone. */
+  now: string;
+
 }
 
 function section(title: string, body: string, empty: string): string {
@@ -458,6 +462,7 @@ export function taskMessage(context: TaskContext, task: string): string {
     section("About the user (USER.md)", context.user, "Nothing yet."),
     section("Your memory (MEMORY.md)", context.memory, "Empty — nothing remembered yet. Start it with <write MEMORY.md>, since there is nothing to edit."),
     section("Recent tasks", context.recent.join("\n"), "None."),
+    section("Now", context.now, ""),
     section("Task", task, ""),
     "End with <done> in the same reply once the task is finished: a short sentence, or a word.",
 

@@ -146,6 +146,9 @@ export interface Routine {
   lastOutput: string | null;
   lastAt: number | null;
 
+  /** When a schedule fires next. Worked out by the API, never stored. */
+  nextAt?: number | null;
+
 }
 
 /** `author` is "user", "system" or the agent's name; `agentId` is set only for agents. */
@@ -416,6 +419,13 @@ export function listGroupMessages(limit = 200, before = Number.MAX_SAFE_INTEGER)
 export function readSetting(key: string): string | null {
 
   return db.query<{ value: string }, [string]>("select value from settings where key = ?").get(key)?.value ?? null;
+
+}
+
+/** The one clock schedules, the agent and its shell all read: the user's zone from Settings, else this machine's. */
+export function userZone(): string {
+
+  return readSetting("timezone") || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 }
 
