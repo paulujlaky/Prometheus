@@ -407,6 +407,8 @@ async function revive(tab: Tab, stuck: Page) {
 
   const url = stuck.url();
 
+  console.warn(`browser: ${url} stopped responding; opening it again in a fresh tab`);
+
   // the context's "page" event makes the fresh page the tab's before newPage resolves, so the close below does not open another
   const fresh = await tab.context.newPage();
 
@@ -803,7 +805,7 @@ async function agentTab(workspace: string, signal?: AbortSignal, refs = false): 
 
     tab.touched = false;
 
-    throw new Error(`The user used the browser while you worked, so that did not run. The page now:\n\n${await snapshot(tab.page)}`);
+    throw new Error(`The user used the browser while you worked, so that did not run. The page now:\n\n${await snapshot(tab)}`);
 
   }
 
@@ -822,7 +824,36 @@ async function settle(page: Page) {
 
 }
 
-async function snapshot(page: Page): Promise<string> {
+/** The page as the agent reads it. One that has stopped answering is opened again once, so a stuck tab cannot stall the agent for good. */
+async function snapshot(tab: Tab): Promise<string> {
+
+  try {
+
+    return await read(tab.page);
+
+  } catch (err) {
+
+    const stuck = tab.page;
+    const answers = await bounded(stuck.evaluate(() => true), 3000).catch(() => false);
+
+    console.warn(`browser: reading ${stuck.url()} failed (${String(err).split("\n")[0]}); the page ${answers ? "still answers" : "does not answer"}`);
+
+    if (answers) {
+
+      throw err;
+
+    }
+
+    await revive(tab, stuck);
+    await settle(tab.page);
+
+    return read(tab.page);
+
+  }
+
+}
+
+async function read(page: Page): Promise<string> {
 
   const tree = await page.ariaSnapshot({ mode: "ai", timeout: ACTION_MS });
   const cut = tree.length > MAX_SNAPSHOT ? `${tree.slice(0, MAX_SNAPSHOT)}\n... page cut at ${MAX_SNAPSHOT} characters` : tree;
@@ -878,32 +909,33 @@ export async function open(workspace: string, url: string, signal?: AbortSignal)
 
   await settle(page);
 
-  return snapshot(page);
+  return snapshot(tab);
 
 }
 
 export async function look(workspace: string, signal?: AbortSignal): Promise<string> {
 
-  const { page } = await agentTab(workspace, signal);
+  const tab = await agentTab(workspace, signal);
 
-  if (page.url() === "about:blank") {
+  if (tab.page.url() === "about:blank") {
 
     throw new Error("No page is open yet. Use <open https://...> first.");
 
   }
 
-  return snapshot(page);
+  return snapshot(tab);
 
 }
 
 export async function click(workspace: string, ref: string, signal?: AbortSignal): Promise<string> {
 
-  const { page } = await agentTab(workspace, signal, true);
+  const tab = await agentTab(workspace, signal, true);
+  const { page } = tab;
 
   await page.locator(`aria-ref=${refOf(ref)}`).click({ timeout: ACTION_MS });
   await settle(page);
 
-  return snapshot(page);
+  return snapshot(tab);
 
 }
 
@@ -919,12 +951,13 @@ export async function type(workspace: string, ref: string, text: string, signal?
 
 export async function press(workspace: string, key: string, signal?: AbortSignal): Promise<string> {
 
-  const { page } = await agentTab(workspace, signal, true);
+  const tab = await agentTab(workspace, signal, true);
+  const { page } = tab;
 
   await bounded(page.keyboard.press(key.trim() || "Enter"), ACTION_MS);
   await settle(page);
 
-  return snapshot(page);
+  return snapshot(tab);
 
 }
 
