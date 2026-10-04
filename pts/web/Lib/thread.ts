@@ -225,7 +225,14 @@ export function describeSchedule(spec: string, timeZone?: string | null): string
 
   const words = scheduleWords(spec);
 
-  if (!timeZone || words === spec) {
+  // cron is for the agent; a shape too unusual for words still reads as words, with the next run beside it
+  if (words === spec) {
+
+    return "Custom schedule";
+
+  }
+
+  if (!timeZone) {
 
     return words;
 
@@ -447,7 +454,11 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
         const watch = /^watch (.+) every (\d+) min/.exec(when);
 
-        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: watch ? describeWatch(watch[1], watch[2]) : describeSchedule(when.replace(/^schedule /, "")), title });
+        // "schedule 0 9 * * 1-5, next Mon, Oct 5, 9:00 AM EDT"; results from before the rework have no next
+        const schedule = /^schedule (\S+\s+\S+\s+\S+\s+\S+\s+\S+)(?:, next (.+))?$/.exec(when);
+        const first = schedule?.[2] ? ` · first ${schedule[2]}` : "";
+
+        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: watch ? describeWatch(watch[1], watch[2]) : `${describeSchedule(schedule?.[1] ?? "")}${first}`, title });
 
       }
 

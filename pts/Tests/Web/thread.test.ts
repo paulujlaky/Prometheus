@@ -40,6 +40,23 @@ test("a run folds into the user's message, one work row, its cards and the repor
 
 });
 
+test("a routine card reads in words, never cron", () => {
+
+  const card = (detail: string) => buildItems([
+
+    event("r9", "task", "Set it up"),
+    event("r9", "assistant", "<routine>\nschedule: 15 * * * *\n</routine>"),
+    event("r9", "result", `[routine ok]\n${detail}`),
+    event("r9", "done", "Set."),
+
+  ], false).find((item) => item.kind === "routine");
+
+  expect(card("created routine 5  schedule 15 * * * *, next Sun, Oct 4, 12:15 AM EDT  — Hourly browser test")).toMatchObject({ when: "Every hour at :15 · first Sun, Oct 4, 12:15 AM EDT", title: "Hourly browser test" });
+  expect(card("created routine 6  schedule 0 9 1 * 0, next Thu, Oct 1, 9:00 AM EDT  — Odd one")).toMatchObject({ when: "Custom schedule · first Thu, Oct 1, 9:00 AM EDT" });
+  expect(card("created routine 7  schedule 0 9 * * 1-5  — Before next existed")).toMatchObject({ when: "Weekdays at 9:00 AM" });
+
+});
+
 test("a running run's unanswered steps show live; a finished run drops blocks that never ran", () => {
 
   const live = buildItems([event("r3", "task", "go"), event("r3", "assistant", "look\n<run>\nls\n</run>")], true);
@@ -73,7 +90,8 @@ test("schedules read as a clock time, and stay exact when the shape is unusual",
   expect(describeSchedule("0 9 * * 1,3,5")).toBe("Mondays, Wednesdays and Fridays at 9:00 AM");
   expect(describeSchedule("0 9 1 * *")).toBe("The 1st of every month at 9:00 AM");
   expect(describeSchedule("0 9 1 1 *")).toBe("January 1st at 9:00 AM");
-  expect(describeSchedule("0 9 1 * 0")).toBe("0 9 1 * 0");
+  expect(describeSchedule("0 9 1 * 0")).toBe("Custom schedule");
+  expect(describeSchedule("0 9 1 * 0", "America/New_York")).toBe("Custom schedule");
   expect(describeSchedule("0 9 * * 1-5", "America/New_York")).toMatch(/^Weekdays at 9:00 AM \S+$/);
   expect(describeWatch("https://example.com/", "60")).toBe("Hourly, watching example.com");
   expect(describeWatch("cat stock.txt", "5")).toBe("Every 5 min, watching a command");
