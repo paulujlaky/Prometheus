@@ -43,6 +43,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
   private box = createRef<HTMLDivElement>();
   private unsubscribe = () => {};
   private shown = "";
+  private errorTimer: ReturnType<typeof setTimeout> | undefined;
 
   private press: { x: number; y: number; startX: number; startY: number; moved: boolean; mouse: boolean } | null = null;
   private scroll = { x: 0, y: 0, dx: 0, dy: 0, queued: false };
@@ -65,6 +66,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
     this.unsubscribe();
     this.props.live.send({ live: "unwatch" });
     URL.revokeObjectURL(this.shown);
+    clearTimeout(this.errorTimer);
 
   }
 
@@ -102,6 +104,14 @@ export class Browser extends Component<BrowserProps, BrowserState> {
     }
 
     this.setState((state) => ({ ready: state.ready || !!event.blank, blank: event.blank ?? state.blank, mine: event.mine ?? state.mine, error: event.error ?? state.error }));
+
+    // over a live page an error is a passing notice; before the first frame it is all there is to show, so it stays
+    if (event.error && this.state.ready) {
+
+      clearTimeout(this.errorTimer);
+      this.errorTimer = setTimeout(() => this.setState({ error: "" }), 5000);
+
+    }
 
   };
 
@@ -362,7 +372,9 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
         )}
 
-        <div ref={this.box} className="flex min-h-0 grow items-center justify-center px-[23px] pb-4 md:px-8">
+        <div ref={this.box} className="relative flex min-h-0 grow items-center justify-center px-[23px] pb-4 md:px-8">
+
+          {ready && error && <span role="status" className="absolute top-2 left-1/2 z-10 max-w-[80%] -translate-x-1/2 rounded-full bg-panel px-3.5 py-1.5 text-center text-[13px] text-dim">{error}</span>}
 
           <img
             ref={this.frame}

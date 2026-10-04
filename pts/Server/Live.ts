@@ -11,8 +11,11 @@ const HOLD_MS = Number(process.env.PTS_HOLD_MS ?? 5 * 60_000);
 // iOS drops the socket when the user switches apps, say to copy a sign-in code; they get this long to come back
 const GRACE_MS = Number(process.env.PTS_HOLD_GRACE_MS ?? 2 * 60_000);
 
-// a slow connection gets fewer frames rather than a growing backlog of stale ones
-const MAX_BUFFERED = 1_000_000;
+// a slow connection gets fewer frames rather than a growing backlog of stale ones; a few frames is already a lag
+const MAX_BUFFERED = 300_000;
+
+// taps on a page that has stopped answering would otherwise queue up and replay long after
+const MAX_PENDING = 5;
 
 export type LiveMessage =
 
@@ -80,6 +83,7 @@ export class Live {
 
   // take, keys, clicks and give must land in the order they were made; Playwright runs concurrent calls in any order
   private lanes = new Map<number, Promise<unknown>>();
+  private pending = new Map<number, number>();
 
   constructor(private onGive: (agentId: number) => void) {}
 
@@ -137,8 +141,20 @@ export class Live {
 
     }
 
+    const pending = this.pending.get(view.agentId) ?? 0;
+
+    if (pending >= MAX_PENDING) {
+
+      return;
+
+    }
+
+    this.pending.set(view.agentId, pending + 1);
     this.renew(view.agentId, HOLD_MS);
-    this.queue(view.agentId, () => input(view.workspace, event)).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
+
+    this.queue(view.agentId, () => input(view.workspace, event))
+      .catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }))
+      .finally(() => this.pending.set(view.agentId, (this.pending.get(view.agentId) ?? 1) - 1));
 
   }
 

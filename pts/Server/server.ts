@@ -6,7 +6,7 @@ import type { ServerWebSocket } from "bun";
 
 import { BoodleClient, parseSession } from "../../sdk/index";
 
-import { closeAll } from "../Agent/Tools/Browser";
+import { close as closeBrowser, closeAll } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
 import { runAgent, type RunControl, type RunEvent } from "../Agent/Runner";
 import { isGlyph } from "../Features/Glyph";
@@ -14,7 +14,7 @@ import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { isTimeZone, nextAt, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
-import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
+import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
@@ -340,6 +340,7 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
   if (!action && method === "DELETE") {
 
     queue.stop(agent.id);
+    await closeBrowser(workspaceOf(agent), true);
 
     if (agent.botDraftId) {
 

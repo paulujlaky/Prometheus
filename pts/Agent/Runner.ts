@@ -101,7 +101,8 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
   const record = (kind: AgentEvent["kind"], text: string) => {
 
-    const event = addEvent(agent.id, runId, kind, text);
+    // an agent deleted mid-run is gone from the database; its run is already stopping and has nowhere to write
+    const event = getAgentById(agent.id) ? addEvent(agent.id, runId, kind, text) : { id: 0, agentId: agent.id, runId, kind, text, at: Date.now() };
 
     listen(event);
 

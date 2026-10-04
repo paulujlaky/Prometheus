@@ -5,6 +5,9 @@ import { chromium, type BrowserContext, type CDPSession, type Page } from "playw
 
 const IDLE_MS = Number(process.env.PTS_BROWSER_IDLE_MS ?? 10 * 60_000);
 const ACTION_MS = 15_000;
+
+// a tap the page has not taken in this long means its script has stopped yielding; it is opened again
+const INPUT_MS = 10_000;
 const LOAD_MS = 30_000;
 const MAX_SNAPSHOT = 16_000;
 const VIEWPORT = { width: 1280, height: 800 };
@@ -15,8 +18,8 @@ const START_URL = "https://duckduckgo.com";
 // headless otherwise reports 800x600, which is smaller than the window the page is laid out in
 const SCREEN = { width: 1920, height: 1080 };
 
-// acking a frame late is what paces the stream: roughly ten a second, however busy the page
-const FRAME_MS = 100;
+// acking a frame late is what paces the stream; Chromium keeps two in flight, so this is about ten a second
+const FRAME_MS = 200;
 
 // a page's cache otherwise grows with every site the agent visits, on a disk the VPS may not have to spare
 const DISK_CACHE_BYTES = 50 * 1024 * 1024;
@@ -341,7 +344,8 @@ function keepAlive(workspace: string, tab: Tab) {
 
 }
 
-async function close(workspace: string) {
+/** `force` is for a deleted agent, whose browser nobody can use any more. */
+export async function close(workspace: string, force = false) {
 
   const tab = await tabs.get(workspace)?.catch(() => null);
 
@@ -352,7 +356,7 @@ async function close(workspace: string) {
   }
 
   // someone looking at, holding or about to be handed the browser counts as using it
-  if (tab.watchers.size || tab.hold || tab.pins) {
+  if (!force && (tab.watchers.size || tab.hold || tab.pins)) {
 
     keepAlive(workspace, tab);
     return;
@@ -363,6 +367,56 @@ async function close(workspace: string) {
   clearTimeout(tab.idle);
 
   await tab.context.close().catch(() => {});
+
+}
+
+class Unresponsive extends Error {}
+
+/** Playwright's mouse, keyboard and script calls wait forever on a page whose script never yields; this gives up instead. */
+async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  // the abandoned call settles some time later, or never; either way nobody is listening
+  work.catch(() => {});
+
+  try {
+
+    return await Promise.race([work, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Unresponsive()), ms)))]);
+
+  } finally {
+
+    clearTimeout(timer);
+
+  }
+
+}
+
+const reviving = new WeakSet<Page>();
+
+/** A page that has stopped answering is swapped for a fresh one on the same address, as a person would reload it. */
+async function revive(tab: Tab, stuck: Page) {
+
+  if (reviving.has(stuck) || stuck.isClosed()) {
+
+    return;
+
+  }
+
+  reviving.add(stuck);
+
+  const url = stuck.url();
+
+  // the context's "page" event makes the fresh page the tab's before newPage resolves, so the close below does not open another
+  const fresh = await tab.context.newPage();
+
+  await bounded(stuck.close({ runBeforeUnload: false }), ACTION_MS).catch(() => {});
+
+  if (url !== "about:blank") {
+
+    await fresh.goto(url, { waitUntil: "domcontentloaded", timeout: LOAD_MS }).catch(() => {});
+
+  }
 
 }
 
@@ -475,7 +529,8 @@ async function recast(tab: Tab) {
   const old = tab.cast;
 
   tab.cast = null;
-  await old?.detach().catch(() => {});
+  // a hung page never answers the detach, and waiting on it would leave the new page unstreamed
+  await bounded(old?.detach() ?? Promise.resolve(), 1000).catch(() => {});
 
   if (!tab.watchers.size || tab.page.isClosed()) {
 
@@ -509,7 +564,7 @@ async function recast(tab: Tab) {
 
   });
 
-  await cdp.send("Page.startScreencast", { format: "jpeg", quality: 70, maxWidth: VIEWPORT.width, maxHeight: VIEWPORT.height }).catch(() => {});
+  await bounded(cdp.send("Page.startScreencast", { format: "jpeg", quality: 70, maxWidth: VIEWPORT.width, maxHeight: VIEWPORT.height }), ACTION_MS).catch(() => {});
 
 }
 
@@ -597,7 +652,7 @@ export async function takeOver(workspace: string, size?: { width: number; height
     const clamp = (value: number, max: number) => Math.round(Math.min(max, Math.max(320, value)));
 
     tab.size = { width: clamp(size.width, VIEWPORT.width), height: clamp(size.height, VIEWPORT.height) };
-    await fit(tab.page, tab.size).catch(() => {});
+    await bounded(fit(tab.page, tab.size), ACTION_MS).catch(() => {});
 
   }
 
@@ -624,7 +679,7 @@ export async function handBack(workspace: string) {
   tab.hold = null;
   tab.size = VIEWPORT;
 
-  await fit(tab.page, VIEWPORT).catch(() => {});
+  await bounded(fit(tab.page, VIEWPORT), ACTION_MS).catch(() => {});
 
 }
 
@@ -654,8 +709,30 @@ export async function input(workspace: string, event: Input) {
   const page = tab.page;
 
   // the frame shows the visual viewport, which a scaled-down phone page makes wider than the screen; the mouse takes page pixels
-  const view = await page.evaluate(() => ({ left: visualViewport!.offsetLeft, top: visualViewport!.offsetTop, width: visualViewport!.width, height: visualViewport!.height })).catch(() => ({ left: 0, top: 0, ...tab.size }));
+  const view = await bounded(page.evaluate(() => ({ left: visualViewport!.offsetLeft, top: visualViewport!.offsetTop, width: visualViewport!.width, height: visualViewport!.height })), 1000).catch(() => ({ left: 0, top: 0, ...tab.size }));
   const at = (x: number, y: number) => [Math.round(view.left + x * view.width), Math.round(view.top + y * view.height)] as const;
+
+  try {
+
+    await bounded(perform(page, event, at, view), INPUT_MS);
+
+  } catch (err) {
+
+    if (!(err instanceof Unresponsive)) {
+
+      throw err;
+
+    }
+
+    void revive(tab, page);
+
+    throw new Error("The page stopped responding, so it is being opened again");
+
+  }
+
+}
+
+async function perform(page: Page, event: Input, at: (x: number, y: number) => readonly [number, number], view: { width: number; height: number }) {
 
   switch (event.kind) {
 
@@ -691,7 +768,7 @@ export async function input(workspace: string, event: Input) {
 
     case "back":
 
-      await page.goBack({ timeout: LOAD_MS }).catch(() => null);
+      await page.goBack({ timeout: INPUT_MS }).catch(() => null);
       break;
 
   }
@@ -750,7 +827,7 @@ async function snapshot(page: Page): Promise<string> {
   const tree = await page.ariaSnapshot({ mode: "ai", timeout: ACTION_MS });
   const cut = tree.length > MAX_SNAPSHOT ? `${tree.slice(0, MAX_SNAPSHOT)}\n... page cut at ${MAX_SNAPSHOT} characters` : tree;
 
-  return `${page.url()}\n${await page.title()}\n\n${cut}`;
+  return `${page.url()}\n${await bounded(page.title(), ACTION_MS).catch(() => "")}\n\n${cut}`;
 
 }
 
@@ -844,7 +921,7 @@ export async function press(workspace: string, key: string, signal?: AbortSignal
 
   const { page } = await agentTab(workspace, signal, true);
 
-  await page.keyboard.press(key.trim() || "Enter");
+  await bounded(page.keyboard.press(key.trim() || "Enter"), ACTION_MS);
   await settle(page);
 
   return snapshot(page);
