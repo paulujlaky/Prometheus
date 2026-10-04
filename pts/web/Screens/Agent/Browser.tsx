@@ -1,4 +1,4 @@
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Keyboard } from "lucide-react";
 import { Component, createRef, type ChangeEvent, type KeyboardEvent, type PointerEvent, type TouchEvent, type WheelEvent } from "react";
 
 import { Button, IconButton } from "../../Components/Controls";
@@ -209,7 +209,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     }
 
-    // keeps focus in the hidden field, so a phone keyboard stays open between taps
+    // keeps focus where it is, so a keyboard opened from the button stays open between taps
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     this.press = { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false, mouse: event.pointerType === "mouse" };
@@ -266,7 +266,28 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     // a tap usually moves focus to another field; what was typed belonged to the last one
     this.setState({ typed: "" });
-    this.typer.current?.focus({ preventScroll: true });
+
+    // a touch would open the phone keyboard on every tap; that is the keyboard button's job
+    if (press.mouse) {
+
+      this.typer.current?.focus({ preventScroll: true });
+
+    }
+
+  };
+
+  toggleKeyboard = () => {
+
+    const typer = this.typer.current;
+
+    if (document.activeElement === typer) {
+
+      typer?.blur();
+      return;
+
+    }
+
+    typer?.focus({ preventScroll: true });
 
   };
 
@@ -368,6 +389,9 @@ export class Browser extends Component<BrowserProps, BrowserState> {
             <>
 
               {mine && <IconButton label="Back" onClick={() => this.input({ kind: "back" })}><ArrowLeft size={19} strokeWidth={1.75} /></IconButton>}
+
+              {/* pressing it must not take focus off the hidden field, or it could never tell an open keyboard to close */}
+              {mine && <span className="hidden pointer-coarse:flex" onPointerDown={(event) => event.preventDefault()}><IconButton label="Keyboard" onClick={this.toggleKeyboard}><Keyboard size={19} strokeWidth={1.75} /></IconButton></span>}
               <Button tone={mine ? "primary" : "quiet"} className="ml-2 shrink-0" onClick={mine ? () => this.props.live.send({ live: "give" }) : this.take}>{mine ? "Hand back" : "Take over"}</Button>
 
             </>

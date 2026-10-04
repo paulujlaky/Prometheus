@@ -19,10 +19,13 @@ interface BarProps {
   back?: string;
   actions?: ReactNode;
 
+  /** Shows the chevron on wide screens too, where the sidebar otherwise covers going back. */
+  backAlways?: boolean;
+
 }
 
 /** A screen's top bar. `back` is where the chevron goes; leave it out on screens with nowhere to go back to. */
-export function Bar({ title, icon, subtitle, back, actions }: BarProps) {
+export function Bar({ title, icon, subtitle, back, actions, backAlways }: BarProps) {
 
   return (
 
@@ -30,7 +33,7 @@ export function Bar({ title, icon, subtitle, back, actions }: BarProps) {
 
       {back && (
 
-        <a href={back} aria-label="Back" className="flex size-11 items-center justify-center rounded-xl text-fg lg:hidden">
+        <a href={back} aria-label="Back" className={`flex size-11 items-center justify-center rounded-xl text-fg ${backAlways ? "" : "lg:hidden"}`}>
 
           <ChevronLeft size={22} strokeWidth={1.75} />
 

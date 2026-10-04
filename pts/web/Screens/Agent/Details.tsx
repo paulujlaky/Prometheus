@@ -228,7 +228,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
       <div className="flex h-full flex-col">
 
-        <Bar back={`#/agent/${agent.id}`} icon={<Glyph glyph={agent.glyph} size={30} />} title={agent.name} actions={note && <span className="px-3 text-[13px] text-dim">{note}</span>} />
+        <Bar back={`#/agent/${agent.id}`} backAlways icon={<Glyph glyph={agent.glyph} size={30} />} title={agent.name} actions={note && <span className="px-3 text-[13px] text-dim">{note}</span>} />
 
         <div className="grow overflow-y-auto">
 

@@ -1,5 +1,4 @@
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
-import { arch } from "node:os";
 import { join } from "node:path";
 
 import { chromium, errors, type BrowserContext, type CDPSession, type Page } from "playwright";
@@ -116,8 +115,33 @@ interface Tab {
 
 const tabs = new Map<string, Tab>();
 
+type Brand = { brand: string; version: string };
+
+type Identity = {
+
+  ua: string;
+
+  // null when the probe could not read client hints; an empty list would strip Sec-CH-UA
+  metadata: {
+
+    brands: Brand[];
+    fullVersionList: Brand[];
+    fullVersion?: string;
+    platform: string;
+    platformVersion: string;
+    architecture: string;
+    model: string;
+    mobile: boolean;
+    bitness?: string;
+    wow64?: boolean;
+    formFactors?: string[];
+
+  } | null;
+
+};
+
 let fallback = false;
-let userAgent: string | undefined;
+let identity: Promise<Identity> | null = null;
 
 class Stalled extends Error {}
 
@@ -162,26 +186,103 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
 
 }
 
-/** Chrome's own user agent for this build, minus the "Headless" that gives it away; a launch flag reaches workers, a CDP override does not. */
-function agentString(): string {
+/** Headless Chrome brands itself "HeadlessChrome"; headed Chrome uses "Google Chrome" in that same slot. */
+function headed(list: Brand[]): Brand[] {
 
-  if (userAgent === undefined) {
+  return list.map((item) => ({
+
+    brand: item.brand === "HeadlessChrome" ? "Google Chrome" : item.brand,
+    version: item.version,
+
+  }));
+
+}
+
+/** Probe the real client hints once. A metadata-less userAgent override drops Sec-CH-UA and never reaches workers. */
+function browserIdentity(): Promise<Identity> {
+
+  identity ??= chromium.launch({ channel: "chromium", headless: true }).then(async (probe) => {
 
     try {
 
-      const major = /(\d+)\.\d+\.\d+\.\d+/.exec(Bun.spawnSync([chromium.executablePath(), "--version"]).stdout.toString())?.[1];
+      const page = await probe.newPage();
 
-      userAgent = major ? `Mozilla/5.0 (X11; Linux ${arch() === "arm64" ? "aarch64" : "x86_64"}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36` : "";
+      // userAgentData exists only in a secure context, and about:blank is not one; nothing is fetched
+      await page.route("**/*", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html>" }));
 
-    } catch {
+      const read = await page.goto("https://example.com", { timeout: 10_000 }).then(() => page.evaluate(async () => {
 
-      userAgent = "";
+        type Hint = { brand: string; version: string };
+        type High = { architecture?: string; bitness?: string; model?: string; platformVersion?: string; uaFullVersion?: string; fullVersionList?: Hint[]; wow64?: boolean; formFactors?: string[] };
+        type UAData = { brands: Hint[]; mobile: boolean; platform: string; getHighEntropyValues: (hints: string[]) => Promise<High> };
+
+        const data = (navigator as Navigator & { userAgentData?: UAData }).userAgentData;
+
+        if (!data) {
+
+          return null;
+
+        }
+
+        const names = ["architecture", "bitness", "model", "platformVersion", "uaFullVersion", "fullVersionList", "wow64", "formFactors"];
+        const high = await data.getHighEntropyValues(names).catch(() => data.getHighEntropyValues(names.filter((name) => name !== "formFactors")));
+
+        return {
+
+          ua: navigator.userAgent,
+          brands: data.brands,
+          mobile: data.mobile,
+          platform: data.platform,
+          high,
+
+        };
+
+      })).catch(() => null);
+
+      if (!read?.high?.fullVersionList?.length || !read.brands.length) {
+
+        const ua = read?.ua ?? await page.evaluate(() => navigator.userAgent).catch(() => "");
+
+        return { ua: ua.replace("HeadlessChrome", "Chrome"), metadata: null };
+
+      }
+
+      const fullVersion = read.high.uaFullVersion;
+
+      return {
+
+        ua: read.ua.replace("HeadlessChrome", "Chrome"),
+
+        metadata: {
+
+          brands: headed(read.brands),
+          fullVersionList: headed(read.high.fullVersionList),
+          ...(fullVersion ? { fullVersion } : {}),
+          platform: read.platform,
+          platformVersion: read.high.platformVersion ?? "",
+          architecture: read.high.architecture ?? "",
+          model: read.high.model ?? "",
+          mobile: read.mobile,
+          ...(read.high.bitness ? { bitness: read.high.bitness } : {}),
+          ...(typeof read.high.wow64 === "boolean" ? { wow64: read.high.wow64 } : {}),
+          ...(read.high.formFactors?.length ? { formFactors: read.high.formFactors } : {}),
+
+        },
+
+      };
+
+    } finally {
+
+      await probe.close();
 
     }
 
-  }
+  });
 
-  return userAgent;
+  // a failed probe must not be cached, or a later install of the full Chromium is never picked up
+  identity.catch(() => (identity = null));
+
+  return identity;
 
 }
 
@@ -196,9 +297,10 @@ async function start(profile: string): Promise<BrowserContext> {
 
     try {
 
-      const agent = agentString();
+      const id = await browserIdentity();
 
-      return await chromium.launchPersistentContext(profile, { ...options, channel: "chromium", args: agent ? [...args, `--user-agent=${agent}`] : args });
+      // Playwright's userAgent option is metadata-less and erases Sec-CH-UA; the flag does not, and it reaches workers
+      return await chromium.launchPersistentContext(profile, { ...options, channel: "chromium", args: id.ua ? [...args, `--user-agent=${id.ua}`] : args });
 
     } catch (err) {
 
@@ -215,6 +317,7 @@ async function start(profile: string): Promise<BrowserContext> {
 
   }
 
+  // the shell blanks client hints when given --user-agent, which is louder than the headless token
   return chromium.launchPersistentContext(profile, { ...options, args });
 
 }
@@ -326,6 +429,9 @@ async function show(tab: Tab, chrome: Chrome, page: Page) {
 
   chrome.page = page;
 
+  // before any navigation: the launch flag cleaned the UA string, this puts the headed brand on Sec-CH-UA
+  await reveal(tab, chrome, page).catch(() => {});
+
   // nobody sees the other tabs, so they only hold memory; what opened this one stays, for its sign-in popups
   const keep = new Set<Page>();
 
@@ -352,6 +458,37 @@ async function show(tab: Tab, chrome: Chrome, page: Page) {
   }
 
   await cast(tab, chrome);
+
+}
+
+/** Puts the headed brand on Sec-CH-UA. Detaching the session would clear it, so it stays for the life of the page. */
+async function reveal(tab: Tab, chrome: Chrome, page: Page) {
+
+  if (fallback) {
+
+    return;
+
+  }
+
+  const id = await browserIdentity().catch(() => null);
+
+  if (!id?.metadata) {
+
+    return;
+
+  }
+
+  const metadata = id.metadata;
+  const session = await sessionOf(tab, chrome, page);
+  const send = (formFactors: boolean) => session.send("Emulation.setUserAgentOverride", {
+
+    userAgent: id.ua,
+    userAgentMetadata: formFactors ? metadata : { ...metadata, formFactors: undefined },
+
+  });
+
+  // a worker's own requests still carry the headless brand; the page, and its document request, do not
+  await send(true).catch(() => send(false).catch(() => {}));
 
 }
 

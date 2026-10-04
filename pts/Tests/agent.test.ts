@@ -206,6 +206,56 @@ test.skipIf(process.platform !== "linux")("the browser opens, reads, types and c
 
 }, 60_000);
 
+test.skipIf(process.platform !== "linux")("the browser does not call itself headless", async () => {
+
+  const site = Bun.serve({
+
+    port: 0,
+
+    fetch() {
+
+      return new Response(`<!doctype html><title>Who</title><h1></h1><script>
+
+        const data = navigator.userAgentData;
+
+        document.querySelector("h1").textContent = [
+
+          String(navigator.webdriver),
+
+          navigator.userAgent,
+
+          data ? data.brands.map((brand) => brand.brand).join(",") : "",
+
+          String(screen.width),
+
+        ].join(" | ");
+
+      </script>`, { headers: { "Content-Type": "text/html" } });
+
+    },
+
+  });
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    const text = await open(cwd, `http://127.0.0.1:${site.port}/`);
+
+    expect(text).not.toContain("HeadlessChrome");
+    expect(text).toContain("false |");
+    expect(text).toContain("Google Chrome");
+    expect(text).toContain("| 1920");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
 test.skipIf(process.platform !== "linux")("a watched browser streams, and a take-over holds the agent then refuses its stale refs", async () => {
 
   const site = Bun.serve({

@@ -147,7 +147,7 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
       <div className="flex h-full flex-col">
 
-        <Bar back="#/" title="Settings" actions={note && <span className="max-w-[60%] truncate px-3 text-[13px] text-dim">{note}</span>} />
+        <Bar back="#/" backAlways title="Settings" actions={note && <span className="max-w-[60%] truncate px-3 text-[13px] text-dim">{note}</span>} />
 
         <div className="grow overflow-y-auto">
 

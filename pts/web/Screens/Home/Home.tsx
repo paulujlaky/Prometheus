@@ -30,7 +30,7 @@ function Row({ href, icon, title, status, strong, selected }: { href: string; ic
 
   return (
 
-    <a href={href} aria-current={selected ? "page" : undefined} className={`flex items-center gap-3 px-5 py-2.5 no-underline ${selected ? "bg-panel" : ""}`}>
+    <a href={href} aria-current={selected ? "page" : undefined} className={`mx-2 flex items-center gap-3 rounded-xl px-3 py-2.5 no-underline ${selected ? "bg-panel" : ""}`}>
 
       {icon}
       <span className="shrink-0 font-medium">{title}</span>
