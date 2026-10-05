@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { close, closeAll, handBack, input, look, open, takeOver, watch } from "../Agent/Tools/Browser";
+import { close, closeAll, handBack, input, look, open, proxyLabel, proxyUrl, setProxy, setZone, tab, takeOver, watch } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
 import { runShell } from "../Agent/Tools/Shell";
 import { applyEdit, execute, relPath } from "../Agent/Tools/Tools";
@@ -554,7 +554,8 @@ test.skipIf(process.platform !== "linux")("a Chromium that dies is replaced on t
     process.kill(-chromePid(cwd), "SIGKILL");
     await Bun.sleep(500);
 
-    await expect(look(cwd)).rejects.toThrow(/No page is open|closed unexpectedly/);
+    // the tab it had comes back with the new one
+    expect(await look(cwd)).toContain("Alive");
     expect(await open(cwd, `http://localhost:${site.port}/`)).toContain("Alive");
 
   } finally {
@@ -687,6 +688,145 @@ test.skipIf(process.platform !== "linux")("a popup becomes the page, and closing
 
   } finally {
 
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 60_000);
+
+test("a proxy address is checked, and its password never shown", () => {
+
+  expect(proxyUrl("")).toBeNull();
+  expect(proxyUrl("user:p%40ss@proxy.example:8080")!.password).toBe("p%40ss");
+  expect(proxyLabel(proxyUrl("http://user:secret@proxy.example:8080"))).toBe("http://user@proxy.example:8080");
+  expect(() => proxyUrl("socks5://proxy.example:1080")).toThrow(/HTTP proxy/);
+  expect(() => proxyUrl("http://proxy.example:8080/path")).toThrow(/HTTP proxy/);
+
+});
+
+test.skipIf(process.platform !== "linux")("tabs open, switch and close, and come back after the browser closes", async () => {
+
+  const site = Bun.serve({ port: 0, fetch: (req) => page(new URL(req.url).pathname === "/two" ? "Two" : "One") });
+  const url = `http://localhost:${site.port}`;
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    expect(await open(cwd, `${url}/one`)).toContain("One");
+
+    const second = await tab(cwd, `${url}/two`);
+
+    expect(second).toContain("Two");
+    expect(second).toContain("(tab 2 of 2");
+    expect(await tab(cwd, "")).toMatch(/1\. One .*\n2\. Two .*← current/);
+    expect(await tab(cwd, "1")).toContain("One");
+    await expect(tab(cwd, "9")).rejects.toThrow(/no tab 9/);
+
+    await close(cwd);
+
+    expect(JSON.parse(readFileSync(join(cwd, ".browser", "Tabs.json"), "utf8"))).toEqual({ active: 0, tabs: [{ url: `${url}/one`, title: "One" }, { url: `${url}/two`, title: "Two" }] });
+
+    // a new Chromium shows the tab that was in front, and loads the other when it is switched to
+    expect(await look(cwd)).toContain("One");
+    expect(await tab(cwd, "2")).toContain("Two");
+
+    const left = await tab(cwd, "close 2");
+
+    expect(left).toContain("One");
+    expect(left).not.toContain("Two");
+
+  } finally {
+
+    await closeAll();
+    site.stop(true);
+
+  }
+
+}, 90_000);
+
+test.skipIf(process.platform !== "linux")("the browser goes through a proxy that needs a password", async () => {
+
+  const { createServer } = await import("node:net");
+  const auths: string[] = [];
+
+  // stands in for the proxy and the site behind it: plain http comes in with an absolute URL
+  const upstream = createServer((socket) => {
+
+    let head = "";
+
+    socket.on("data", (chunk) => {
+
+      head += chunk.toString("latin1");
+
+      if (!head.includes("\r\n\r\n")) {
+
+        return;
+
+      }
+
+      auths.push(/^proxy-authorization: (.*)$/im.exec(head)?.[1] ?? "");
+
+      if (head.startsWith("CONNECT ")) {
+
+        socket.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+        return;
+
+      }
+
+      const body = "<!doctype html><title>Through</title><h1>Through the proxy</h1>";
+
+      socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+
+    });
+
+  });
+
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+
+  const port = (upstream.address() as { port: number }).port;
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    await setProxy(`http://agent:s%40fe@127.0.0.1:${port}`);
+
+    // nothing resolves proxied.test; only the proxy can answer for it
+    expect(await open(cwd, "http://proxied.test/")).toContain("Through the proxy");
+    expect(auths.length).toBeGreaterThan(0);
+    expect(auths.every((auth) => auth === `Basic ${Buffer.from("agent:s@fe").toString("base64")}`)).toBe(true);
+
+  } finally {
+
+    await setProxy(null);
+    await closeAll();
+    upstream.close();
+
+  }
+
+}, 60_000);
+
+test.skipIf(process.platform !== "linux")("the browser keeps the user's time zone, and goes back to the machine's", async () => {
+
+  const site = Bun.serve({ port: 0, fetch: () => page("Zone", `<p id="zone"></p><script>document.getElementById("zone").textContent = Intl.DateTimeFormat().resolvedOptions().timeZone + " " + new Date(Date.UTC(2026, 0, 1)).getTimezoneOffset();</script>`) });
+  const url = `http://localhost:${site.port}/`;
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+
+  try {
+
+    await setZone("Asia/Tokyo");
+    expect(await open(cwd, url)).toContain("Asia/Tokyo -540");
+
+    // a running browser restarts onto the change
+    await setZone("Europe/Berlin");
+    expect(await open(cwd, url)).toContain("Europe/Berlin -60");
+
+    await setZone(null);
+    expect(await open(cwd, url)).not.toContain("Europe/Berlin");
+
+  } finally {
+
+    await setZone(null);
     await closeAll();
     site.stop(true);
 

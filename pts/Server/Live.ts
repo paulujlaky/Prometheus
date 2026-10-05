@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from "bun";
 
-import { handBack, input, takeOver, watch, type Input } from "../Agent/Tools/Browser";
+import { handBack, input, takeOver, userTab, watch, type Input, type TabAction } from "../Agent/Tools/Browser";
 import { getAgentById, workspaceOf } from "../Store";
 
 type Socket = ServerWebSocket<unknown>;
@@ -20,7 +20,8 @@ export type LiveMessage =
   | { live: "unwatch" }
   | { live: "take"; width?: number; height?: number }
   | { live: "give" }
-  | { live: "input"; event: Input };
+  | { live: "input"; event: Input }
+  | { live: "tab"; action: TabAction; id?: number };
 
 interface View {
 
@@ -134,6 +135,19 @@ export class Live {
 
     }
 
+    if (message.live === "tab") {
+
+      if (["switch", "close", "new"].includes(message.action) && (message.action === "new" || Number.isInteger(message.id))) {
+
+        this.renew(view.agentId, HOLD_MS);
+        userTab(view.workspace, message.action, message.id).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
+
+      }
+
+      return;
+
+    }
+
     const event = validInput(message.event);
 
     if (event) {
@@ -216,6 +230,7 @@ export class Live {
       },
 
       fail: (message) => this.send(ws, { type: "browser", agentId: agent.id, error: message }),
+      tabs: (tabs) => this.send(ws, { type: "tabs", agentId: agent.id, tabs }),
 
     });
 

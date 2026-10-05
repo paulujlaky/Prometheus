@@ -18,7 +18,7 @@ const MAX_ACTIONS_PER_TURN = 8;
 const RECENT_CHARS = 300;
 
 // verbs whose output the model has to see before it can honestly report
-const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "submit", "handoff", "ask"]);
+const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "tab", "submit", "handoff", "ask"]);
 
 export type RunEvent = AgentEvent | { kind: "delta"; agentId: number; text: string };
 

@@ -360,7 +360,7 @@ export class App extends Component<{}, AppState> {
 
   onSocket = (message: SocketMessage) => {
 
-    if (message.type === "frame" || message.type === "browser") {
+    if (message.type === "frame" || message.type === "browser" || message.type === "tabs") {
 
       // mirrors the server, so a reconnect retakes only what this device still had
       if (message.type === "browser" && message.mine !== undefined) {

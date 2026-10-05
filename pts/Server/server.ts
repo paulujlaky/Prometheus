@@ -6,7 +6,7 @@ import type { ServerWebSocket } from "bun";
 
 import { BoodleClient, parseSession } from "../../sdk/index";
 
-import { close as closeBrowser, closeAll } from "../Agent/Tools/Browser";
+import { close as closeBrowser, closeAll, proxyLabel, proxyUrl, setProxy, setZone, warm } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
 import { dropChats, runAgent, type RunControl, type RunEvent } from "../Agent/Runner";
 import { isGlyph } from "../Features/Glyph";
@@ -71,6 +71,12 @@ async function defaultModel(): Promise<string | null> {
   }
 
   return preferredModel;
+
+}
+
+async function settingsView() {
+
+  return { defaultModel: readCookie() ? await defaultModel() : null, timezone: readSetting("timezone") || null, proxy: proxyLabel(proxyUrl(readSetting("proxy"))) };
 
 }
 
@@ -542,15 +548,15 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
 
   if (method === "GET" && path === "/api/settings") {
 
-    return json({ defaultModel: readCookie() ? await defaultModel() : null, timezone: readSetting("timezone") || null });
+    return json(await settingsView());
 
   }
 
   if (method === "PUT" && path === "/api/settings") {
 
-    const input = await body<{ defaultModel?: unknown; timezone?: unknown }>(req);
+    const input = await body<{ defaultModel?: unknown; timezone?: unknown; proxy?: unknown }>(req);
 
-    if (input.defaultModel === undefined && input.timezone === undefined) {
+    if (input.defaultModel === undefined && input.timezone === undefined && input.proxy === undefined) {
 
       throw new HttpError(400, "Nothing to save");
 
@@ -583,10 +589,30 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
       }
 
       writeSetting("timezone", timezone);
+      await setZone(timezone);
 
     }
 
-    return json({ defaultModel: readCookie() ? await defaultModel() : null, timezone: readSetting("timezone") || null });
+    if (input.proxy !== undefined) {
+
+      const proxy = text(input.proxy, "proxy").trim();
+
+      try {
+
+        proxyUrl(proxy);
+
+      } catch (err) {
+
+        throw new HttpError(400, err instanceof Error ? err.message : String(err));
+
+      }
+
+      await setProxy(proxy);
+      writeSetting("proxy", proxy);
+
+    }
+
+    return json(await settingsView());
 
   }
 
@@ -938,6 +964,11 @@ if (process.env.NODE_ENV !== "test") {
     dropChats(boodle(), trackedChats());
 
   }
+
+  // before the scheduler, so no browser starts without the proxy; a failure stops the server rather than browse direct
+  await setProxy(readSetting("proxy"));
+  await setZone(readSetting("timezone"));
+  warm();
 
   startScheduler((agent, task) => queue.enqueue(agent, task));
 

@@ -19,6 +19,9 @@ interface SettingsState {
 
   timezone: string;
 
+  proxy: string | null;
+  proxyInput: string;
+
   note: string;
 
 }
@@ -27,7 +30,7 @@ const ZONES = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValue
 
 export class Settings extends Component<{ onCookie: () => void; onSignOut: () => void }, SettingsState> {
 
-  state: SettingsState = { account: null, cookie: "", push: false, user: "", models: [], defaultModel: null, timezone: "", note: "" };
+  state: SettingsState = { account: null, cookie: "", push: false, user: "", models: [], defaultModel: null, timezone: "", proxy: null, proxyInput: "", note: "" };
 
   private saver = new Autosave((note) => this.flash(note));
   private noteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -39,11 +42,11 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
       api<Account>("/cookie"),
       api<{ text: string }>("/user"),
       pushEnabled(),
-      api<{ defaultModel: string | null; timezone: string | null }>("/settings"),
+      api<{ defaultModel: string | null; timezone: string | null; proxy: string | null }>("/settings"),
     ]);
 
     this.timezoneSaved = settings.timezone ?? "";
-    this.setState({ account, user: user.text, push, timezone: this.timezoneSaved, defaultModel: settings.defaultModel });
+    this.setState({ account, user: user.text, push, timezone: this.timezoneSaved, defaultModel: settings.defaultModel, proxy: settings.proxy });
 
     if (account.set) {
 
@@ -88,6 +91,15 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
     }, "Saved");
 
   };
+
+  /** An empty address goes back to browsing direct. Agents' browsers restart onto the change, keeping their tabs. */
+  saveProxy = (proxy: string) => this.attempt(async () => {
+
+    const saved = await api<{ proxy: string | null }>("/settings", "PUT", { proxy });
+
+    this.setState({ proxy: saved.proxy, proxyInput: "" });
+
+  }, proxy ? "Proxy on" : "Proxy off");
 
   useDeviceZone = () => {
 
@@ -180,13 +192,25 @@ export class Settings extends Component<{ onCookie: () => void; onSignOut: () =>
 
             )}
 
-            <Section title="Time zone" description="Used for routines and scheduling">
+            <Section title="Time zone" description="Used for routines, scheduling and agents' browsers">
 
               <div className="flex gap-2">
 
                 <input list="time-zones" value={this.state.timezone} aria-label="Time zone" placeholder="Server time" onChange={(event) => this.setState({ timezone: event.target.value })} onBlur={() => this.saveTimezone()} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); this.saveTimezone(); } }} className={`${inputClass} min-w-0`} />
                 <datalist id="time-zones">{ZONES.map((zone) => <option key={zone} value={zone} />)}</datalist>
                 <button type="button" onClick={this.useDeviceZone} className="shrink-0 rounded-xl border border-line px-5 text-[15px] text-fg">This device</button>
+
+              </div>
+
+            </Section>
+
+            <Section title="Proxy" description={this.state.proxy ? `Browsing through ${this.state.proxy}` : "Agents browse from this server"}>
+
+              <div className="flex gap-2">
+
+                <input value={this.state.proxyInput} type="password" autoComplete="off" onChange={(event) => this.setState({ proxyInput: event.target.value })} onKeyDown={(event) => { if (event.key === "Enter" && this.state.proxyInput.trim()) { event.preventDefault(); this.saveProxy(this.state.proxyInput.trim()); } }} placeholder="http://user:pass@host:port" aria-label="HTTP proxy" className={`${inputClass} min-w-0 font-mono text-[13px]`} />
+                <button type="button" disabled={!this.state.proxyInput.trim()} onClick={() => this.saveProxy(this.state.proxyInput.trim())} className="shrink-0 rounded-xl border border-line px-5 text-[15px] text-fg disabled:opacity-40">Save</button>
+                {this.state.proxy && <button type="button" onClick={() => this.saveProxy("")} className="shrink-0 rounded-xl border border-line px-5 text-[15px] text-fg">Off</button>}
 
               </div>
 

@@ -1,6 +1,8 @@
-import { existsSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import { setPriority } from "node:os";
 import { join } from "node:path";
+import { connect as connectTls } from "node:tls";
 
 import { chromium, errors, type BrowserContext, type CDPSession, type Page } from "playwright";
 
@@ -8,6 +10,9 @@ const IDLE_MS = Number(process.env.PTS_BROWSER_IDLE_MS ?? 10 * 60_000);
 const ACTION_MS = 15_000;
 const LOAD_MS = 30_000;
 const INPUT_MS = 10_000;
+
+// a take-over may first reload a suspended tab
+const LAND_MS = LOAD_MS + ACTION_MS;
 
 // a call still unanswered this long past its own timeout means Chromium, or the pipe to it, is gone
 const STALL_MS = 5_000;
@@ -53,13 +58,28 @@ const REWRITE_MS = 100;
 // older Bun closes a dead Chromium's pipe fds a second time, later, cutting whichever browser got those numbers next
 const MIN_BUN = "1.4.2";
 
+// past MAX_TABS the least recently used tab closes; past LIVE_TABS it is suspended to its URL, so memory stays flat
+const MAX_TABS = 10;
+const LIVE_TABS = 3;
+
+const MAX_PROXY_HEAD = 64 * 1024;
+
+// Chromium's own table for placing the GREASE, Chromium and product brands
+const BRAND_ORDERS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+
 /** Someone looking at an agent's browser. A null frame means the page is blank. */
 export interface Viewer {
 
   frame: (jpeg: Buffer | null) => void;
   fail: (message: string) => void;
+  tabs?: (tabs: TabView[]) => void;
 
 }
+
+/** A tab as the app shows it. `live` is false while it is suspended to its URL. */
+export type TabView = { id: number; title: string; url: string; active: boolean; live: boolean };
+
+export type TabAction = "switch" | "close" | "new";
 
 export type Input =
 
@@ -81,8 +101,11 @@ interface Chrome {
   dead: boolean;
   heartbeat?: ReturnType<typeof setInterval>;
 
-  /** What the agent and viewers see: the newest tab, the way a person follows a link. */
+  /** The active tab's page: what the agent and viewers see. */
   page: Page;
+
+  /** Suspended tabs waiting for the page being made for them; any other new page is a tab the site opened. */
+  claims: Tab[];
 
   // one per page, kept for its life: detaching would drop the phone emulation it applied
   sessions: Map<Page, Promise<CDPSession>>;
@@ -97,10 +120,34 @@ interface Chrome {
 
 }
 
-/** An agent's browser as the agent and the user share it; it outlives any one Chromium. */
+/** One of an agent's tabs. It outlives any one Chromium; `page` is null while it is suspended. */
 interface Tab {
 
+  id: number;
+  url: string;
+  title: string;
+
+  page: Page | null;
+
+  /** The tab that was active when this one opened, so closing a sign-in popup goes back to it. */
+  opener: number | null;
+
+  used: number;
+
+}
+
+/** An agent's browser as the agent and the user share it; it outlives any one Chromium. */
+interface Browser {
+
   workspace: string;
+
+  tabs: Tab[];
+  active: number;
+  lastTab: number;
+
+  /** What viewers and the tabs file were last given, so a navigation that changes nothing sends nothing. */
+  announced: string;
+  saved: string;
 
   chrome: Chrome | null;
   launching: Promise<Chrome> | null;
@@ -139,7 +186,7 @@ interface Tab {
 
 }
 
-const tabs = new Map<string, Tab>();
+const browsers = new Map<string, Browser>();
 
 type Brand = { brand: string; version: string };
 
@@ -172,23 +219,134 @@ type Identity = {
 
 };
 
+/** What Chromium is pointed at: the user's proxy, or the local relay that signs in to it. */
+type Proxy = { server: string; host: string };
+
 let fallback = false;
 let identity: Promise<Identity> | null = null;
 
+let proxy: Proxy | null = null;
+let zone: string | null = null;
+let relay: Server | null = null;
+
 class Stalled extends Error {}
 
-function tabOf(workspace: string): Tab {
+function browserOf(workspace: string): Browser {
 
-  let tab = tabs.get(workspace);
+  let browser = browsers.get(workspace);
 
-  if (!tab) {
+  if (!browser) {
 
-    tab = { workspace, chrome: null, launching: null, closing: null, viewers: new Set(), hold: null, phone: null, touched: false, pins: 0, opening: false, lane: Promise.resolve(), pending: 0, acting: 0 };
-    tabs.set(workspace, tab);
+    browser = { workspace, tabs: [], active: 0, lastTab: 0, announced: "", saved: "", chrome: null, launching: null, closing: null, viewers: new Set(), hold: null, phone: null, touched: false, pins: 0, opening: false, lane: Promise.resolve(), pending: 0, acting: 0 };
+    browsers.set(workspace, browser);
+    restore(browser);
 
   }
 
+  return browser;
+
+}
+
+function tabsFile(browser: Browser): string {
+
+  return join(browser.workspace, ".browser", "Tabs.json");
+
+}
+
+/** The tabs the last Chromium left. The file sits in the agent's workspace, so only web URLs come back from it. */
+function restore(browser: Browser) {
+
+  let saved: { active?: unknown; tabs?: { url?: unknown; title?: unknown }[] };
+
+  try {
+
+    saved = JSON.parse(readFileSync(tabsFile(browser), "utf8"));
+
+  } catch {
+
+    return;
+
+  }
+
+  for (const one of (Array.isArray(saved.tabs) ? saved.tabs : []).slice(0, MAX_TABS)) {
+
+    if (typeof one?.url === "string" && /^https?:\/\//i.test(one.url)) {
+
+      addTab(browser, one.url, null).title = typeof one.title === "string" ? one.title.slice(0, 200) : "";
+
+    }
+
+  }
+
+  browser.active = browser.tabs[Number(saved.active)]?.id ?? browser.tabs.at(-1)?.id ?? 0;
+
+}
+
+function addTab(browser: Browser, url: string, opener: number | null): Tab {
+
+  const tab: Tab = { id: (browser.lastTab += 1), url, title: "", page: null, opener, used: Date.now() };
+
+  browser.tabs.push(tab);
+
   return tab;
+
+}
+
+function activeTab(browser: Browser): Tab | undefined {
+
+  return browser.tabs.find((tab) => tab.id === browser.active);
+
+}
+
+function tabOfPage(browser: Browser, page: Page): Tab | undefined {
+
+  return browser.tabs.find((tab) => tab.page === page);
+
+}
+
+function viewsOf(browser: Browser): TabView[] {
+
+  return browser.tabs.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url, active: tab.id === browser.active, live: !!tab.page }));
+
+}
+
+/** Tells viewers what changed in the tab strip, and writes it down so a new Chromium can bring the tabs back. */
+function announce(browser: Browser) {
+
+  const views = viewsOf(browser);
+  const json = JSON.stringify(views);
+
+  if (json !== browser.announced) {
+
+    browser.announced = json;
+
+    for (const viewer of browser.viewers) {
+
+      viewer.tabs?.(views);
+
+    }
+
+  }
+
+  const saved = JSON.stringify({ active: browser.tabs.findIndex((tab) => tab.id === browser.active), tabs: browser.tabs.map(({ url, title }) => ({ url, title })) });
+
+  if (saved === browser.saved || !browsers.has(browser.workspace)) {
+
+    return;
+
+  }
+
+  browser.saved = saved;
+
+  try {
+
+    writeFileSync(tabsFile(browser), saved);
+
+  } catch {
+
+    // no profile yet, or the agent is being deleted
+
+  }
 
 }
 
@@ -218,15 +376,27 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
 
 }
 
-/** Headless Chrome brands itself "HeadlessChrome"; headed Chrome uses "Google Chrome" in that same slot. */
+/** Old headless builds say "HeadlessChrome" where Chrome says "Google Chrome"; new ones leave Chrome out, so it is added in Chrome's order. */
 function headed(list: Brand[]): Brand[] {
 
-  return list.map((item) => ({
+  const named = list.map((item) => ({ brand: item.brand === "HeadlessChrome" ? "Google Chrome" : item.brand, version: item.version }));
+  const chromium = named.find((item) => item.brand === "Chromium");
+  const grease = named.find((item) => item.brand !== "Chromium" && item.brand !== "Google Chrome");
 
-    brand: item.brand === "HeadlessChrome" ? "Google Chrome" : item.brand,
-    version: item.version,
+  if (named.length !== 2 || !chromium || !grease) {
 
-  }));
+    return named;
+
+  }
+
+  const order = BRAND_ORDERS[parseInt(chromium.version, 10) % BRAND_ORDERS.length];
+  const ordered: Brand[] = [];
+
+  ordered[order[0]] = grease;
+  ordered[order[1]] = chromium;
+  ordered[order[2]] = { brand: "Google Chrome", version: chromium.version };
+
+  return ordered;
 
 }
 
@@ -353,8 +523,9 @@ function browserIdentity(): Promise<Identity> {
 async function start(profile: string): Promise<BrowserContext> {
 
   // --headless and the debugging pipe each enable AutomationControlled, which is what makes navigator.webdriver true
-  const args = [`--window-size=${WINDOW.width},${WINDOW.height}`, `--screen-info=${SCREEN}`, `--disk-cache-size=${DISK_CACHE_BYTES}`, `--renderer-process-limit=${RENDERERS}`, "--disable-blink-features=AutomationControlled"];
-  const options = { headless: true, viewport: null, timeout: LOAD_MS };
+  const args = [`--window-size=${WINDOW.width},${WINDOW.height}`, `--screen-info=${SCREEN}`, `--disk-cache-size=${DISK_CACHE_BYTES}`, `--renderer-process-limit=${RENDERERS}`, "--disable-blink-features=AutomationControlled", ...proxyArgs()];
+  // TZ rather than Playwright's timezoneId, which is a per-page override that service workers never get
+  const options = { headless: true, viewport: null, timeout: LOAD_MS, env: zone ? { ...process.env, TZ: zone } : process.env };
 
   if (!fallback) {
 
@@ -386,6 +557,199 @@ async function start(profile: string): Promise<BrowserContext> {
 
 }
 
+/** Behind a proxy, WebRTC and DNS would still go out from this machine and give its address away. */
+function proxyArgs(): string[] {
+
+  if (!proxy) {
+
+    return [];
+
+  }
+
+  // localhost bypasses the proxy, so the agent's own dev servers still need it resolved
+  return [`--proxy-server=${proxy.server}`, "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", `--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE ${proxy.host} , EXCLUDE localhost`];
+
+}
+
+/** `http://user:pass@host:port`, with the scheme optional. Null clears it; anything else unusable throws. */
+export function proxyUrl(raw: string | null): URL | null {
+
+  const text = raw?.trim() ?? "";
+
+  if (!text) {
+
+    return null;
+
+  }
+
+  let url: URL;
+
+  try {
+
+    url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `http://${text}`);
+
+  } catch {
+
+    throw new Error("That is not a proxy address. Use http://user:pass@host:port");
+
+  }
+
+  if (!/^https?:$/.test(url.protocol) || !url.hostname || (url.pathname !== "/" && url.pathname !== "")) {
+
+    throw new Error("Use an HTTP proxy, like http://user:pass@host:port");
+
+  }
+
+  return url;
+
+}
+
+/** What Settings shows: never the password. */
+export function proxyLabel(url: URL | null): string | null {
+
+  return url ? `${url.protocol}//${url.username ? `${decodeURIComponent(url.username)}@` : ""}${url.host}` : null;
+
+}
+
+/** Signs in to the proxy for Chromium, which takes no credentials; Playwright's way pauses every request and turns the cache off. */
+function openRelay(upstream: URL): Promise<Server> {
+
+  const auth = `Proxy-Authorization: Basic ${Buffer.from(`${decodeURIComponent(upstream.username)}:${decodeURIComponent(upstream.password)}`).toString("base64")}`;
+  const host = upstream.hostname.replace(/^\[|\]$/g, "");
+  const port = Number(upstream.port) || (upstream.protocol === "https:" ? 443 : 80);
+
+  const server = createServer((client) => {
+
+    let head = Buffer.alloc(0);
+
+    client.on("error", () => client.destroy());
+
+    const first = (chunk: Buffer) => {
+
+      head = Buffer.concat([head, chunk]);
+
+      const end = head.indexOf("\r\n\r\n");
+
+      if (end === -1) {
+
+        if (head.length > MAX_PROXY_HEAD) {
+
+          client.destroy();
+
+        }
+
+        return;
+
+      }
+
+      client.off("data", first);
+
+      const lines = head.subarray(0, end).toString("latin1").split("\r\n");
+      const tunnel = /^CONNECT /i.test(lines[0]);
+
+      // ponytail: only a connection's first request is signed, so plain-http requests each get their own; https tunnels are unaffected
+      const kept = lines.slice(1).filter((line) => !/^proxy-authorization:/i.test(line) && (tunnel || !/^(proxy-)?connection:/i.test(line)));
+      const far = upstream.protocol === "https:" ? connectTls({ host, port, servername: host }) : connect({ host, port });
+
+      far.write([lines[0], auth, ...kept, ...(tunnel ? [] : ["Connection: close"]), "", ""].join("\r\n"));
+      far.write(head.subarray(end + 4));
+
+      splice(client, far);
+
+    };
+
+    client.on("data", first);
+
+  });
+
+  // the browsers using it keep the process up, not the relay
+  server.unref();
+
+  return new Promise((resolve, reject) => {
+
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve(server));
+
+  });
+
+}
+
+/** Either side failing or dropping takes the other with it; a clean end is passed on by the pipe, so nothing unsent is lost. */
+function splice(a: Socket, b: Socket) {
+
+  for (const [from, to] of [[a, b], [b, a]]) {
+
+    from.on("error", () => to.destroy());
+    from.on("close", () => !from.readableEnded && to.destroy());
+    from.pipe(to);
+
+  }
+
+}
+
+/** Points every Chromium at `raw`, or straight out for null. Running ones restart onto it, and their tabs come back. */
+export async function setProxy(raw: string | null) {
+
+  const url = proxyUrl(raw);
+  const old = relay;
+
+  relay = url?.username ? await openRelay(url) : null;
+
+  const address = relay?.address();
+
+  proxy = !url ? null : address && typeof address === "object" ? { server: `http://127.0.0.1:${address.port}`, host: "127.0.0.1" } : { server: `${url.protocol}//${url.host}`, host: url.hostname };
+
+  await relaunch();
+
+  old?.close();
+
+}
+
+/** The user's time zone for every Chromium, or null for this machine's. Running ones restart onto it, and their tabs come back. */
+export async function setZone(next: string | null) {
+
+  if ((next || null) === zone) {
+
+    return;
+
+  }
+
+  zone = next || null;
+
+  await relaunch();
+
+}
+
+/** Closes every running Chromium so the next one starts with the new settings; whoever looks at or holds one gets it back at once. */
+async function relaunch() {
+
+  await Promise.all([...browsers.values()].map(async (browser) => {
+
+    if (!browser.chrome && !browser.launching) {
+
+      return;
+
+    }
+
+    await shut(browser);
+
+    if (browser.viewers.size || browser.hold) {
+
+      act(browser, LAND_MS, (next) => land(browser, next)).catch((err) => tell(browser, reason(err)));
+
+    }
+
+  }));
+
+}
+
+/** The client-hints probe launches a Chromium of its own; a server does it at boot, not on the agent's first <open>. */
+export function warm() {
+
+  void browserIdentity().catch(() => {});
+
+}
+
 /** Chromium's profile lock names its pid, for a kill when it stops answering. */
 function pidOf(profile: string): number {
 
@@ -414,7 +778,7 @@ async function migrate(workspace: string, context: BrowserContext) {
 
 }
 
-async function launch(tab: Tab): Promise<Chrome> {
+async function launch(browser: Browser): Promise<Chrome> {
 
   if (Bun.semver.order(Bun.version, MIN_BUN) < 0) {
 
@@ -422,38 +786,39 @@ async function launch(tab: Tab): Promise<Chrome> {
 
   }
 
-  const profile = join(tab.workspace, ".browser");
+  const profile = join(browser.workspace, ".browser");
   const fresh = !existsSync(profile);
   const context = await start(profile);
   const page = context.pages()[0] ?? (await context.newPage());
-  const chrome: Chrome = { context, pid: pidOf(profile), born: Date.now(), dead: false, page, sessions: new Map(), cast: null, pace: Promise.resolve() };
-  const browser = context.browser();
+  const chrome: Chrome = { context, pid: pidOf(profile), born: Date.now(), dead: false, page, claims: [], sessions: new Map(), cast: null, pace: Promise.resolve() };
+  const handle = context.browser();
 
   // service workers are not children of a page. A new page is paused so its first request waits for the headed client hints
-  if (browser) {
+  if (handle) {
 
-    const root = await browser.newBrowserCDPSession();
+    const root = await handle.newBrowserCDPSession();
 
     await watchTargets(root, ROOT_TARGETS, true).catch(() => {});
 
   }
 
-  context.on("close", () => gone(tab, chrome));
-  context.on("page", (next) => void adopt(tab, chrome, next).catch(() => {}));
+  context.on("close", () => gone(browser, chrome));
+  context.on("page", (next) => void adopt(browser, chrome, next, chrome.claims.shift()).catch(() => {}));
 
   if (fresh) {
 
-    await migrate(tab.workspace, context);
+    await migrate(browser.workspace, context);
 
   }
 
-  await adopt(tab, chrome, page);
+  // the active tab gets the first page; it loads its URL again the first time something needs it
+  await adopt(browser, chrome, page, activeTab(browser) ?? browser.tabs.at(-1));
 
   chrome.heartbeat = setInterval(async () => {
 
-    if (!chrome.dead && !(await alive(tab, chrome, HEARTBEAT_PING_MS)) && !chrome.dead) {
+    if (!chrome.dead && !(await alive(browser, chrome, HEARTBEAT_PING_MS)) && !chrome.dead) {
 
-      restart(tab, chrome, "missed a heartbeat");
+      restart(browser, chrome, "missed a heartbeat");
 
     }
 
@@ -465,8 +830,15 @@ async function launch(tab: Tab): Promise<Chrome> {
 
 }
 
-/** Every page gets this once: a crashed one is closed, and closing the shown one shows the newest left. */
-function adopt(tab: Tab, chrome: Chrome, page: Page): Promise<void> {
+/** What `adopt` is doing with each page, so whoever made the page can wait until it is shown. */
+const adopted = new WeakMap<Page, Promise<void>>();
+
+/** Every page gets this once and becomes a tab: `claimed` when it was made for a suspended one, a new tab when the site opened it. */
+function adopt(browser: Browser, chrome: Chrome, page: Page, claimed?: Tab): Promise<void> {
+
+  const tab = claimed ?? addTab(browser, page.url(), browser.active || null);
+
+  tab.page = page;
 
   page.on("crash", () => void page.close().catch(() => {}));
 
@@ -474,72 +846,200 @@ function adopt(tab: Tab, chrome: Chrome, page: Page): Promise<void> {
 
     chrome.sessions.delete(page);
 
-    if (chrome.page !== page || chrome.dead) {
+    // a dying Chromium closes its pages just before its context; waiting a turn lets that mark it dead, which suspends the tabs instead
+    setTimeout(() => {
 
-      return;
+      // a tab suspended or closed on purpose has let go of its page already
+      if (!chrome.dead && tab.page === page) {
 
-    }
+        void closeTab(browser, chrome, tab).catch(() => {});
 
-    const rest = chrome.context.pages();
+      }
 
-    if (rest.length) {
-
-      void show(tab, chrome, rest[rest.length - 1]).catch(() => {});
-      return;
-
-    }
-
-    // the context's "page" event shows it
-    chrome.context.newPage().catch(() => {});
+    }, 0);
 
   });
 
-  return show(tab, chrome, page);
+  page.on("framenavigated", (frame) => {
+
+    if (frame === page.mainFrame() && frame.url() !== "about:blank") {
+
+      tab.url = frame.url();
+      announce(browser);
+
+    }
+
+  });
+
+  page.on("domcontentloaded", () => void page.title().then((title) => {
+
+    tab.title = title;
+    announce(browser);
+
+  }, () => {}));
+
+  const shown = show(browser, chrome, page);
+
+  adopted.set(page, shown);
+
+  return shown;
 
 }
 
-/** Makes `page` the one the agent and viewers see, fitted to whoever holds it. */
-async function show(tab: Tab, chrome: Chrome, page: Page) {
+/** Makes `page` the one the agent and viewers see, fitted to whoever holds it. The tab it replaces keeps running, slowly. */
+async function show(browser: Browser, chrome: Chrome, page: Page) {
+
+  const before = chrome.page;
+  const tab = tabOfPage(browser, page);
 
   chrome.page = page;
 
+  if (tab) {
+
+    browser.active = tab.id;
+    tab.used = Date.now();
+
+  }
+
   // before any navigation: the launch flag cleaned the UA string, this puts the headed brand on the request
-  await reveal(tab, chrome, page).catch(() => {});
+  await reveal(browser, chrome, page).catch(() => {});
 
-  if (chrome.full === false) {
+  await throttle(browser, chrome, page, chrome.full === false ? SLOW : 1);
 
-    const session = await sessionOf(tab, chrome, page).catch(() => null);
+  if (before !== page && !before.isClosed()) {
 
-    await session?.send("Emulation.setCPUThrottlingRate", { rate: SLOW }).catch(() => {});
-
-  }
-
-  // nobody sees the other tabs, so they only hold memory; what opened this one stays, for its sign-in popups
-  const keep = new Set<Page>();
-
-  for (let one: Page | null = page; one && !keep.has(one); one = await one.opener()) {
-
-    keep.add(one);
+    void throttle(browser, chrome, before, SLOW);
 
   }
 
-  for (const other of chrome.context.pages()) {
+  trim(browser);
 
-    if (!keep.has(other)) {
+  if (browser.phone) {
 
-      void other.close().catch(() => {});
+    await fit(browser, chrome, page, browser.phone);
+
+  }
+
+  announce(browser);
+
+  await cast(browser, chrome);
+
+}
+
+async function throttle(browser: Browser, chrome: Chrome, page: Page, rate: number) {
+
+  const session = await sessionOf(browser, chrome, page).catch(() => null);
+
+  await session?.send("Emulation.setCPUThrottlingRate", { rate }).catch(() => {});
+
+}
+
+/** Shows `tab`, making it a page first if it is suspended. */
+async function focus(browser: Browser, chrome: Chrome, tab: Tab) {
+
+  if (tab.page) {
+
+    await show(browser, chrome, tab.page);
+    return;
+
+  }
+
+  chrome.claims.push(tab);
+
+  // the context's "page" event hands the new page to the claim and shows it
+  const page = await chrome.context.newPage();
+
+  await adopted.get(page);
+
+}
+
+/** Closing the active tab goes back to the one it was opened from, else the newest; the last tab is replaced by a blank one. */
+async function closeTab(browser: Browser, chrome: Chrome | null, tab: Tab) {
+
+  const page = tab.page;
+
+  tab.page = null;
+  browser.tabs = browser.tabs.filter((other) => other !== tab);
+
+  if (browser.active === tab.id) {
+
+    const next = browser.tabs.find((other) => other.id === tab.opener) ?? browser.tabs.at(-1) ?? addTab(browser, "about:blank", null);
+
+    browser.active = next.id;
+
+    // before the old page goes, so Chromium is never left without a window
+    if (chrome && !chrome.dead) {
+
+      await focus(browser, chrome, next);
 
     }
 
   }
 
-  if (tab.phone) {
+  announce(browser);
+  await page?.close().catch(() => {});
 
-    await fit(tab, chrome, page, tab.phone);
+}
+
+/** The active tab and the tabs it was opened from stay live, for sign-in popups; the rest go by least recent use. */
+function trim(browser: Browser) {
+
+  const keep = new Set<Tab>();
+
+  for (let tab = activeTab(browser); tab && !keep.has(tab); tab = browser.tabs.find((other) => other.id === tab!.opener)) {
+
+    keep.add(tab);
 
   }
 
-  await cast(tab, chrome);
+  const rest = browser.tabs.filter((tab) => !keep.has(tab)).sort((a, b) => b.used - a.used);
+  let live = [...keep].filter((tab) => tab.page).length;
+
+  rest.forEach((tab, index) => {
+
+    if (keep.size + index >= MAX_TABS) {
+
+      void closeTab(browser, browser.chrome, tab).catch(() => {});
+      return;
+
+    }
+
+    if (!tab.page) {
+
+      return;
+
+    }
+
+    if (live < LIVE_TABS) {
+
+      live += 1;
+      return;
+
+    }
+
+    const page = tab.page;
+
+    tab.page = null;
+    void page.close().catch(() => {});
+
+  });
+
+}
+
+/** The active tab's page. One suspended when its Chromium closed loads its URL again the first time it is needed. */
+async function current(browser: Browser, chrome: Chrome): Promise<Page> {
+
+  const page = chrome.page;
+  const tab = tabOfPage(browser, page);
+
+  if (tab && !browser.opening && page.url() === "about:blank" && /^https?:\/\//i.test(tab.url)) {
+
+    await page.goto(tab.url, { waitUntil: "domcontentloaded", timeout: LOAD_MS }).catch(() => {});
+    await settle(page);
+
+  }
+
+  return page;
 
 }
 
@@ -615,48 +1115,63 @@ async function network(reply: Reply, params: object, deep: boolean) {
 
 }
 
-/** A flat child session is not addressable from here, so the command goes the old way and the reply comes back as an event. */
-function command(root: CDPSession, sessionId: string, method: string, params: object, next: () => number): Promise<void> {
+type Answer = { sessionId: string; done: (body: { error?: { message?: string } }) => void };
 
-  const id = next();
+/**
+ * A flat child session is not addressable from here, so commands go the old way and replies come back as events.
+ * One listener per root reads each reply once, and parses nothing while no command waits.
+ */
+function commander(root: CDPSession): (sessionId: string, method: string, params: object) => Promise<void> {
 
-  return new Promise((resolve, reject) => {
+  const waiting = new Map<number, Answer>();
+
+  let n = 0;
+
+  root.on("Target.receivedMessageFromTarget", (event: Delivered) => {
+
+    if (!waiting.size || !event.message) {
+
+      return;
+
+    }
+
+    let body: { id?: number; error?: { message?: string } };
+
+    try {
+
+      body = JSON.parse(event.message);
+
+    } catch {
+
+      return;
+
+    }
+
+    const answer = waiting.get(body.id ?? 0);
+
+    if (answer && answer.sessionId === event.sessionId) {
+
+      waiting.delete(body.id!);
+      answer.done(body);
+
+    }
+
+  });
+
+  return (sessionId, method, params) => new Promise((resolve, reject) => {
+
+    const id = (n += 1);
 
     const timer = setTimeout(() => {
 
-      root.off("Target.receivedMessageFromTarget", on);
+      waiting.delete(id);
       reject(new Error("no answer"));
 
     }, 2_000);
 
-    const on = (event: Delivered) => {
-
-      if (event.sessionId !== sessionId || !event.message) {
-
-        return;
-
-      }
-
-      let body: { id?: number; error?: { message?: string } };
-
-      try {
-
-        body = JSON.parse(event.message);
-
-      } catch {
-
-        return;
-
-      }
-
-      if (body.id !== id) {
-
-        return;
-
-      }
+    waiting.set(id, { sessionId, done: (body) => {
 
       clearTimeout(timer);
-      root.off("Target.receivedMessageFromTarget", on);
 
       if (body.error) {
 
@@ -668,14 +1183,12 @@ function command(root: CDPSession, sessionId: string, method: string, params: ob
 
       }
 
-    };
-
-    root.on("Target.receivedMessageFromTarget", on);
+    } });
 
     root.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id, method, params }) }).catch((err) => {
 
       clearTimeout(timer);
-      root.off("Target.receivedMessageFromTarget", on);
+      waiting.delete(id);
       reject(err);
 
     });
@@ -703,8 +1216,7 @@ async function watchTargets(root: CDPSession, filter: { type?: string; exclude?:
 
   listening.add(root);
 
-  let n = 0;
-  const next = () => (n += 1);
+  const command = commander(root);
 
   root.on("Target.attachedToTarget", (event: Arrived) => {
 
@@ -717,7 +1229,7 @@ async function watchTargets(root: CDPSession, filter: { type?: string; exclude?:
 
     }
 
-    const reply: Reply = (method, params) => command(root, sessionId, method, params, next);
+    const reply: Reply = (method, params) => command(sessionId, method, params);
     const deep = WORKER.has(type);
 
     void stamp(reply, id, !!event.waitingForDebugger, deep);
@@ -770,8 +1282,25 @@ async function stamp(reply: Reply, id: Identity, waiting: boolean, deep: boolean
 
 }
 
-/** Puts the headed brand on the page's script and on its requests. The session stays: detaching clears both. */
-async function reveal(tab: Tab, chrome: Chrome, page: Page) {
+const revealed = new WeakMap<Page, Promise<void>>();
+
+/** Puts the headed brand on the page's script and on its requests, once per page. The session stays: detaching clears both. */
+function reveal(browser: Browser, chrome: Chrome, page: Page): Promise<void> {
+
+  let done = revealed.get(page);
+
+  if (!done) {
+
+    done = stampPage(browser, chrome, page);
+    revealed.set(page, done);
+
+  }
+
+  return done;
+
+}
+
+async function stampPage(browser: Browser, chrome: Chrome, page: Page) {
 
   if (fallback) {
 
@@ -787,7 +1316,7 @@ async function reveal(tab: Tab, chrome: Chrome, page: Page) {
 
   }
 
-  const session = await sessionOf(tab, chrome, page);
+  const session = await sessionOf(browser, chrome, page);
 
   // a dedicated worker is a child of the page, not of the browser, so the page session is what hears it
   await watchTargets(session, CHILD_TARGETS, true).catch(() => {});
@@ -796,7 +1325,7 @@ async function reveal(tab: Tab, chrome: Chrome, page: Page) {
 }
 
 /** The page's own CDP session, made once: it streams the page and carries the phone emulation. */
-function sessionOf(tab: Tab, chrome: Chrome, page: Page): Promise<CDPSession> {
+function sessionOf(browser: Browser, chrome: Chrome, page: Page): Promise<CDPSession> {
 
   let session = chrome.sessions.get(page);
 
@@ -815,11 +1344,11 @@ function sessionOf(tab: Tab, chrome: Chrome, page: Page): Promise<CDPSession> {
 
       }
 
-      tab.frame = page.url() === "about:blank" ? null : Buffer.from(data, "base64");
+      browser.frame = page.url() === "about:blank" ? null : Buffer.from(data, "base64");
 
-      for (const viewer of tab.viewers) {
+      for (const viewer of browser.viewers) {
 
-        viewer.frame(tab.frame);
+        viewer.frame(browser.frame);
 
       }
 
@@ -832,10 +1361,10 @@ function sessionOf(tab: Tab, chrome: Chrome, page: Page): Promise<CDPSession> {
 }
 
 /** Streams the shown page while anyone watches it, and nothing otherwise. */
-async function cast(tab: Tab, chrome: Chrome) {
+async function cast(browser: Browser, chrome: Chrome) {
 
   const page = chrome.page;
-  const session = tab.viewers.size ? await sessionOf(tab, chrome, page) : null;
+  const session = browser.viewers.size ? await sessionOf(browser, chrome, page) : null;
 
   if (chrome.page !== page || chrome.cast === session) {
 
@@ -851,9 +1380,9 @@ async function cast(tab: Tab, chrome: Chrome) {
 }
 
 /** A phone gets a phone's layout and screen, so sites switch to their mobile pages; null puts the desktop window back. */
-async function fit(tab: Tab, chrome: Chrome, page: Page, phone: Size | null) {
+async function fit(browser: Browser, chrome: Chrome, page: Page, phone: Size | null) {
 
-  const session = await sessionOf(tab, chrome, page);
+  const session = await sessionOf(browser, chrome, page);
 
   if (!phone) {
 
@@ -867,20 +1396,22 @@ async function fit(tab: Tab, chrome: Chrome, page: Page, phone: Size | null) {
 }
 
 /** Gives an empty browser somewhere to start when the user holds it. */
-async function land(tab: Tab, chrome: Chrome) {
+async function land(browser: Browser, chrome: Chrome) {
 
-  await fit(tab, chrome, chrome.page, tab.phone);
+  await fit(browser, chrome, chrome.page, browser.phone);
 
-  if (tab.hold && !tab.opening && chrome.page.url() === "about:blank") {
+  const page = await current(browser, chrome);
 
-    await chrome.page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: LOAD_MS }).catch(() => {});
+  if (browser.hold && !browser.opening && page.url() === "about:blank") {
+
+    await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: LOAD_MS }).catch(() => {});
 
   }
 
 }
 
 /** The browser process answers this itself, so it tells a slow page from a Chromium that is gone; only silence counts. */
-function alive(tab: Tab, chrome: Chrome, ms = PING_MS): Promise<boolean> {
+function alive(browser: Browser, chrome: Chrome, ms = PING_MS): Promise<boolean> {
 
   const page = chrome.context.pages()[0];
 
@@ -890,23 +1421,23 @@ function alive(tab: Tab, chrome: Chrome, ms = PING_MS): Promise<boolean> {
 
   }
 
-  return within(sessionOf(tab, chrome, page).then((session) => session.send("Browser.getVersion")), ms).then(() => true, (err) => !(err instanceof Stalled));
+  return within(sessionOf(browser, chrome, page).then((session) => session.send("Browser.getVersion")), ms).then(() => true, (err) => !(err instanceof Stalled));
 
 }
 
 /** Kills a Chromium that stopped answering; whoever still looks at or holds the browser gets a fresh one. */
-function restart(tab: Tab, chrome: Chrome, why: string) {
+function restart(browser: Browser, chrome: Chrome, why: string) {
 
-  console.warn(`browser: Chromium ${chrome.pid} of ${tab.workspace} ${why} on ${chrome.page.url()}; killing it`);
-  tell(tab, "The browser stopped responding, so it was restarted");
-  tab.closing = kill(chrome);
-  gone(tab, chrome);
+  console.warn(`browser: Chromium ${chrome.pid} of ${browser.workspace} ${why} on ${chrome.page.url()}; killing it`);
+  tell(browser, "The browser stopped responding, so it was restarted");
+  browser.closing = kill(chrome);
+  gone(browser, chrome);
 
 }
 
-function tell(tab: Tab, message: string) {
+function tell(browser: Browser, message: string) {
 
-  for (const viewer of tab.viewers) {
+  for (const viewer of browser.viewers) {
 
     viewer.fail(message);
 
@@ -957,51 +1488,64 @@ function exited(pid: number): boolean {
 
 }
 
-/** True when this was the tab's running Chromium. */
-function forget(tab: Tab, chrome: Chrome): boolean {
+/** True when this was the browser's running Chromium. */
+function forget(browser: Browser, chrome: Chrome): boolean {
 
   chrome.dead = true;
   clearInterval(chrome.heartbeat);
 
-  if (tab.chrome !== chrome) {
+  // its tabs stay as URLs, and come back with the next Chromium
+  for (const tab of browser.tabs) {
+
+    if (tab.page?.context() === chrome.context) {
+
+      tab.page = null;
+
+    }
+
+  }
+
+  announce(browser);
+
+  if (browser.chrome !== chrome) {
 
     return false;
 
   }
 
-  tab.chrome = null;
-  tab.frame = undefined;
+  browser.chrome = null;
+  browser.frame = undefined;
 
   return true;
 
 }
 
 /** Chromium exited, crashed or was killed: whoever still looks at or holds the browser gets a fresh one now. */
-function gone(tab: Tab, chrome: Chrome) {
+function gone(browser: Browser, chrome: Chrome) {
 
   // one that dies as it starts would otherwise relaunch in a loop
-  if (forget(tab, chrome) && (tab.viewers.size || tab.hold) && Date.now() - chrome.born > 10_000) {
+  if (forget(browser, chrome) && (browser.viewers.size || browser.hold) && Date.now() - chrome.born > 10_000) {
 
-    act(tab, LOAD_MS, (next) => land(tab, next)).catch((err) => tell(tab, reason(err)));
+    act(browser, LAND_MS, (next) => land(browser, next)).catch((err) => tell(browser, reason(err)));
 
   }
 
 }
 
 /** The running Chromium, launched on first use. A launch that hangs is given up on, and killed if it ever finishes. */
-async function chromeOf(tab: Tab): Promise<Chrome> {
+async function chromeOf(browser: Browser): Promise<Chrome> {
 
-  await tab.closing;
+  await browser.closing;
 
-  if (tab.chrome) {
+  if (browser.chrome) {
 
-    return tab.chrome;
+    return browser.chrome;
 
   }
 
-  if (!tab.launching) {
+  if (!browser.launching) {
 
-    const started = launch(tab);
+    const started = launch(browser);
 
     const launching = within(started, LOAD_MS + STALL_MS).then((chrome) => {
 
@@ -1011,7 +1555,7 @@ async function chromeOf(tab: Tab): Promise<Chrome> {
 
       }
 
-      tab.chrome = chrome;
+      browser.chrome = chrome;
 
       return chrome;
 
@@ -1019,8 +1563,8 @@ async function chromeOf(tab: Tab): Promise<Chrome> {
 
       started.then((late) => {
 
-        forget(tab, late);
-        tab.closing = kill(late);
+        forget(browser, late);
+        browser.closing = kill(late);
 
       }).catch(() => {});
 
@@ -1030,27 +1574,27 @@ async function chromeOf(tab: Tab): Promise<Chrome> {
 
     const done = () => {
 
-      if (tab.launching === launching) {
+      if (browser.launching === launching) {
 
-        tab.launching = null;
+        browser.launching = null;
 
       }
 
     };
 
-    tab.launching = launching;
+    browser.launching = launching;
     launching.then(done, done);
 
   }
 
-  return tab.launching;
+  return browser.launching;
 
 }
 
 /** True while someone is looking, holding, signing in, or a call is in flight. */
-function busy(tab: Tab): boolean {
+function busy(browser: Browser): boolean {
 
-  return tab.viewers.size > 0 || !!tab.hold || tab.pending > 0 || tab.pins > 0 || tab.opening || tab.acting > 0;
+  return browser.viewers.size > 0 || !!browser.hold || browser.pending > 0 || browser.pins > 0 || browser.opening || browser.acting > 0;
 
 }
 
@@ -1091,11 +1635,11 @@ function prefer(chrome: Chrome, foreground: boolean) {
 
 }
 
-function pace(tab: Tab, chrome: Chrome, full: boolean): Promise<void> {
+function pace(browser: Browser, chrome: Chrome, full: boolean): Promise<void> {
 
   const job = chrome.pace.then(async () => {
 
-    if (chrome.dead || tab.chrome !== chrome || chrome.full === full || (!full && busy(tab))) {
+    if (chrome.dead || browser.chrome !== chrome || chrome.full === full || (!full && busy(browser))) {
 
       return;
 
@@ -1103,17 +1647,11 @@ function pace(tab: Tab, chrome: Chrome, full: boolean): Promise<void> {
 
     prefer(chrome, full);
 
-    const rate = full ? 1 : SLOW;
-
-    await Promise.all(chrome.context.pages().map(async (page) => {
-
-      const session = await sessionOf(tab, chrome, page).catch(() => null);
-
-      await session?.send("Emulation.setCPUThrottlingRate", { rate }).catch(() => {});
-
-    }));
-
+    // set first, so a tab shown meanwhile gets the new rate too
     chrome.full = full;
+
+    // a tab in the background stays slow either way
+    await Promise.all(chrome.context.pages().map((page) => throttle(browser, chrome, page, full && page === chrome.page ? 1 : SLOW)));
 
   });
 
@@ -1123,53 +1661,53 @@ function pace(tab: Tab, chrome: Chrome, full: boolean): Promise<void> {
 
 }
 
-function wake(tab: Tab, chrome: Chrome): Promise<void> {
+function wake(browser: Browser, chrome: Chrome): Promise<void> {
 
-  clearTimeout(tab.nap);
+  clearTimeout(browser.nap);
 
-  return pace(tab, chrome, true);
+  return pace(browser, chrome, true);
 
 }
 
-function rest(tab: Tab) {
+function rest(browser: Browser) {
 
-  clearTimeout(tab.nap);
+  clearTimeout(browser.nap);
 
-  if (busy(tab) || !tab.chrome) {
+  if (busy(browser) || !browser.chrome) {
 
     return;
 
   }
 
-  tab.nap = setTimeout(() => {
+  browser.nap = setTimeout(() => {
 
-    const chrome = tab.chrome;
+    const chrome = browser.chrome;
 
-    if (!chrome || busy(tab) || chrome.dead) {
+    if (!chrome || busy(browser) || chrome.dead) {
 
       return;
 
     }
 
-    void pace(tab, chrome, false);
+    void pace(browser, chrome, false);
 
   }, REST_MS);
 
-  tab.nap.unref();
+  browser.nap.unref();
 
 }
 
 /** Every use of the browser goes through here: bounded, and a Chromium that stopped answering is killed, not waited on. */
-async function act<T>(tab: Tab, ms: number, work: (chrome: Chrome) => Promise<T>): Promise<T> {
+async function act<T>(browser: Browser, ms: number, work: (chrome: Chrome) => Promise<T>): Promise<T> {
 
-  touch(tab);
-  tab.acting += 1;
+  touch(browser);
+  browser.acting += 1;
 
   try {
 
-    const chrome = await chromeOf(tab);
+    const chrome = await chromeOf(browser);
 
-    await wake(tab, chrome);
+    await wake(browser, chrome);
 
     try {
 
@@ -1178,11 +1716,11 @@ async function act<T>(tab: Tab, ms: number, work: (chrome: Chrome) => Promise<T>
     } catch (err) {
 
       // a timeout is a slow page or a gone Chromium; only the second is worth a restart
-      if (err instanceof Stalled || (err instanceof errors.TimeoutError && !(await alive(tab, chrome)))) {
+      if (err instanceof Stalled || (err instanceof errors.TimeoutError && !(await alive(browser, chrome)))) {
 
         if (!chrome.dead) {
 
-          restart(tab, chrome, err instanceof Stalled ? "left a call unanswered" : "stopped answering");
+          restart(browser, chrome, err instanceof Stalled ? "left a call unanswered" : "stopped answering");
 
         }
 
@@ -1202,53 +1740,53 @@ async function act<T>(tab: Tab, ms: number, work: (chrome: Chrome) => Promise<T>
 
   } finally {
 
-    tab.acting -= 1;
-    touch(tab);
-    rest(tab);
+    browser.acting -= 1;
+    touch(browser);
+    rest(browser);
 
   }
 
 }
 
 /** Idle means nobody used, watched, held or waited on the browser for IDLE_MS. */
-function touch(tab: Tab) {
+function touch(browser: Browser) {
 
-  clearTimeout(tab.idle);
-  tab.idle = setTimeout(() => void close(tab.workspace), IDLE_MS);
+  clearTimeout(browser.idle);
+  browser.idle = setTimeout(() => void close(browser.workspace), IDLE_MS);
 
   // an idle timer is no reason for the process to stay up
-  tab.idle.unref();
+  browser.idle.unref();
 
 }
 
 /** The user's taps and keys land in the order they were made; a backlog on a slow page is refused, not replayed later. */
-function enqueue<T>(tab: Tab, work: () => Promise<T>): Promise<T> {
+function enqueue<T>(browser: Browser, work: () => Promise<T>): Promise<T> {
 
-  if (tab.pending >= MAX_PENDING) {
+  if (browser.pending >= MAX_PENDING) {
 
     return Promise.reject(new Error("The page is still busy with your last taps"));
 
   }
 
-  tab.pending += 1;
+  browser.pending += 1;
 
-  const next = tab.lane.then(work);
+  const next = browser.lane.then(work);
 
-  tab.lane = next.catch(() => {});
+  browser.lane = next.catch(() => {});
 
   return next.finally(() => {
 
-    tab.pending -= 1;
-    rest(tab);
+    browser.pending -= 1;
+    rest(browser);
 
   });
 
 }
 
 /** Closing lets Chromium write the profile's logins out; one that will not close in time is killed. */
-async function shut(tab: Tab) {
+async function shut(browser: Browser) {
 
-  const chrome = tab.chrome ?? (await tab.launching?.catch(() => null));
+  const chrome = browser.chrome ?? (await browser.launching?.catch(() => null));
 
   if (!chrome) {
 
@@ -1256,16 +1794,16 @@ async function shut(tab: Tab) {
 
   }
 
-  forget(tab, chrome);
+  forget(browser, chrome);
 
   const closing = within(chrome.context.close(), 5000).catch(() => kill(chrome));
 
-  tab.closing = closing;
+  browser.closing = closing;
   await closing;
 
-  if (tab.closing === closing) {
+  if (browser.closing === closing) {
 
-    tab.closing = null;
+    browser.closing = null;
 
   }
 
@@ -1274,46 +1812,46 @@ async function shut(tab: Tab) {
 /** `force` is for a deleted agent, whose browser nobody can use any more. */
 export async function close(workspace: string, force = false) {
 
-  const tab = tabs.get(workspace);
+  const browser = browsers.get(workspace);
 
-  if (!tab) {
+  if (!browser) {
 
     return;
 
   }
 
   // someone looking at, holding or about to be handed the browser counts as using it
-  if (!force && (tab.viewers.size || tab.hold || tab.pins)) {
+  if (!force && (browser.viewers.size || browser.hold || browser.pins)) {
 
-    touch(tab);
+    touch(browser);
     return;
 
   }
 
-  clearTimeout(tab.idle);
-  clearTimeout(tab.nap);
+  clearTimeout(browser.idle);
+  clearTimeout(browser.nap);
 
   if (force) {
 
-    tabs.delete(workspace);
-    tab.hold?.resolve();
-    tab.hold = null;
-    tab.viewers.clear();
+    browsers.delete(workspace);
+    browser.hold?.resolve();
+    browser.hold = null;
+    browser.viewers.clear();
 
   }
 
-  await shut(tab);
+  await shut(browser);
 
 }
 
 export async function closeAll() {
 
-  await Promise.all([...tabs.values()].map((tab) => {
+  await Promise.all([...browsers.values()].map((browser) => {
 
-    clearTimeout(tab.idle);
-    clearTimeout(tab.nap);
+    clearTimeout(browser.idle);
+    clearTimeout(browser.nap);
 
-    return shut(tab);
+    return shut(browser);
 
   }));
 
@@ -1322,13 +1860,13 @@ export async function closeAll() {
 /** Keeps the browser open, on its current page, for as long as `work` runs. */
 export async function pinned<T>(workspace: string, work: () => Promise<T>): Promise<T> {
 
-  const tab = tabOf(workspace);
+  const browser = browserOf(workspace);
 
-  tab.pins += 1;
+  browser.pins += 1;
 
-  if (tab.chrome) {
+  if (browser.chrome) {
 
-    void wake(tab, tab.chrome);
+    void wake(browser, browser.chrome);
 
   }
 
@@ -1338,9 +1876,9 @@ export async function pinned<T>(workspace: string, work: () => Promise<T>): Prom
 
   } finally {
 
-    tab.pins -= 1;
-    touch(tab);
-    rest(tab);
+    browser.pins -= 1;
+    touch(browser);
+    rest(browser);
 
   }
 
@@ -1349,35 +1887,37 @@ export async function pinned<T>(workspace: string, work: () => Promise<T>): Prom
 /** Sends frames to `viewer` until the returned function is called. A closed browser stays closed and shows as blank. */
 export function watch(workspace: string, viewer: Viewer): () => void {
 
-  const tab = tabOf(workspace);
+  const browser = browserOf(workspace);
 
-  tab.viewers.add(viewer);
+  browser.viewers.add(viewer);
 
   // a static page sends no new frames, so a second viewer would otherwise see nothing
-  if (tab.frame !== undefined || !(tab.chrome || tab.launching)) {
+  if (browser.frame !== undefined || !(browser.chrome || browser.launching)) {
 
-    viewer.frame(tab.frame ?? null);
+    viewer.frame(browser.frame ?? null);
 
   }
 
-  if (tab.chrome || tab.launching) {
+  viewer.tabs?.(viewsOf(browser));
 
-    act(tab, ACTION_MS, (chrome) => cast(tab, chrome)).catch((err) => viewer.fail(reason(err)));
+  if (browser.chrome || browser.launching) {
+
+    act(browser, ACTION_MS, (chrome) => cast(browser, chrome)).catch((err) => viewer.fail(reason(err)));
 
   }
 
   return () => {
 
-    tab.viewers.delete(viewer);
+    browser.viewers.delete(viewer);
 
-    if (!tab.viewers.size && tab.chrome) {
+    if (!browser.viewers.size && browser.chrome) {
 
-      within(cast(tab, tab.chrome), ACTION_MS).catch(() => {});
+      within(cast(browser, browser.chrome), ACTION_MS).catch(() => {});
 
     }
 
-    touch(tab);
-    rest(tab);
+    touch(browser);
+    rest(browser);
 
   };
 
@@ -1389,68 +1929,108 @@ export function watch(workspace: string, viewer: Viewer): () => void {
  */
 export async function takeOver(workspace: string, size?: Size) {
 
-  const tab = tabOf(workspace);
+  const browser = browserOf(workspace);
   const clamp = (value: number, max: number) => Math.round(Math.min(max, Math.max(320, value)));
 
-  tab.hold ??= Promise.withResolvers<void>();
-  tab.phone = size ? { width: clamp(size.width, WINDOW.width), height: clamp(size.height, WINDOW.height) } : null;
+  browser.hold ??= Promise.withResolvers<void>();
+  browser.phone = size ? { width: clamp(size.width, WINDOW.width), height: clamp(size.height, WINDOW.height) } : null;
 
-  await enqueue(tab, () => act(tab, LOAD_MS, (chrome) => land(tab, chrome)));
+  await enqueue(browser, () => act(browser, LAND_MS, (chrome) => land(browser, chrome)));
 
 }
 
 export async function handBack(workspace: string) {
 
-  const tab = tabs.get(workspace);
+  const browser = browsers.get(workspace);
 
-  if (!tab) {
+  if (!browser) {
 
     return;
 
   }
 
-  const chrome = tab.chrome;
-  const phone = tab.phone;
+  const chrome = browser.chrome;
+  const phone = browser.phone;
 
-  tab.hold?.resolve();
-  tab.hold = null;
-  tab.phone = null;
+  browser.hold?.resolve();
+  browser.hold = null;
+  browser.phone = null;
 
   if (!phone || !chrome) {
 
-    rest(tab);
+    rest(browser);
 
     return;
 
   }
 
-  await enqueue(tab, () => within(Promise.all(chrome.context.pages().map((page) => fit(tab, chrome, page, null))), ACTION_MS)).catch(() => {});
-  rest(tab);
+  await enqueue(browser, () => within(Promise.all(chrome.context.pages().map((page) => fit(browser, chrome, page, null))), ACTION_MS)).catch(() => {});
+  rest(browser);
 
 }
 
 /** What the user does in take-over. Coordinates are fractions of the frame, so any screen size maps onto the page. */
 export async function input(workspace: string, event: Input) {
 
-  const tab = tabs.get(workspace);
+  const browser = browsers.get(workspace);
 
-  if (!tab?.hold) {
+  if (!browser?.hold) {
 
     throw new Error("Take over the browser first");
 
   }
 
   // looking at the page changes nothing; only what the user actually does makes the agent's refs stale
-  tab.touched = true;
+  browser.touched = true;
 
-  await enqueue(tab, () => act(tab, INPUT_MS, (chrome) => perform(tab, chrome.page, event)));
+  await enqueue(browser, () => act(browser, INPUT_MS, (chrome) => perform(browser, chrome.page, event)));
 
 }
 
-async function perform(tab: Tab, page: Page, event: Input) {
+/** The user's tab strip in take-over: `id` names the tab to show or close. */
+export async function userTab(workspace: string, action: TabAction, id?: number) {
+
+  const browser = browsers.get(workspace);
+
+  if (!browser?.hold) {
+
+    throw new Error("Take over the browser first");
+
+  }
+
+  browser.touched = true;
+
+  await enqueue(browser, () => act(browser, LAND_MS, async (chrome) => {
+
+    const tab = action === "new" ? addTab(browser, "about:blank", browser.active) : browser.tabs.find((one) => one.id === id);
+
+    if (!tab) {
+
+      return;
+
+    }
+
+    if (action === "close") {
+
+      await closeTab(browser, chrome, tab);
+
+    } else {
+
+      await focus(browser, chrome, tab);
+
+    }
+
+    // a suspended tab loads again, and a new one starts somewhere
+    await land(browser, chrome);
+
+  }));
+
+}
+
+async function perform(browser: Browser, page: Page, event: Input) {
 
   // the frame shows the visual viewport, which a zoomed-out phone page makes wider than the screen; the mouse takes page pixels
-  const view = (await within(page.evaluate(() => ({ left: visualViewport!.offsetLeft, top: visualViewport!.offsetTop, width: visualViewport!.width, height: visualViewport!.height })), 2000).catch(() => null)) ?? { left: 0, top: 0, ...(tab.phone ?? WINDOW) };
+  const view = (await within(page.evaluate(() => ({ left: visualViewport!.offsetLeft, top: visualViewport!.offsetTop, width: visualViewport!.width, height: visualViewport!.height })), 2000).catch(() => null)) ?? { left: 0, top: 0, ...(browser.phone ?? WINDOW) };
   const at = (x: number, y: number) => [Math.round(view.left + x * view.width), Math.round(view.top + y * view.height)] as const;
 
   switch (event.kind) {
@@ -1495,13 +2075,13 @@ async function perform(tab: Tab, page: Page, event: Input) {
 }
 
 /** The agent's way in: waits out a take-over, then refuses ref-based actions the user may have made stale. */
-async function agentTab(workspace: string, signal?: AbortSignal, refs = false): Promise<Tab> {
+async function agentBrowser(workspace: string, signal?: AbortSignal, refs = false): Promise<Browser> {
 
-  const tab = tabOf(workspace);
+  const browser = browserOf(workspace);
 
-  while (tab.hold) {
+  while (browser.hold) {
 
-    const hold = tab.hold.promise;
+    const hold = browser.hold.promise;
 
     await new Promise<void>((resolve) => {
 
@@ -1518,17 +2098,17 @@ async function agentTab(workspace: string, signal?: AbortSignal, refs = false): 
 
   }
 
-  if (tab.touched && refs) {
+  if (browser.touched && refs) {
 
-    tab.touched = false;
+    browser.touched = false;
 
-    throw new Error(`The user used the browser while you worked, so that did not run. The page now:\n\n${await act(tab, ACTION_MS * 2, (chrome) => read(chrome.page))}`);
+    throw new Error(`The user used the browser while you worked, so that did not run. The page now:\n\n${await act(browser, ACTION_MS * 2, (chrome) => read(browser, chrome.page))}`);
 
   }
 
-  tab.touched = false;
+  browser.touched = false;
 
-  return tab;
+  return browser;
 
 }
 
@@ -1541,7 +2121,7 @@ async function settle(page: Page) {
 
 }
 
-/** What a click or key does shows up a moment after it returns: a new tab, a menu, a navigation starting. */
+/** What a click or key does shows up a moment after it returns: a new browser, a menu, a navigation starting. */
 async function after(chrome: Chrome) {
 
   await Bun.sleep(500);
@@ -1549,12 +2129,118 @@ async function after(chrome: Chrome) {
 
 }
 
-async function read(page: Page): Promise<string> {
+async function read(browser: Browser, page: Page): Promise<string> {
 
-  const tree = await page.ariaSnapshot({ mode: "ai", timeout: ACTION_MS });
+  const [tree, title] = await Promise.all([page.ariaSnapshot({ mode: "ai", timeout: ACTION_MS }), page.title()]);
   const cut = tree.length > MAX_SNAPSHOT ? `${tree.slice(0, MAX_SNAPSHOT)}\n... page cut at ${MAX_SNAPSHOT} characters` : tree;
+  const at = browser.tabs.findIndex((tab) => tab.page === page);
+  const tabs = browser.tabs.length > 1 && at !== -1 ? `\n\n(tab ${at + 1} of ${browser.tabs.length}; <tab> lists them)` : "";
 
-  return `${page.url()}\n${await page.title()}\n\n${cut}`;
+  return `${page.url()}\n${title}\n\n${cut}${tabs}`;
+
+}
+
+function listTabs(browser: Browser): string {
+
+  if (!browser.tabs.length) {
+
+    return "No tabs are open yet. Use <open https://...> first.";
+
+  }
+
+  return browser.tabs.map((tab, index) => `${index + 1}. ${tab.title || "(untitled)"} — ${tab.url}${tab.id === browser.active ? "  ← current" : ""}`).join("\n");
+
+}
+
+function nthTab(browser: Browser, raw: string): Tab {
+
+  const tab = /^\d+$/.test(raw) ? browser.tabs[Number(raw) - 1] : undefined;
+
+  if (!tab) {
+
+    throw new Error(`There is no tab ${raw}. The tabs:\n\n${listTabs(browser)}`);
+
+  }
+
+  return tab;
+
+}
+
+/** `<tab>` lists the tabs; `<tab 2>` shows one, `<tab https://…>` opens one, `<tab close 2>` closes one. Numbers are places in the list. */
+export async function tab(workspace: string, target: string, signal?: AbortSignal): Promise<string> {
+
+  const [word = "", arg = ""] = target.trim().split(/\s+/);
+  const browser = await agentBrowser(workspace, signal);
+  const running = !!(browser.chrome || browser.launching);
+
+  if (!word) {
+
+    return listTabs(browser);
+
+  }
+
+  if (word.toLowerCase() === "close") {
+
+    const doomed = arg ? nthTab(browser, arg) : activeTab(browser);
+
+    if (doomed) {
+
+      await (running ? act(browser, ACTION_MS, (chrome) => closeTab(browser, chrome, doomed)) : closeTab(browser, null, doomed));
+
+    }
+
+    return listTabs(browser);
+
+  }
+
+  const url = /^https?:\/\//i.test(word) ? word : word.toLowerCase() === "new" && arg ? checkedUrl(arg) : "";
+
+  if (!url && !/^\d+$/.test(word)) {
+
+    throw new Error("tab takes a number to switch to, a URL to open in a new tab, or close and a number:\n\n  <tab 2>\n  <tab https://example.com>\n  <tab close 2>");
+
+  }
+
+  const next = url ? addTab(browser, url, browser.active || null) : nthTab(browser, word);
+
+  // a closed browser starts on this tab, rather than on the old one and then a second page
+  if (!running) {
+
+    browser.active = next.id;
+
+  }
+
+  browser.opening = !!url;
+
+  try {
+
+    return await act(browser, LOAD_MS + ACTION_MS * 2, async (chrome) => {
+
+      if (chrome.page !== next.page) {
+
+        await focus(browser, chrome, next);
+
+      }
+
+      if (url) {
+
+        await chrome.page.goto(url, { waitUntil: "domcontentloaded", timeout: LOAD_MS });
+        await settle(chrome.page);
+
+      }
+
+      browser.opening = false;
+
+      return read(browser, await current(browser, chrome));
+
+    });
+
+  } finally {
+
+    browser.opening = false;
+    rest(browser);
+
+  }
 
 }
 
@@ -1588,25 +2274,25 @@ function checkedUrl(url: string): string {
 export async function open(workspace: string, url: string, signal?: AbortSignal): Promise<string> {
 
   const target = checkedUrl(url);
-  const tab = await agentTab(workspace, signal);
+  const browser = await agentBrowser(workspace, signal);
 
-  tab.opening = true;
+  browser.opening = true;
 
   try {
 
-    return await act(tab, LOAD_MS + ACTION_MS * 2, async (chrome) => {
+    return await act(browser, LOAD_MS + ACTION_MS * 2, async (chrome) => {
 
       await chrome.page.goto(target, { waitUntil: "domcontentloaded", timeout: LOAD_MS });
       await settle(chrome.page);
 
-      return read(chrome.page);
+      return read(browser, chrome.page);
 
     });
 
   } finally {
 
-    tab.opening = false;
-    rest(tab);
+    browser.opening = false;
+    rest(browser);
 
   }
 
@@ -1614,25 +2300,27 @@ export async function open(workspace: string, url: string, signal?: AbortSignal)
 
 export async function look(workspace: string, signal?: AbortSignal): Promise<string> {
 
-  const tab = await agentTab(workspace, signal);
+  const browser = await agentBrowser(workspace, signal);
   const blank = new Error("No page is open yet. Use <open https://...> first.");
 
-  // a closed browser has no page to read, and launching one just to say so is waste
-  if (!tab.chrome && !tab.launching) {
+  // a closed browser with no tab to bring back has no page to read, and launching one just to say so is waste
+  if (!browser.chrome && !browser.launching && !/^https?:\/\//i.test(activeTab(browser)?.url ?? "")) {
 
     throw blank;
 
   }
 
-  return act(tab, ACTION_MS * 2, async (chrome) => {
+  return act(browser, LOAD_MS + ACTION_MS * 2, async (chrome) => {
 
-    if (chrome.page.url() === "about:blank") {
+    const page = await current(browser, chrome);
+
+    if (page.url() === "about:blank") {
 
       throw blank;
 
     }
 
-    return read(chrome.page);
+    return read(browser, page);
 
   });
 
@@ -1641,14 +2329,14 @@ export async function look(workspace: string, signal?: AbortSignal): Promise<str
 export async function click(workspace: string, ref: string, signal?: AbortSignal): Promise<string> {
 
   const target = refOf(ref);
-  const tab = await agentTab(workspace, signal, true);
+  const browser = await agentBrowser(workspace, signal, true);
 
-  return act(tab, LOAD_MS + ACTION_MS * 3, async (chrome) => {
+  return act(browser, LOAD_MS + ACTION_MS * 3, async (chrome) => {
 
     await chrome.page.locator(`aria-ref=${target}`).click({ timeout: ACTION_MS });
     await after(chrome);
 
-    return read(chrome.page);
+    return read(browser, chrome.page);
 
   });
 
@@ -1657,9 +2345,9 @@ export async function click(workspace: string, ref: string, signal?: AbortSignal
 export async function type(workspace: string, ref: string, text: string, signal?: AbortSignal): Promise<string> {
 
   const target = refOf(ref);
-  const tab = await agentTab(workspace, signal, true);
+  const browser = await agentBrowser(workspace, signal, true);
 
-  await act(tab, ACTION_MS, (chrome) => chrome.page.locator(`aria-ref=${target}`).fill(text, { timeout: ACTION_MS }));
+  await act(browser, ACTION_MS, (chrome) => chrome.page.locator(`aria-ref=${target}`).fill(text, { timeout: ACTION_MS }));
 
   return `typed ${text.length} characters into ${target}`;
 
@@ -1667,14 +2355,14 @@ export async function type(workspace: string, ref: string, text: string, signal?
 
 export async function press(workspace: string, key: string, signal?: AbortSignal): Promise<string> {
 
-  const tab = await agentTab(workspace, signal, true);
+  const browser = await agentBrowser(workspace, signal, true);
 
-  return act(tab, LOAD_MS + ACTION_MS * 2, async (chrome) => {
+  return act(browser, LOAD_MS + ACTION_MS * 2, async (chrome) => {
 
     await chrome.page.keyboard.press(key.trim() || "Enter");
     await after(chrome);
 
-    return read(chrome.page);
+    return read(browser, chrome.page);
 
   });
 
@@ -1682,6 +2370,6 @@ export async function press(workspace: string, key: string, signal?: AbortSignal
 
 export async function pageUrl(workspace: string): Promise<string> {
 
-  return tabs.get(workspace)?.chrome?.page.url() ?? "about:blank";
+  return browsers.get(workspace)?.chrome?.page.url() ?? "about:blank";
 
 }

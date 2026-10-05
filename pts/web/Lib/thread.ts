@@ -254,7 +254,7 @@ export function describeWatch(target: string, minutes: string): string {
 }
 
 const RESULT_HEAD =/^\[([a-z]+) (ok|failed)\]$/gm;
-const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "submit", "handoff"]);
+const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "tab", "submit", "handoff"]);
 
 /** `[verb ok]` sections of one result event, in the order the blocks ran. */
 function splitResults(text: string): { ok: boolean; text: string }[] {
@@ -447,7 +447,8 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
     }
 
-    const page = [...ran].reverse().find((step) => PAGE_VERBS.has(step.verb) && step.ok);
+    // a tab list is not a page
+    const page = [...ran].reverse().find((step) => PAGE_VERBS.has(step.verb) && step.ok && /^https?:\/\//.test(step.detail));
 
     if (page) {
 

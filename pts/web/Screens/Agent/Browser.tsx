@@ -1,11 +1,11 @@
-import { ArrowLeft, Keyboard } from "lucide-react";
+import { ArrowLeft, Keyboard, Plus, X } from "lucide-react";
 import { Component, createRef, type ChangeEvent, type KeyboardEvent, type PointerEvent, type TouchEvent, type WheelEvent } from "react";
 
 import { Button, IconButton } from "../../Components/Controls";
 import { Glyph } from "../../Components/Glyph/Glyph";
 import { Bar } from "../../Components/Layout";
 
-import type { Agent, LiveChannel, LiveEvent, LiveInput } from "../../Lib/api";
+import type { Agent, BrowserTab, LiveChannel, LiveEvent, LiveInput } from "../../Lib/api";
 
 interface BrowserProps {
 
@@ -25,6 +25,8 @@ interface BrowserState {
 
   typed: string;
 
+  tabs: BrowserTab[];
+
 }
 
 // a pointer that moves further than this is scrolling or dragging, not tapping
@@ -39,10 +41,30 @@ function needsYou(agent: Agent): boolean {
 
 }
 
+function tabLabel(tab: BrowserTab): string {
+
+  if (tab.title) {
+
+    return tab.title;
+
+  }
+
+  try {
+
+    return tab.url === "about:blank" ? "New tab" : new URL(tab.url).hostname;
+
+  } catch {
+
+    return "New tab";
+
+  }
+
+}
+
 /** One agent's browser, live. Watching is free; taking over pauses the agent's browser work until it is handed back. */
 export class Browser extends Component<BrowserProps, BrowserState> {
 
-  state: BrowserState = { ready: false, blank: false, mine: false, error: "", typed: "" };
+  state: BrowserState = { ready: false, blank: false, mine: false, error: "", typed: "", tabs: [] };
 
   private frame = createRef<HTMLImageElement>();
   private typer = createRef<HTMLInputElement>();
@@ -120,6 +142,13 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     }
 
+    if (event.type === "tabs") {
+
+      this.setState({ tabs: event.tabs });
+      return;
+
+    }
+
     this.setState((state) => ({
 
       ready: state.ready || !!event.blank,
@@ -143,6 +172,62 @@ export class Browser extends Component<BrowserProps, BrowserState> {
   };
 
   input = (event: LiveInput) => this.props.live.send({ live: "input", event });
+
+  tab = (action: "switch" | "close" | "new", id?: number) => {
+
+    this.props.live.send({ live: "tab", action, id });
+
+    // what was typed belonged to the tab being left
+    this.setState({ typed: "" });
+
+  };
+
+  /** The agent's tabs. Only whoever has taken over can switch, open or close them; everyone sees which one is in front. */
+  renderTabs() {
+
+    const { tabs, mine } = this.state;
+
+    if (tabs.length < 2 && !mine) {
+
+      return null;
+
+    }
+
+    return (
+
+      <div role="tablist" aria-label="Tabs" className="mx-[23px] mb-3 flex shrink-0 items-center gap-1.5 overflow-x-auto md:mx-8">
+
+        {tabs.map((tab) => (
+
+          <span key={tab.id} className={`flex h-8 max-w-[200px] shrink-0 items-center rounded-full ${tab.active ? "bg-panel text-fg" : "text-dim"} ${tab.live || tab.active ? "" : "opacity-60"}`}>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab.active}
+              title={tab.url}
+              disabled={!mine || tab.active}
+              onClick={() => this.tab("switch", tab.id)}
+              className={`min-w-0 truncate py-1 text-[13px] disabled:cursor-default ${mine ? "pl-3" : "px-3"}`}
+            >
+
+              {tabLabel(tab)}
+
+            </button>
+
+            {mine && <button type="button" aria-label={`Close ${tabLabel(tab)}`} onClick={() => this.tab("close", tab.id)} className="flex size-7 shrink-0 items-center justify-center rounded-full hover:text-fg"><X size={13} strokeWidth={1.75} /></button>}
+
+          </span>
+
+        ))}
+
+        {mine && <button type="button" aria-label="New tab" title="New tab" onClick={() => this.tab("new")} className="flex size-8 shrink-0 items-center justify-center rounded-full text-dim hover:text-fg"><Plus size={16} strokeWidth={1.75} /></button>}
+
+      </div>
+
+    );
+
+  }
 
   /** On a phone the page is resized to fit the screen. */
   take = () => {
@@ -398,6 +483,8 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
           )}
         />
+
+        {this.renderTabs()}
 
         {needsYou(agent) && (
 

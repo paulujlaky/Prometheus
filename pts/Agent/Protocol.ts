@@ -1,6 +1,6 @@
 // Tagged blocks in, tagged results out. No JSON, so nothing the model writes ever needs escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "handoff", "ask", "routine", "say", "notify", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "tab", "submit", "handoff", "ask", "routine", "say", "notify", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -47,6 +47,8 @@ const ALIASES: Record<string, Verb> = {
   input: "type",
 
   key: "press",
+
+  tabs: "tab",
 
   handover: "handoff",
   human: "handoff",
@@ -338,6 +340,7 @@ Put every block you already know you need in the same reply. They run top to bot
   <click>    click an element on the page
   <type>     fill a text field on the page
   <press>    press a key: Enter, Tab, Escape, ArrowDown
+  <tab>      your browser's tabs — bare, it lists them
   <submit>   click the button that sends something — waits for the user's OK
   <handoff>  ask the user to do something in your browser, like signing in — waits for them
   <ask>      put a question to the user — waits for their answer
@@ -377,6 +380,10 @@ the page does, so use the ones from the latest outline.
   run the search
   <press Enter>
   </press>
+
+<open> loads in the tab you are on. A link that opens a new tab takes you to it, and closing it
+brings you back. <tab 2> switches to the second tab, <tab https://...> opens a page in a new tab,
+and <tab close 2> closes one. Tabs you leave stay open, even between tasks.
 
 Anything that sends, posts, books, buys or messages someone on the user's behalf is a <submit>,
 never a <click>. Put the button's ref on the tag and, in the body, one line saying what it sends

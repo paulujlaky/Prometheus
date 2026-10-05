@@ -62,7 +62,11 @@ export type SocketMessage =
 export type LiveEvent =
 
   | { type: "frame"; agentId: number; data: Blob }
-  | { type: "browser"; agentId: number; held?: boolean; mine?: boolean; blank?: boolean; error?: string };
+  | { type: "browser"; agentId: number; held?: boolean; mine?: boolean; blank?: boolean; error?: string }
+  | { type: "tabs"; agentId: number; tabs: BrowserTab[] };
+
+/** One of an agent's tabs. `live` is false while it is suspended to its URL. */
+export type BrowserTab = { id: number; title: string; url: string; active: boolean; live: boolean };
 
 export type LiveInput =
 
@@ -79,7 +83,8 @@ export type LiveCommand =
   | { live: "unwatch" }
   | { live: "take"; width?: number; height?: number }
   | { live: "give" }
-  | { live: "input"; event: LiveInput };
+  | { live: "input"; event: LiveInput }
+  | { live: "tab"; action: "switch" | "close" | "new"; id?: number };
 
 export interface LiveChannel {
 

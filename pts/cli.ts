@@ -2,9 +2,9 @@
 
 import { BoodleClient } from "../sdk/index";
 
-import { closeAll } from "./Agent/Tools/Browser";
+import { closeAll, setProxy, setZone } from "./Agent/Tools/Browser";
 import { runAgent, type RunEvent } from "./Agent/Runner";
-import { createAgent, getAgent, HOME, listAgents, listEvents, workspaceOf } from "./Store";
+import { createAgent, getAgent, HOME, listAgents, listEvents, readSetting, workspaceOf } from "./Store";
 
 const USAGE = `usage:
   bun pts/cli.ts models
@@ -124,6 +124,8 @@ switch (command) {
 
     };
 
+    await setProxy(readSetting("proxy"));
+    await setZone(readSetting("timezone"));
     await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen, ask: async (question, kind) => (kind === "question" ? (prompt(`\n${question}\n>`) ?? false) : confirm(`\n${question}\nAllow?`)) });
 
     // the browser keeps the process alive until its contexts close

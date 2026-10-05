@@ -51,7 +51,7 @@ test("agents can be created, changed, remembered and deleted", async () => {
 
   // without a model in the request it falls back to the default, which needs Boodle to resolve
   expect((await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "Modelless" }) })).status).toBe(503);
-  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: null });
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: null, proxy: null });
 
   const duplicate = await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "tester", modelId: "model-1" }) });
 
@@ -142,12 +142,27 @@ test("a time zone is saved and rejected when it is not a real one", async () => 
 
   const saved = await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "America/New_York" }) });
 
-  expect(await saved.json()).toEqual({ defaultModel: null, timezone: "America/New_York" });
-  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: "America/New_York" });
+  expect(await saved.json()).toEqual({ defaultModel: null, timezone: "America/New_York", proxy: null });
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: "America/New_York", proxy: null });
 
   const cleared = await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "  " }) });
 
   expect((await cleared.json()).timezone).toBe(null);
+
+});
+
+test("a proxy is saved without ever being shown back, and refused when it is not HTTP", async () => {
+
+  expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({ proxy: "socks5://proxy.example:1080" }) })).status).toBe(400);
+
+  const saved = await call("/api/settings", { method: "PUT", body: JSON.stringify({ proxy: "user:secret@proxy.example:8080" }) });
+
+  expect((await saved.json()).proxy).toBe("http://user@proxy.example:8080");
+  expect(JSON.stringify(await (await call("/api/settings")).json())).not.toContain("secret");
+
+  const cleared = await call("/api/settings", { method: "PUT", body: JSON.stringify({ proxy: "" }) });
+
+  expect((await cleared.json()).proxy).toBe(null);
 
 });
 

@@ -855,6 +855,10 @@ export async function execute(action: Action, cwd: string, signal?: AbortSignal,
 
         return ok(await browser.press(cwd, action.path || bodyLines(action.body)[0] || "", signal));
 
+      case "tab":
+
+        return ok(await browser.tab(cwd, action.path || bodyLines(action.body)[0] || "", signal));
+
       default:
 
         throw new Error(`${action.verb} is handled by the loop`);
