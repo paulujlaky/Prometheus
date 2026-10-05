@@ -14,7 +14,7 @@ import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { isTimeZone, nextAt, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
-import { addGroupMessage, createAgent, createRoutine, deleteAgent, deletePushSub, deleteRoutine, getAgentById, getRoutine, listAgents, listEvents, listGroupMessages, listRoutines, readCookie, trackedChats, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
+import { addGroupMessage, createAgent, createGroupChat, createRoutine, deleteAgent, deleteGroupChat, deletePushSub, deleteRoutine, getAgentById, getGroupChat, getRoutine, listAgents, listEvents, listGroupChats, listGroupMessages, listRoutines, markRead, readCookie, unreadEvents, unreadGroup, trackedChats, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
@@ -133,9 +133,9 @@ function onRunEvent(event: RunEvent) {
   }
 
   // a finished task does not buzz on its own: the agent decides, with <notify>, when it is worth it
-  if (event.kind === "notify" || event.kind === "ask" || event.kind === "handoff") {
+  if (event.kind === "notify" || event.kind === "ask" || event.kind === "handoff" || event.kind === "question") {
 
-    notify({ title: event.kind === "ask" ? `${name} needs your OK` : event.kind === "handoff" ? `${name} needs you in the browser` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
+    notify({ title: event.kind === "ask" ? `${name} needs your OK` : event.kind === "handoff" ? `${name} needs you in the browser` : event.kind === "question" ? `${name} has a question` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
     return;
 
   }
@@ -159,12 +159,21 @@ function onRunEvent(event: RunEvent) {
 
 }
 
-/** Saves and shows a thread message, then wakes whoever it routes to. */
-function postGroup(author: string, agentId: number | null, text: string, origin: Origin | null = null) {
+/** Saves and shows a thread message, then wakes whoever in that thread it routes to. Group 0 is Everyone. */
+function postGroup(groupId: number, author: string, agentId: number | null, text: string, origin: Origin | null = null) {
 
-  const recent = listGroupMessages(RECENT_GROUP);
-  const message = addGroupMessage(author, agentId, text);
-  const agents = listAgents();
+  const group = groupId ? getGroupChat(groupId) : null;
+
+  // a reply finishing after its group was deleted has nowhere to go
+  if (groupId && !group) {
+
+    return;
+
+  }
+
+  const recent = listGroupMessages(groupId, RECENT_GROUP);
+  const message = addGroupMessage(groupId, author, agentId, text);
+  const agents = group ? listAgents().filter((agent) => group.members.includes(agent.id)) : listAgents();
 
   broadcast({ type: "group", message });
 
@@ -173,7 +182,7 @@ function postGroup(author: string, agentId: number | null, text: string, origin:
   if ("capped" in next) {
 
     // posted directly: routed like a user message, the note would wake everyone
-    broadcast({ type: "group", message: addGroupMessage("system", null, `Hand-off limit reached (${MAX_HOPS} in a row). @mention an agent to keep going.`) });
+    broadcast({ type: "group", message: addGroupMessage(groupId, "system", null, `Hand-off limit reached (${MAX_HOPS} in a row). @mention an agent to keep going.`) });
     return;
 
   }
@@ -186,7 +195,7 @@ function postGroup(author: string, agentId: number | null, text: string, origin:
 
     }
 
-    queue.enqueue(agent, groupTask(agent, agents, recent, message), next.origin);
+    queue.enqueue(agent, groupTask(agent, agents, recent, message, group?.name), next.origin);
 
   }
 
@@ -204,12 +213,16 @@ async function start(agent: Agent, task: string, control: RunControl, origin?: O
 
   if (end.kind === "done") {
 
-    postGroup(agent.name, agent.id, end.text, origin);
+    postGroup(origin.group, agent.name, agent.id, end.text, origin);
     return;
 
   }
 
-  broadcast({ type: "group", message: addGroupMessage(agent.name, agent.id, `Could not finish: ${end.text}`) });
+  if (!origin.group || getGroupChat(origin.group)) {
+
+    broadcast({ type: "group", message: addGroupMessage(origin.group, agent.name, agent.id, `Could not finish: ${end.text}`) });
+
+  }
 
 }
 
@@ -220,7 +233,28 @@ const live = new Live((agentId) => queue.answer(agentId, true, "handoff"));
 
 function view(agent: Agent) {
 
-  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id), waitingOn: queue.waitingOn(agent.id) };
+  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, category: agent.category, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id), waitingOn: queue.waitingOn(agent.id), unread: unreadEvents(agent.id) };
+
+}
+
+/** Everyone first, as group 0 with no member list, since it is all of them. */
+function groupViews() {
+
+  return [{ id: 0, name: "Everyone", members: [] as number[], createdAt: 0 }, ...listGroupChats()].map((group) => ({ ...group, unread: unreadGroup(group.id) }));
+
+}
+
+function groupIdOr404(value: unknown): number {
+
+  const id = Number(value ?? 0);
+
+  if (!Number.isInteger(id) || (id && !getGroupChat(id))) {
+
+    throw new HttpError(404, "No such group chat");
+
+  }
+
+  return id;
 
 }
 
@@ -317,11 +351,18 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
   if (!action && method === "PATCH") {
 
-    const changes = await body<{ modelId?: unknown; persona?: unknown; glyph?: unknown }>(req);
+    const changes = await body<{ modelId?: unknown; persona?: unknown; glyph?: unknown; category?: unknown }>(req);
+    const category = changes.category === undefined ? undefined : text(changes.category, "category").trim();
 
     if (changes.glyph !== undefined && !isGlyph(text(changes.glyph, "glyph"))) {
 
       throw new HttpError(400, "glyph must be shape:color from the known sets");
+
+    }
+
+    if (category && category.length > 32) {
+
+      throw new HttpError(400, "Categories are at most 32 characters");
 
     }
 
@@ -330,6 +371,7 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
       modelId: changes.modelId === undefined ? undefined : text(changes.modelId, "modelId"),
       persona: changes.persona === undefined ? undefined : text(changes.persona, "persona"),
       glyph: changes.glyph as string | undefined,
+      category,
 
     });
 
@@ -383,15 +425,16 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
   if (action === "answer" && method === "POST") {
 
-    const { allow } = await body<{ allow?: unknown }>(req);
+    const { allow, text: reply } = await body<{ allow?: unknown; text?: unknown }>(req);
 
-    if (typeof allow !== "boolean") {
+    if (typeof allow !== "boolean" && typeof reply !== "string") {
 
-      throw new HttpError(400, "allow must be true or false");
+      throw new HttpError(400, "allow must be true or false, or text the answer to a question");
 
     }
 
-    if (!queue.answer(agent.id, allow)) {
+    // words only ever answer a question, never an approval
+    if (!(typeof reply === "string" ? queue.answer(agent.id, reply, "question") : queue.answer(agent.id, allow as boolean))) {
 
       throw new HttpError(409, "Nothing is waiting for an answer");
 
@@ -610,13 +653,15 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
     const limit = Math.min(500, Number(url.searchParams.get("limit") ?? 200));
     const before = Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
 
-    return json(listGroupMessages(limit, before));
+    return json(listGroupMessages(groupIdOr404(url.searchParams.get("group")), limit, before));
 
   }
 
   if (method === "POST" && path === "/api/group") {
 
-    const message = text((await body<{ text?: unknown }>(req)).text, "text").trim();
+    const input = await body<{ text?: unknown; group?: unknown }>(req);
+    const message = text(input.text, "text").trim();
+    const groupId = groupIdOr404(input.group);
 
     if (!message) {
 
@@ -625,9 +670,62 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
     }
 
     boodle();
-    postGroup("user", null, message);
+    postGroup(groupId, "user", null, message);
 
     return json({ ok: true }, 201);
+
+  }
+
+  if (method === "GET" && path === "/api/groups") {
+
+    return json(groupViews());
+
+  }
+
+  if (method === "POST" && path === "/api/groups") {
+
+    const input = await body<{ name?: unknown; members?: unknown }>(req);
+    const members = Array.isArray(input.members) ? [...new Set(input.members.map(Number))].map((id) => getAgentById(id)) : [];
+
+    if (members.length < 2 || members.some((agent) => !agent)) {
+
+      throw new HttpError(400, "members must name at least two agents");
+
+    }
+
+    // quotes would break the thread title the agent's chat reads back
+    const name = (input.name === undefined ? "" : text(input.name, "name")).trim().replace(/"/g, "").slice(0, 60) || members.map((agent) => agent!.name).join(", ");
+
+    return json({ ...createGroupChat(name, members.map((agent) => agent!.id)), unread: 0 }, 201);
+
+  }
+
+  // never 0: Everyone cannot be deleted
+  const groupMatch = /^\/api\/groups\/([1-9]\d*)$/.exec(path);
+
+  if (groupMatch && method === "DELETE") {
+
+    deleteGroupChat(groupIdOr404(groupMatch[1]));
+
+    return json({ ok: true });
+
+  }
+
+  if (method === "POST" && path === "/api/read") {
+
+    const input = await body<{ agent?: unknown; group?: unknown }>(req);
+
+    if (input.agent !== undefined) {
+
+      markRead("agent", agentOr404(Number(input.agent)).id);
+
+    } else {
+
+      markRead("group", groupIdOr404(input.group));
+
+    }
+
+    return json({ ok: true });
 
   }
 

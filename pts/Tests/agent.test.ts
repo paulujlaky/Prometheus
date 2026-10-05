@@ -124,7 +124,7 @@ test.skipIf(process.platform !== "linux")("commands run sandboxed in the workspa
 test("a run asking for approval waits, then hears the answer or a stop", async () => {
 
   const agent = { id: 7, name: "a7" } as Agent;
-  const answers: boolean[] = [];
+  const answers: (boolean | string)[] = [];
 
   let asked = Promise.resolve();
 
@@ -133,6 +133,7 @@ test("a run asking for approval waits, then hears the answer or a stop", async (
     asked = (async () => {
 
       answers.push(await control.ask("Send it?"));
+      answers.push(await control.ask("Which one?\n- A\n- B", "question"));
       answers.push(await control.ask("Sign in to GitHub", "handoff"));
 
     })();
@@ -149,6 +150,11 @@ test("a run asking for approval waits, then hears the answer or a stop", async (
 
   await Bun.sleep(0);
 
+  expect(queue.waitingOn(7)).toBe("question");
+  expect(queue.answer(7, "B", "question")).toBe(true);
+
+  await Bun.sleep(0);
+
   expect(queue.question(7)).toBe("Sign in to GitHub");
   expect(queue.waitingOn(7)).toBe("handoff");
 
@@ -158,7 +164,7 @@ test("a run asking for approval waits, then hears the answer or a stop", async (
   queue.stop(7);
   await asked;
 
-  expect(answers).toEqual([true, false]);
+  expect(answers).toEqual([true, "B", false]);
   expect(queue.answer(7, true)).toBe(false);
 
 });

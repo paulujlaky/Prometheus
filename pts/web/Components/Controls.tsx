@@ -82,6 +82,8 @@ export interface Option {
   value: string;
   label: string;
 
+  icon?: ReactNode;
+
 }
 
 interface SelectProps {
@@ -217,13 +219,21 @@ export class Select extends Component<SelectProps, SelectState> {
     const { open, active } = this.state;
     const current = options.find((option) => option.value === value);
 
+    // one option with an icon gives every option the slot, so labels stay in a column
+    const iconed = options.some((option) => option.icon);
+
     return (
 
       <div ref={this.root} className={`relative ${wide ? "w-full" : ""}`}>
 
         <button ref={this.trigger} type="button" aria-haspopup="listbox" aria-expanded={open} aria-label={label} disabled={disabled} onClick={() => (open ? this.setState({ open: false }) : this.openList())} onKeyDown={this.onTriggerKey} className={`flex h-11 items-center justify-between gap-3 rounded-xl border border-line bg-panel px-4 text-[15px] text-fg disabled:opacity-40 ${wide ? "w-full" : "max-w-56"}`}>
 
-          <span className="truncate">{current?.label ?? "Choose…"}</span>
+          <span className="flex min-w-0 items-center gap-2.5">
+
+            {current?.icon && <span className="flex shrink-0 text-dim">{current.icon}</span>}
+            <span className="truncate">{current?.label ?? "Choose…"}</span>
+
+          </span>
           <ChevronDown size={16} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
 
         </button>
@@ -238,7 +248,13 @@ export class Select extends Component<SelectProps, SelectState> {
 
                 <li key={option.value} ref={(element) => { this.items[index] = element; }} role="option" tabIndex={-1} aria-selected={option.value === value} onClick={() => this.choose(index)} onPointerMove={() => index !== active && this.setState({ active: index })} className={`flex cursor-pointer items-center justify-between gap-6 rounded-lg px-3 py-2.5 text-[15px] whitespace-nowrap outline-none ${index === active ? "bg-raised" : ""}`}>
 
-                  {option.label}
+                  <span className="flex items-center gap-2.5">
+
+                    {iconed && <span className="flex size-4 shrink-0 text-dim">{option.icon}</span>}
+                    {option.label}
+
+                  </span>
+
                   {option.value === value && <Check size={15} className="shrink-0" />}
 
                 </li>

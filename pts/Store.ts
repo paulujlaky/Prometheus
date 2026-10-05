@@ -9,7 +9,7 @@ export const HOME = process.env.PTS_HOME ?? join(homedir(), ".pts");
 
 const NAME = /^[A-Za-z][\w -]{0,31}$/;
 
-export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "notify" | "ask" | "handoff" | "done" | "error";
+export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "notify" | "ask" | "question" | "handoff" | "done" | "error";
 
 export interface Agent {
 
@@ -25,6 +25,9 @@ export interface Agent {
 
   /** "shape:color", see Glyph.ts. */
   glyph: string;
+
+  /** The sidebar heading it sits under; empty for none. */
+  category: string;
 
   createdAt: number;
 
@@ -100,6 +103,18 @@ db.exec(`
     agent_id integer not null
   );
 
+  create table if not exists group_chats (
+    id integer primary key,
+    name text not null,
+    created_at integer not null
+  );
+
+  create table if not exists group_members (
+    group_id integer not null references group_chats(id) on delete cascade,
+    agent_id integer not null references agents(id) on delete cascade,
+    primary key (group_id, agent_id)
+  );
+
   create table if not exists group_messages (
     id integer primary key,
     author text not null,
@@ -122,16 +137,37 @@ for (const { id } of db.query<{ id: number }, []>("select id from agents where g
 
 }
 
+if (!db.query<{ name: string }, []>("pragma table_info(agents)").all().some((column) => column.name === "category")) {
+
+  db.exec("alter table agents add column category text not null default ''");
+
+  // history from before unread counts existed is read, or the first load would flag every chat
+  for (const { id } of db.query<{ id: number }, []>("select id from agents").all()) {
+
+    markRead("agent", id);
+
+  }
+
+}
+
+// 0 is Everyone, which has no row in group_chats
+if (!db.query<{ name: string }, []>("pragma table_info(group_messages)").all().some((column) => column.name === "group_id")) {
+
+  db.exec("alter table group_messages add column group_id integer not null default 0");
+  markRead("group", 0);
+
+}
+
 if (!db.query<{ name: string }, []>("pragma table_info(routines)").all().some((column) => column.name === "title")) {
 
   db.exec("alter table routines add column title text not null default ''");
 
 }
 
-const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, glyph, created_at as createdAt";
+const AGENT_COLUMNS = "id, name, model_id as modelId, persona, bot_draft_id as botDraftId, bot_assistant_id as botAssistantId, bot_hash as botHash, glyph, category, created_at as createdAt";
 const EVENT_COLUMNS = "id, agent_id as agentId, run_id as runId, kind, text, at";
 const ROUTINE_COLUMNS = "id, agent_id as agentId, kind, spec, target, title, task, enabled, last_output as lastOutput, last_at as lastAt";
-const GROUP_COLUMNS = "id, author, agent_id as agentId, text, at";
+const GROUP_COLUMNS = "id, group_id as groupId, author, agent_id as agentId, text, at";
 
 /** `schedule` runs on a cron spec; `watch` checks `target` every `spec` minutes and runs only when it changes. */
 export interface Routine {
@@ -161,12 +197,27 @@ export interface Routine {
 export interface GroupMessage {
 
   id: number;
+
+  /** 0 for Everyone. */
+  groupId: number;
+
   author: string;
   agentId: number | null;
 
   text: string;
 
   at: number;
+
+}
+
+/** A thread with some of the agents. `name` defaults to theirs, joined. */
+export interface GroupChat {
+
+  id: number;
+  name: string;
+  members: number[];
+
+  createdAt: number;
 
 }
 
@@ -256,9 +307,9 @@ export function getAgentById(id: number): Agent | null {
 
 }
 
-export function updateAgent(id: number, changes: { modelId?: string; persona?: string; glyph?: string }) {
+export function updateAgent(id: number, changes: { modelId?: string; persona?: string; glyph?: string; category?: string }) {
 
-  db.query("update agents set model_id = coalesce(?, model_id), persona = coalesce(?, persona), glyph = coalesce(?, glyph) where id = ?").run(changes.modelId ?? null, changes.persona ?? null, changes.glyph ?? null, id);
+  db.query("update agents set model_id = coalesce(?, model_id), persona = coalesce(?, persona), glyph = coalesce(?, glyph), category = coalesce(?, category) where id = ?").run(changes.modelId ?? null, changes.persona ?? null, changes.glyph ?? null, changes.category ?? null, id);
 
 }
 
@@ -266,6 +317,7 @@ export function updateAgent(id: number, changes: { modelId?: string; persona?: s
 export function deleteAgent(id: number) {
 
   db.query("delete from agents where id = ?").run(id);
+  db.query("delete from settings where key = ?").run(`read:agent:${id}`);
 
 }
 
@@ -428,16 +480,89 @@ export function deleteRoutine(id: number) {
 
 }
 
-export function addGroupMessage(author: string, agentId: number | null, text: string): GroupMessage {
+export function addGroupMessage(groupId: number, author: string, agentId: number | null, text: string): GroupMessage {
 
-  return db.query<GroupMessage, [string, number | null, string, number]>(`insert into group_messages (author, agent_id, text, at) values (?, ?, ?, ?) returning ${GROUP_COLUMNS}`).get(author, agentId, text, Date.now())!;
+  return db.query<GroupMessage, [number, string, number | null, string, number]>(`insert into group_messages (group_id, author, agent_id, text, at) values (?, ?, ?, ?, ?) returning ${GROUP_COLUMNS}`).get(groupId, author, agentId, text, Date.now())!;
 
 }
 
 /** The newest `limit` messages before `before`, oldest first. */
-export function listGroupMessages(limit = 200, before = Number.MAX_SAFE_INTEGER): GroupMessage[] {
+export function listGroupMessages(groupId: number, limit = 200, before = Number.MAX_SAFE_INTEGER): GroupMessage[] {
 
-  return db.query<GroupMessage, [number, number]>(`select * from (select ${GROUP_COLUMNS} from group_messages where id < ? order by id desc limit ?) order by id`).all(before, limit);
+  return db.query<GroupMessage, [number, number, number]>(`select * from (select ${GROUP_COLUMNS} from group_messages where group_id = ? and id < ? order by id desc limit ?) order by id`).all(groupId, before, limit);
+
+}
+
+type GroupChatRow = Omit<GroupChat, "members"> & { members: string | null };
+
+const GROUP_CHATS = "select g.id, g.name, g.created_at as createdAt, group_concat(m.agent_id) as members from group_chats g left join group_members m on m.group_id = g.id";
+
+function groupChatOf(row: GroupChatRow): GroupChat {
+
+  return { ...row, members: row.members ? row.members.split(",").map(Number) : [] };
+
+}
+
+export function createGroupChat(name: string, members: number[]): GroupChat {
+
+  const { id } = db.query<{ id: number }, [string, number]>("insert into group_chats (name, created_at) values (?, ?) returning id").get(name, Date.now())!;
+
+  for (const agentId of members) {
+
+    db.query("insert or ignore into group_members (group_id, agent_id) values (?, ?)").run(id, agentId);
+
+  }
+
+  return getGroupChat(id)!;
+
+}
+
+export function getGroupChat(id: number): GroupChat | null {
+
+  const row = db.query<GroupChatRow, [number]>(`${GROUP_CHATS} where g.id = ? group by g.id`).get(id);
+
+  return row && groupChatOf(row);
+
+}
+
+export function listGroupChats(): GroupChat[] {
+
+  return db.query<GroupChatRow, []>(`${GROUP_CHATS} group by g.id order by g.id`).all().map(groupChatOf);
+
+}
+
+export function deleteGroupChat(id: number) {
+
+  db.query("delete from group_chats where id = ?").run(id);
+  db.query("delete from group_messages where group_id = ?").run(id);
+  db.query("delete from settings where key = ?").run(`read:group:${id}`);
+
+}
+
+function readMark(key: string): number {
+
+  return Number(readSetting(key) ?? 0);
+
+}
+
+/** What the agent said to the user since its chat was last open: says, and every <done> but a "wait". */
+export function unreadEvents(agentId: number): number {
+
+  return db.query<{ n: number }, [number, number]>("select count(*) as n from events where agent_id = ? and id > ? and (kind = 'say' or (kind = 'done' and lower(trim(text, ' .!' || char(9, 10, 13))) != 'wait'))").get(agentId, readMark(`read:agent:${agentId}`))!.n;
+
+}
+
+export function unreadGroup(groupId: number): number {
+
+  return db.query<{ n: number }, [number, number]>("select count(*) as n from group_messages where group_id = ? and author != 'user' and id > ?").get(groupId, readMark(`read:group:${groupId}`))!.n;
+
+}
+
+export function markRead(target: "agent" | "group", id: number) {
+
+  const latest = target === "agent" ? "select coalesce(max(id), 0) as n from events where agent_id = ?" : "select coalesce(max(id), 0) as n from group_messages where group_id = ?";
+
+  writeSetting(`read:${target}:${id}`, String(db.query<{ n: number }, [number]>(latest).get(id)!.n));
 
 }
 

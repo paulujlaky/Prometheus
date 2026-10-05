@@ -11,15 +11,20 @@ import { Details } from "../Screens/Agent/Details";
 import { Group } from "../Screens/Group/Group";
 import { Home } from "../Screens/Home/Home";
 import { NewAgent } from "../Screens/Home/NewAgent";
+import { NewGroup } from "../Screens/Home/NewGroup";
 
+import { isWaiting } from "../../Features/Group";
 import { AgentsContext } from "./context";
-import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupMessage, type LiveChannel, type LiveCommand, type LiveEvent, type Model, type SocketMessage } from "../Lib/api";
+import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupChat, type GroupMessage, type LiveChannel, type LiveCommand, type LiveEvent, type Model, type SocketMessage } from "../Lib/api";
 
 type Route =
 
   | { name: "home" }
-  | { name: "agent" | "details" | "browser"; id: number }
-  | { name: "group" | "settings" | "new" };
+  | { name: "agent" | "details" | "browser" | "group"; id: number }
+  | { name: "settings" | "new" | "newGroup" };
+
+/** A chat whose messages can be unread; group 0 is Everyone. */
+type ReadTarget = { agent: number } | { group: number };
 
 interface AppState {
 
@@ -31,7 +36,9 @@ interface AppState {
 
   agents: Agent[];
   events: Record<number, AgentEvent[]>;
-  group: GroupMessage[];
+
+  groups: GroupChat[];
+  threads: Record<number, GroupMessage[]>;
 
   account: Account;
   models: Model[] | null;
@@ -50,19 +57,31 @@ function parseRoute(): Route {
 
   }
 
-  return name === "group" || name === "settings" || name === "new" ? { name } : { name: "home" };
+  if (name === "group") {
+
+    return { name, id: Number(id) || 0 };
+
+  }
+
+  if (name === "new" && id === "group") {
+
+    return { name: "newGroup" };
+
+  }
+
+  return name === "settings" || name === "new" ? { name } : { name: "home" };
 
 }
 
 function routeKey(route: Route): string {
 
-  return "id" in route ? `agent/${route.id}` : route.name;
+  return "id" in route ? `${route.name === "group" ? "group" : "agent"}/${route.id}` : route.name;
 
 }
 
 export class App extends Component<{}, AppState> {
 
-  state: AppState = { authed: null, route: parseRoute(), wide: matchMedia(WIDE).matches, agents: [], events: {}, group: [], account: { set: true, name: null, email: null }, models: null };
+  state: AppState = { authed: null, route: parseRoute(), wide: matchMedia(WIDE).matches, agents: [], events: {}, groups: [], threads: {}, account: { set: true, name: null, email: null }, models: null };
 
   private socket: WebSocket | null = null;
   private retries = 0;
@@ -176,7 +195,6 @@ export class App extends Component<{}, AppState> {
       await this.refresh();
       this.setState({ authed: true });
       this.connect();
-      this.loadFor(this.state.route);
       this.adoptZone().catch(this.guard);
 
     } catch (err) {
@@ -203,17 +221,10 @@ export class App extends Component<{}, AppState> {
   /** Everything the screens show at a glance; also re-run after a reconnect, since events sent while offline are gone. */
   refresh = async () => {
 
-    const [agents, group, cookie] = await Promise.all([api<Agent[]>("/agents"), api<GroupMessage[]>("/group"), api<Account>("/cookie")]);
+    const [agents, groups, cookie] = await Promise.all([api<Agent[]>("/agents"), api<GroupChat[]>("/groups"), api<Account>("/cookie")]);
 
-    this.setState({ agents, group, account: cookie });
-
-    const route = this.state.route;
-
-    if ("id" in route) {
-
-      await this.loadEvents(route.id);
-
-    }
+    this.setState({ agents, groups, account: cookie });
+    this.loadFor(this.state.route);
 
   };
 
@@ -222,6 +233,14 @@ export class App extends Component<{}, AppState> {
     if (route.name === "agent") {
 
       this.loadEvents(route.id).catch(this.guard);
+      this.markRead({ agent: route.id });
+
+    }
+
+    if (route.name === "group") {
+
+      api<GroupMessage[]>(`/group?group=${route.id}`).then((messages) => this.setState((state) => ({ threads: { ...state.threads, [route.id]: messages } }))).catch(this.guard);
+      this.markRead({ group: route.id });
 
     }
 
@@ -238,6 +257,43 @@ export class App extends Component<{}, AppState> {
     const events = await api<AgentEvent[]>(`/agents/${agentId}/events`);
 
     this.setState((state) => ({ events: { ...state.events, [agentId]: events } }));
+
+  };
+
+  setUnread = (target: ReadTarget, count: (unread: number) => number) => {
+
+    if ("agent" in target) {
+
+      this.setState((state) => ({ agents: state.agents.map((agent) => (agent.id === target.agent ? { ...agent, unread: count(agent.unread) } : agent)) }));
+      return;
+
+    }
+
+    this.setState((state) => ({ groups: state.groups.map((group) => (group.id === target.group ? { ...group, unread: count(group.unread) } : group)) }));
+
+  };
+
+  markRead = (target: ReadTarget) => {
+
+    this.setUnread(target, () => 0);
+    api("/read", "POST", target).catch(this.guard);
+
+  };
+
+  /** A message is read at once in the chat on screen; anywhere else it adds to that chat's unread count. */
+  onMessage = (target: ReadTarget) => {
+
+    const { route } = this.state;
+    const open = "agent" in target ? route.name === "agent" && route.id === target.agent : route.name === "group" && route.id === target.group;
+
+    if (open) {
+
+      this.markRead(target);
+      return;
+
+    }
+
+    this.setUnread(target, (unread) => unread + 1);
 
   };
 
@@ -342,6 +398,12 @@ export class App extends Component<{}, AppState> {
 
       });
 
+      if (event.kind === "say" || (event.kind === "done" && !isWaiting(event.text))) {
+
+        this.onMessage({ agent: event.agentId });
+
+      }
+
       return;
 
     }
@@ -363,13 +425,37 @@ export class App extends Component<{}, AppState> {
 
     if (message.type === "group") {
 
-      this.setState((state) => ({ group: [...state.group, message.message] }));
+      const line = message.message;
+
+      this.setState((state) => {
+
+        const known = state.threads[line.groupId];
+
+        // like agent events: a thread never opened loads fresh when it is
+        if (!known || known.some((one) => one.id === line.id)) {
+
+          return null;
+
+        }
+
+        return { threads: { ...state.threads, [line.groupId]: [...known, line] } };
+
+      });
+
+      if (line.author !== "user") {
+
+        this.onMessage({ group: line.groupId });
+
+      }
 
     }
 
   };
 
   updateAgent = (agent: Agent) => this.setState((state) => ({ agents: state.agents.map((one) => (one.id === agent.id ? agent : one)) }));
+
+  /** Allow or refuse what the agent waits on; words answer its question. */
+  answer = (agentId: number) => (reply: boolean | string) => api<Agent>(`/agents/${agentId}/answer`, "POST", typeof reply === "string" ? { text: reply } : { allow: reply }).then(this.updateAgent).catch(this.guard);
 
   agentById(id: number): Agent | undefined {
 
@@ -387,7 +473,7 @@ export class App extends Component<{}, AppState> {
 
   renderRoute() {
 
-    const { route, events, agents, group, models } = this.state;
+    const { route, events, agents, groups, threads, models } = this.state;
 
     if (route.name === "agent" || route.name === "details" || route.name === "browser") {
 
@@ -401,7 +487,7 @@ export class App extends Component<{}, AppState> {
 
       if (route.name === "browser") {
 
-        return <Browser key={agent.id} agent={agent} live={this.live} onAnswer={(allow) => api<Agent>(`/agents/${agent.id}/answer`, "POST", { allow }).then(this.updateAgent).catch(this.guard)} />;
+        return <Browser key={agent.id} agent={agent} live={this.live} onAnswer={this.answer(agent.id)} />;
 
       }
 
@@ -419,7 +505,7 @@ export class App extends Component<{}, AppState> {
           events={events[agent.id]}
           onSend={(text) => api<Agent>(`/agents/${agent.id}/messages`, "POST", { text }).then(this.updateAgent)}
           onStop={() => api(`/agents/${agent.id}/stop`, "POST").catch(this.guard)}
-          onAnswer={(allow) => api<Agent>(`/agents/${agent.id}/answer`, "POST", { allow }).then(this.updateAgent).catch(this.guard)}
+          onAnswer={this.answer(agent.id)}
         />
 
       );
@@ -428,13 +514,38 @@ export class App extends Component<{}, AppState> {
 
     if (route.name === "group") {
 
-      return <Group messages={group} agents={agents} onSend={(text) => api("/group", "POST", { text }).then(() => {})} />;
+      const group = groups.find((one) => one.id === route.id);
+
+      if (!group) {
+
+        return <Empty text="That group chat no longer exists." />;
+
+      }
+
+      return (
+
+        <Group
+          key={group.id}
+          group={group}
+          messages={threads[group.id] ?? []}
+          agents={agents}
+          onSend={(text) => api("/group", "POST", { text, group: group.id }).then(() => {})}
+          onDelete={() => api(`/groups/${group.id}`, "DELETE").then(() => { this.setState({ groups: groups.filter((one) => one.id !== group.id) }); location.hash = "#/"; }).catch(this.guard)}
+        />
+
+      );
 
     }
 
     if (route.name === "new") {
 
       return <NewAgent onCreated={(agent) => { this.setState({ agents: [...agents, agent] }); location.hash = `#/agent/${agent.id}`; }} />;
+
+    }
+
+    if (route.name === "newGroup") {
+
+      return <NewGroup agents={agents} onCreated={(group) => { this.setState({ groups: [...groups, group] }); location.hash = `#/group/${group.id}`; }} />;
 
     }
 
@@ -450,7 +561,7 @@ export class App extends Component<{}, AppState> {
 
   render() {
 
-    const { authed, route, wide, agents, account } = this.state;
+    const { authed, route, wide, agents, groups, account } = this.state;
 
     if (mustInstall) {
 
@@ -470,7 +581,7 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    const home = <Home agents={agents} account={account} selected={routeKey(route)} />;
+    const home = <Home agents={agents} groups={groups} account={account} selected={routeKey(route)} />;
     const screen = route.name === "home" && !wide ? home : this.renderRoute() ?? <Empty text="Pick an agent, or talk to everyone." />;
 
     // keyed by screen, not agent alone, so moving from a chat to its details fades too

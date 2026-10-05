@@ -9,8 +9,11 @@ const ANSWER_MS = Number(process.env.PTS_ANSWER_MS ?? 30 * 60_000);
 
 export type AgentState = "idle" | "queued" | "running" | "waiting";
 
-/** What a waiting run waits on: an OK for a <submit>, or the user doing something in the browser. */
-export type WaitKind = "ask" | "handoff";
+/** What a waiting run waits on: an OK for a <submit>, the user doing something in the browser, or an answer to an <ask>. */
+export type WaitKind = "ask" | "handoff" | "question";
+
+/** Allow or refuse; an <ask> is answered in words, and refused when skipped. */
+export type Reply = boolean | string;
 
 export type StartRun = (agent: Agent, task: string, control: RunControl, origin?: Origin) => Promise<unknown>;
 
@@ -28,7 +31,7 @@ interface Slot {
   controller: AbortController;
   notes: string[];
 
-  pending: { question: string; kind: WaitKind; answer: (allow: boolean) => void } | null;
+  pending: { question: string; kind: WaitKind; answer: (reply: Reply) => void } | null;
 
   origin?: Origin;
 
@@ -83,7 +86,7 @@ export class Queue {
   }
 
   /** False when nothing was waiting, e.g. the question already timed out. `kind` limits it to one sort of wait. */
-  answer(agentId: number, allow: boolean, kind?: WaitKind): boolean {
+  answer(agentId: number, reply: Reply, kind?: WaitKind): boolean {
 
     const pending = this.running.get(agentId)?.pending;
 
@@ -93,7 +96,7 @@ export class Queue {
 
     }
 
-    pending?.answer(allow);
+    pending?.answer(reply);
 
     return Boolean(pending);
 
@@ -175,7 +178,7 @@ export class Queue {
       this.running.set(job.agent.id, slot);
       this.onState(job.agent.id, "running");
 
-      const ask = (question: string, kind: WaitKind = "ask") => new Promise<boolean>((resolve) => {
+      const ask = (question: string, kind: WaitKind = "ask") => new Promise<Reply>((resolve) => {
 
         const timer = setTimeout(() => slot.pending?.answer(false), ANSWER_MS);
 
@@ -184,12 +187,12 @@ export class Queue {
           question,
           kind,
 
-          answer: (allow) => {
+          answer: (reply) => {
 
             clearTimeout(timer);
             slot.pending = null;
             this.onState(id, "running");
-            resolve(allow);
+            resolve(reply);
 
           },
 

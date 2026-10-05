@@ -24,6 +24,7 @@ export type Item =
   | { kind: "routine"; key: string; when: string; title: string }
   | { kind: "ask"; key: string; text: string; answer: "allowed" | "refused" | null }
   | { kind: "handoff"; key: string; text: string; answer: "done" | "skipped" | null }
+  | { kind: "question"; key: string; text: string; answer: string | null }
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
 
@@ -279,7 +280,10 @@ function taskItem(event: AgentEvent): Item {
 
     const said = /New message from ([^:\n]+):\n\n([\s\S]*?)(?:\n\nYour <done>|$)/.exec(text);
 
-    return { kind: "note", key, text: said ? `${said[1]} in Everyone: ${said[2].trim()}` : "From Everyone" };
+    // tasks from before group chats name no thread; they all came from Everyone
+    const where = /^\[Group thread "(.*?)"/.exec(text)?.[1] ?? "Everyone";
+
+    return { kind: "note", key, text: said ? `${said[1]} in ${where}: ${said[2].trim()}` : `From ${where}` };
 
   }
 
@@ -340,7 +344,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
         const previous = run[index - 1];
 
         // an approval's answer belongs to its card, not the chat
-        if (previous?.kind === "ask" || previous?.kind === "handoff") {
+        if (previous?.kind === "ask" || previous?.kind === "handoff" || previous?.kind === "question") {
 
           continue;
 
@@ -406,6 +410,13 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
         const answer = run[index + 1]?.kind === "user" ? (run[index + 1].text === "Done." ? "done" : "skipped") : null;
 
         after.push({ kind: "handoff", key, text: event.text, answer });
+        continue;
+
+      }
+
+      if (event.kind === "question") {
+
+        after.push({ kind: "question", key, text: event.text, answer: run[index + 1]?.kind === "user" ? run[index + 1].text : null });
         continue;
 
       }

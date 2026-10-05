@@ -100,6 +100,41 @@ test("routines are validated, edited and removed; the group needs a cookie", asy
 
 });
 
+test("categories, group chats and unread counts", async () => {
+
+  const { addEvent, addGroupMessage } = await import("../Store");
+  const make = async (name: string) => (await (await call("/api/agents", { method: "POST", body: JSON.stringify({ name, modelId: "model-1" }) })).json()).id as number;
+  const [a, b] = [await make("Ann"), await make("Bob")];
+
+  expect((await (await call(`/api/agents/${a}`, { method: "PATCH", body: JSON.stringify({ category: " Research " }) })).json()).category).toBe("Research");
+
+  expect((await call("/api/groups", { method: "POST", body: JSON.stringify({ members: [a, a] }) })).status).toBe(400);
+
+  const group = await (await call("/api/groups", { method: "POST", body: JSON.stringify({ members: [a, b] }) })).json();
+
+  expect(group).toMatchObject({ name: "Ann, Bob", members: [a, b], unread: 0 });
+
+  addEvent(a, "r1", "say", "On it.");
+  addEvent(a, "r1", "done", "Wait.");
+  addEvent(a, "r1", "done", "Found it.");
+  addGroupMessage(group.id, "Bob", b, "Hi.");
+  addGroupMessage(group.id, "user", null, "Mine.");
+
+  expect((await (await call(`/api/agents/${a}`)).json()).unread).toBe(2);
+  expect((await (await call("/api/groups")).json()).map((one: { unread: number }) => one.unread)).toEqual([0, 1]);
+
+  await call("/api/read", { method: "POST", body: JSON.stringify({ agent: a }) });
+  await call("/api/read", { method: "POST", body: JSON.stringify({ group: group.id }) });
+
+  expect((await (await call(`/api/agents/${a}`)).json()).unread).toBe(0);
+  expect((await (await call(`/api/group?group=${group.id}`)).json()).length).toBe(2);
+
+  expect((await call("/api/groups/0", { method: "DELETE" })).status).toBe(404);
+  expect((await call(`/api/groups/${group.id}`, { method: "DELETE" })).status).toBe(200);
+  expect((await call(`/api/group?group=${group.id}`)).status).toBe(404);
+
+});
+
 test("a time zone is saved and rejected when it is not a real one", async () => {
 
   expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "Not/AZone" }) })).status).toBe(400);

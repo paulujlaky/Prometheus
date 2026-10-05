@@ -1,9 +1,9 @@
 import { BoodleClient, ChatSession } from "../../sdk/index";
 
 import { look, pageUrl, pinned } from "./Tools/Browser";
-import type { WaitKind } from "./Queue";
+import type { Reply, WaitKind } from "./Queue";
 import { execute } from "./Tools/Tools";
-import { botInstructions, formatResults, NUDGE, parseActions, taskMessage, type Result } from "./Protocol";
+import { botInstructions, formatResults, NUDGE, parseActions, parseQuestion, taskMessage, type Result } from "./Protocol";
 import { localTime, routineBlock } from "../Features/Routines";
 import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, trackChat, trackedChats, untrackChat, userZone, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
@@ -18,7 +18,7 @@ const MAX_ACTIONS_PER_TURN = 8;
 const RECENT_CHARS = 300;
 
 // verbs whose output the model has to see before it can honestly report
-const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "submit", "handoff"]);
+const LOOKING = new Set(["run", "read", "grep", "ls", "open", "look", "click", "press", "submit", "handoff", "ask"]);
 
 export type RunEvent = AgentEvent | { kind: "delta"; agentId: number; text: string };
 
@@ -31,8 +31,8 @@ export interface RunControl {
   /** Messages the user sent while this run was going; each call takes them. */
   takeNotes: () => string[];
 
-  /** Parks the run until the user allows or refuses, or for a handoff, hands the browser back; resolves false on stop or timeout. */
-  ask: (question: string, kind?: WaitKind) => Promise<boolean>;
+  /** Parks the run until the user allows or refuses, hands the browser back, or answers a question; resolves false on stop or timeout. */
+  ask: (question: string, kind?: WaitKind) => Promise<Reply>;
 
   listen: RunListener;
 
@@ -312,7 +312,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
           record("ask", question);
 
-          const allowed = await control.ask(question);
+          const allowed = (await control.ask(question)) === true;
 
           if (signal.aborted) {
 
@@ -331,6 +331,35 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         }
 
+        if (action.verb === "ask") {
+
+          const question = action.body.trim();
+
+          if (!parseQuestion(question).prompt) {
+
+            results.push({ verb: "ask", ok: false, text: "ask needs the question on its first line, then any choices one per line:\n\n  <ask>\n  Which one?\n  - The first\n  - The second\n  </ask>" });
+            break;
+
+          }
+
+          record("question", question);
+
+          const reply = await control.ask(question, "question");
+
+          if (signal.aborted) {
+
+            throw new Error("aborted");
+
+          }
+
+          const answer = typeof reply === "string" ? reply.trim() : "";
+
+          record("user", answer || "Skipped.");
+          results.push({ verb: "ask", ok: true, text: answer ? `The user answered: ${answer}` : "The user skipped the question. Decide it yourself and keep going." });
+          continue;
+
+        }
+
         if (action.verb === "handoff") {
 
           const what = action.body.trim().split("\n")[0];
@@ -344,7 +373,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
           record("handoff", what);
 
-          const finished = await pinned(cwd, () => control.ask(what, "handoff"));
+          const finished = (await pinned(cwd, () => control.ask(what, "handoff"))) === true;
 
           if (signal.aborted) {
 

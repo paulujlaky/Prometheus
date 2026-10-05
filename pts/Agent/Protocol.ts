@@ -1,6 +1,6 @@
 // Tagged blocks in, tagged results out. No JSON, so nothing the model writes ever needs escaping.
 
-export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "handoff", "routine", "say", "notify", "done"] as const;
+export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "submit", "handoff", "ask", "routine", "say", "notify", "done"] as const;
 
 export type Verb = (typeof VERBS)[number];
 
@@ -50,6 +50,9 @@ const ALIASES: Record<string, Verb> = {
 
   handover: "handoff",
   human: "handoff",
+
+  question: "ask",
+  choose: "ask",
 
   routines: "routine",
   schedule: "routine",
@@ -251,6 +254,50 @@ export function parsePairs(body: string): Pair[] {
 
 }
 
+export interface Question {
+
+  prompt: string;
+  choices: string[];
+
+  /** Placeholder for a written answer; empty when only the choices are offered. */
+  write: string;
+
+}
+
+const CHOICE = /^(?:[-*•]|\d+[.)])\s+/;
+
+/** An <ask> body: the question, `- ` choices, and a `+ ` write-in. With no choices, writing is the only answer. */
+export function parseQuestion(body: string): Question {
+
+  const prompt: string[] = [];
+  const choices: string[] = [];
+
+  let write = "";
+
+  for (const raw of body.split("\n")) {
+
+    const line = raw.trim();
+
+    if (CHOICE.test(line)) {
+
+      choices.push(line.replace(CHOICE, ""));
+
+    } else if (line.startsWith("+")) {
+
+      write = line.slice(1).trim() || "Something else";
+
+    } else if (line && !choices.length) {
+
+      prompt.push(line);
+
+    }
+
+  }
+
+  return { prompt: prompt.join(" "), choices, write: write || (choices.length ? "" : "Your answer") };
+
+}
+
 /** One shape, every time: `[verb ok]` then the body. */
 export function formatResults(results: Result[]): string {
 
@@ -293,6 +340,7 @@ Put every block you already know you need in the same reply. They run top to bot
   <press>    press a key: Enter, Tab, Escape, ArrowDown
   <submit>   click the button that sends something — waits for the user's OK
   <handoff>  ask the user to do something in your browser, like signing in — waits for them
+  <ask>      put a question to the user — waits for their answer
   <routine>  run a task on a schedule, or when something changes — bare, it lists yours
   <say>      tell the user something — the task keeps going
   <notify>   buzz the user's phone with one line — only when it matters
@@ -351,6 +399,20 @@ click, type or press is refused and you get the page as it is now; carry on from
 
 Prefer <run> with curl for plain fetches and APIs; use the browser when a page needs JavaScript,
 a login, or clicking through.
+
+## Asking
+
+When only the user can decide — which option, which account, a detail you cannot find — use
+<ask>. The first line is the question, then one choice per line starting with -. A + line lets
+them write their own answer; its text is the placeholder. The task waits for the answer. Ask only
+what you cannot find out yourself, and ask once.
+
+  <ask>
+  Which flight should I book?
+  - The 7:05 nonstop, $310
+  - The 9:40 with a stop, $240
+  + Something else
+  </ask>
 
 ## Routines
 

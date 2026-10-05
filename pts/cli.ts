@@ -124,7 +124,7 @@ switch (command) {
 
     };
 
-    await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen, ask: async (question) => confirm(`\n${question}\nAllow?`) });
+    await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen, ask: async (question, kind) => (kind === "question" ? (prompt(`\n${question}\n>`) ?? false) : confirm(`\n${question}\nAllow?`)) });
 
     // the browser keeps the process alive until its contexts close
     await closeAll();

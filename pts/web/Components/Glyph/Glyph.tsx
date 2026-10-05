@@ -63,6 +63,48 @@ export function EveryoneGlyph({ size = 32 }: { size?: number }) {
 
 }
 
+// where each mascot sits in the tile, as fractions of the free space: two on a diagonal, three in a triangle, four in a grid
+const SPOTS: Record<number, [number, number][]> = {
+
+  2: [[0, 0], [1, 1]],
+  3: [[0.5, 0], [0, 1], [1, 1]],
+  4: [[0, 0], [1, 0], [0, 1], [1, 1]],
+
+};
+
+/** A group's members' mascots huddled into one tile, the way iMessage draws a group. */
+export function GroupGlyph({ glyphs, size = 32 }: { glyphs: string[]; size?: number }) {
+
+  const shown = glyphs.slice(0, 4);
+
+  if (shown.length < 2) {
+
+    return shown.length ? <Glyph glyph={shown[0]} size={size} /> : <EveryoneGlyph size={size} />;
+
+  }
+
+  const small = Math.round(size * (shown.length === 2 ? 0.64 : 0.52));
+
+  return (
+
+    <span aria-hidden="true" className="relative shrink-0" style={{ width: size, height: size }}>
+
+      {shown.map((glyph, i) => (
+
+        <span key={i} className="absolute flex" style={{ left: SPOTS[shown.length][i][0] * (size - small), top: SPOTS[shown.length][i][1] * (size - small) }}>
+
+          <Glyph glyph={glyph} size={small} />
+
+        </span>
+
+      ))}
+
+    </span>
+
+  );
+
+}
+
 export function colorOf(agent: Agent): string {
 
   return PALETTE[parseGlyph(agent.glyph).color];

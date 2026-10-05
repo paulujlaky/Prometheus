@@ -1,6 +1,9 @@
-import type { AgentEvent, GroupMessage, Routine } from "../../Store";
+import type { AgentEvent, GroupChat as StoredGroupChat, GroupMessage, Routine } from "../../Store";
 
 export type { AgentEvent, GroupMessage, Routine };
+
+/** A group thread; id 0 is Everyone, whose members are every agent. */
+export type GroupChat = StoredGroupChat & { unread: number };
 
 export type AgentState = "idle" | "queued" | "running" | "waiting";
 
@@ -15,14 +18,18 @@ export interface Agent {
 
   /** "shape:color" mascot, see Glyph.ts. */
   glyph: string;
+  category: string;
 
   createdAt: number;
 
   state: AgentState;
   question: string | null;
 
-  /** What a waiting agent waits on: an OK for a <submit>, or the user in its browser. */
-  waitingOn: "ask" | "handoff" | null;
+  /** What a waiting agent waits on: an OK for a <submit>, the user in its browser, or an answer to an <ask>. */
+  waitingOn: "ask" | "handoff" | "question" | null;
+
+  /** Messages since its chat was last open. */
+  unread: number;
 
 }
 

@@ -1,24 +1,31 @@
+import { Trash2 } from "lucide-react";
 import { motion } from "motion/react";
 import { Component, createRef } from "react";
 
 import { Composer } from "../Agent/Composer";
-import { colorOf, EveryoneGlyph, Glyph } from "../../Components/Glyph/Glyph";
+import { IconButton } from "../../Components/Controls";
+import { colorOf, EveryoneGlyph, Glyph, GroupGlyph } from "../../Components/Glyph/Glyph";
 import { withMentions } from "../../Components/Glyph/Mention";
-import { Bar } from "../../Components/Layout";
+import { Bar, Confirm } from "../../Components/Layout";
 import { Memo } from "../../Components/Memo";
 
-import type { Agent, GroupMessage } from "../../Lib/api";
+import type { Agent, GroupChat, GroupMessage } from "../../Lib/api";
 
 interface GroupProps {
 
+  group: GroupChat;
   messages: GroupMessage[];
   agents: Agent[];
 
   onSend: (text: string) => Promise<void>;
+  onDelete: () => void;
 
 }
 
-export class Group extends Component<GroupProps> {
+/** Everyone (group 0) or a group chat with some of the agents. */
+export class Group extends Component<GroupProps, { confirming: boolean }> {
+
+  state = { confirming: false };
 
   private end = createRef<HTMLDivElement>();
 
@@ -81,19 +88,25 @@ export class Group extends Component<GroupProps> {
 
   render() {
 
-    const { messages } = this.props;
+    const { group, messages, agents } = this.props;
+    const members = agents.filter((agent) => group.members.includes(agent.id));
 
     return (
 
       <div className="flex h-full flex-col">
 
-        <Bar back="#/" icon={<EveryoneGlyph size={30} />} title="Everyone" />
+        <Bar
+          back="#/"
+          icon={group.id ? <GroupGlyph glyphs={members.map((agent) => agent.glyph)} size={30} /> : <EveryoneGlyph size={30} />}
+          title={group.name}
+          actions={group.id ? <IconButton label="Delete group chat" onClick={() => this.setState({ confirming: true })}><Trash2 size={18} strokeWidth={1.6} /></IconButton> : undefined}
+        />
 
         <div className="grow overflow-y-auto">
 
           <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] py-6 md:px-8">
 
-            {!messages.length && <Memo text="Everyone sees what you write here. @mention an agent to ask just them, or write to all of them at once." className="text-dim" />}
+            {!messages.length && <Memo text={group.id ? `Only ${members.map((agent) => agent.name).join(", ")} see what you write here. @mention one to ask just them.` : "Everyone sees what you write here. @mention an agent to ask just them, or write to all of them at once."} className="text-dim" />}
 
             {messages.map((message) => (
 
@@ -111,7 +124,17 @@ export class Group extends Component<GroupProps> {
 
         </div>
 
-        <Composer placeholder="Message everyone, or @mention" onSend={this.props.onSend} />
+        <Composer placeholder={group.id ? `Message ${group.name}, or @mention` : "Message everyone, or @mention"} onSend={this.props.onSend} />
+
+        <Confirm
+          open={this.state.confirming}
+          title={`Delete ${group.name}?`}
+          body="Its messages go. The agents stay."
+          confirm="Delete"
+          danger
+          onCancel={() => this.setState({ confirming: false })}
+          onConfirm={() => { this.setState({ confirming: false }); this.props.onDelete(); }}
+        />
 
       </div>
 

@@ -1,14 +1,15 @@
-import { Plus, Settings } from "lucide-react";
-import type { ReactNode } from "react";
+import { Plus, Settings, UserPlus, Users } from "lucide-react";
+import { Fragment, type MouseEvent, type ReactNode } from "react";
 
-import { EveryoneGlyph, Glyph } from "../../Components/Glyph/Glyph";
+import { EveryoneGlyph, Glyph, GroupGlyph } from "../../Components/Glyph/Glyph";
 import { Torch } from "../../Components/Layout";
 
-import type { Account, Agent } from "../../Lib/api";
+import type { Account, Agent, GroupChat } from "../../Lib/api";
 
 interface HomeProps {
 
   agents: Agent[];
+  groups: GroupChat[];
 
   account: Account;
 
@@ -33,8 +34,8 @@ function Row({ href, icon, title, status, strong, selected }: { href: string; ic
     <a href={href} aria-current={selected ? "page" : undefined} className={`mx-2 flex items-center gap-3 rounded-xl px-3 py-2.5 no-underline ${selected ? "bg-panel" : ""}`}>
 
       {icon}
-      <span className="shrink-0 font-medium">{title}</span>
-      <span className={`ml-auto min-w-0 truncate text-[14px] ${strong ? "text-fg" : "text-dim"}`}>{status}</span>
+      <span className="min-w-0 truncate font-medium">{title}</span>
+      <span className={`ml-auto shrink-0 text-[14px] ${strong ? "text-fg" : "text-dim"}`}>{status}</span>
       {strong && <span className="size-1.5 shrink-0 self-center rounded-full bg-fg animate-pulse" aria-hidden="true" />}
 
     </a>
@@ -43,9 +44,27 @@ function Row({ href, icon, title, status, strong, selected }: { href: string; ic
 
 }
 
-export function Home({ agents, account, selected }: HomeProps) {
+function unread(count: number): string {
+
+  return `${count} new message${count === 1 ? "" : "s"}`;
+
+}
+
+// the popover sits in the top layer, so it is placed under the button by hand
+function placeMenu(event: MouseEvent<HTMLButtonElement>) {
+
+  const { bottom, right } = event.currentTarget.getBoundingClientRect();
+  const menu = document.getElementById("new-menu")!;
+
+  menu.style.top = `${bottom + 6}px`;
+  menu.style.left = `${right}px`;
+
+}
+
+export function Home({ agents, groups, account, selected }: HomeProps) {
 
   const who = account.name ?? account.email ?? "Boodle account";
+  const categories = [...new Set(agents.map((agent) => agent.category))].sort();
 
   return (
 
@@ -57,7 +76,18 @@ export function Home({ agents, account, selected }: HomeProps) {
 
           <Torch size={32} />
           <span className="grow font-serif text-[24px]">Prometheus</span>
-          <a href="#/new" aria-label="New agent" title="New agent" className="flex size-11 items-center justify-center rounded-xl text-fg"><Plus size={22} strokeWidth={1.6} /></a>
+          <button type="button" popoverTarget="new-menu" onClick={placeMenu} aria-label="New" title="New" className="flex size-11 items-center justify-center rounded-xl text-fg"><Plus size={22} strokeWidth={1.6} /></button>
+
+          <div id="new-menu" popover="auto" onClick={(event) => event.currentTarget.hidePopover()} className="m-0 -translate-x-full rounded-xl border border-line bg-panel p-1 text-fg shadow-[0_16px_40px_rgb(0_0_0/0.5)]">
+
+            <nav className="flex flex-col">
+
+              <a href="#/new" className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[15px] whitespace-nowrap no-underline hover:bg-raised"><UserPlus size={16} strokeWidth={1.6} className="text-dim" />New agent</a>
+              <a href="#/new/group" className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[15px] whitespace-nowrap no-underline hover:bg-raised"><Users size={16} strokeWidth={1.6} className="text-dim" />New group chat</a>
+
+            </nav>
+
+          </div>
 
         </header>
 
@@ -74,9 +104,19 @@ export function Home({ agents, account, selected }: HomeProps) {
 
         <nav aria-label="Agents" className="mt-8 flex flex-col">
 
-          {agents.map((agent) => (
+          {categories.map((category) => (
 
-            <Row key={agent.id} href={`#/agent/${agent.id}`} icon={<Glyph glyph={agent.glyph} live={agent.state === "running" || agent.state === "waiting"} />} title={agent.name} status={STATUS[agent.state]} strong={agent.state === "waiting"} selected={selected === `agent/${agent.id}`} />
+            <Fragment key={category}>
+
+              {category && <span className="mx-6 mt-5 mb-1 truncate text-[13px] text-dim">{category}</span>}
+
+              {agents.filter((agent) => agent.category === category).map((agent) => (
+
+                <Row key={agent.id} href={`#/agent/${agent.id}`} icon={<Glyph glyph={agent.glyph} live={agent.state === "running" || agent.state === "waiting"} />} title={agent.name} status={agent.state !== "waiting" && agent.unread ? unread(agent.unread) : STATUS[agent.state]} strong={agent.state === "waiting" || agent.unread > 0} selected={selected === `agent/${agent.id}`} />
+
+              ))}
+
+            </Fragment>
 
           ))}
 
@@ -92,7 +132,25 @@ export function Home({ agents, account, selected }: HomeProps) {
 
           <div className="mx-6 my-2 h-px bg-line" />
 
-          <Row href="#/group" icon={<EveryoneGlyph />} title="Everyone" status={`${agents.length} online`} selected={selected === "group"} />
+          {groups.map((group) => {
+
+            const members = agents.filter((agent) => group.members.includes(agent.id));
+
+            return (
+
+              <Row
+                key={group.id}
+                href={group.id ? `#/group/${group.id}` : "#/group"}
+                icon={group.id ? <GroupGlyph glyphs={members.map((agent) => agent.glyph)} /> : <EveryoneGlyph />}
+                title={group.name}
+                status={group.unread ? unread(group.unread) : `${group.id ? members.length : agents.length} online`}
+                strong={group.unread > 0}
+                selected={selected === `group/${group.id}`}
+              />
+
+            );
+
+          })}
 
         </nav>
 

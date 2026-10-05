@@ -1,10 +1,12 @@
-import { Component } from "react";
+import { Plus, Tag } from "lucide-react";
+import { Component, type FocusEvent, type KeyboardEvent } from "react";
 
 import { Button, inputClass, Select, Switch } from "../../Components/Controls";
 import { COLORS, Glyph, NAMES, PALETTE, SHAPES } from "../../Components/Glyph/Glyph";
 import { Bar, Confirm, Section } from "../../Components/Layout";
 
 import { parseGlyph } from "../../../Features/Glyph";
+import { AgentsContext } from "../../App/context";
 import { api, type Agent, type Model, type Routine } from "../../Lib/api";
 import { Autosave } from "../../Lib/autosave";
 import { describeSchedule, describeWatch, routineTitle } from "../../Lib/thread";
@@ -31,6 +33,9 @@ interface DetailsState {
 
   note: string;
 
+  /** Typing a new category's name. */
+  naming: boolean;
+
   /** The destructive action waiting on the confirm dialog. */
   confirming: { title: string; body: string; confirm: string; run: () => void } | null;
 
@@ -50,9 +55,15 @@ function when(routine: Routine, timeZone: string | null): string {
 
 }
 
+// server-side names are trimmed, so a leading space can never be a real category
+const NEW_CATEGORY = " new";
+
 export class Details extends Component<DetailsProps, DetailsState> {
 
-  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, timezone: null, note: "", confirming: null };
+  static contextType = AgentsContext;
+  declare context: Agent[];
+
+  state: DetailsState = { persona: this.props.agent.persona, memory: "", routines: [], open: null, timezone: null, note: "", naming: false, confirming: null };
 
   private saver = new Autosave((note) => this.flash(note));
   private noteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -151,7 +162,83 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
   }
 
-  patch = (changes: Partial<Pick<Agent, "persona" | "modelId" | "glyph">>) => api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", changes).then(this.props.onChanged);
+  patch = (changes: Partial<Pick<Agent, "persona" | "modelId" | "glyph" | "category">>) => api<Agent>(`/agents/${this.props.agent.id}`, "PATCH", changes).then(this.props.onChanged);
+
+  setCategory = (category: string) => {
+
+    if (category === NEW_CATEGORY) {
+
+      this.setState({ naming: true });
+      return;
+
+    }
+
+    this.setState({ naming: false });
+    this.patch({ category }).then(() => this.flash("Saved"), (err) => this.flash(String(err)));
+
+  };
+
+  renderCategory() {
+
+    const { agent } = this.props;
+    const categories = [...new Set(this.context.map((one) => one.category).filter(Boolean))].sort();
+
+    return (
+
+      <Section
+        title="Category"
+        description="Groups it in the sidebar."
+        action={(
+
+          <Select
+            label="Category"
+            value={this.state.naming ? NEW_CATEGORY : agent.category}
+            options={[{ value: "", icon: <Tag size={16} strokeWidth={1.6} />, label: "None" }, ...categories.map((category) => ({ value: category, label: category, icon: <Tag size={16} strokeWidth={1.6} /> })), { value: NEW_CATEGORY, label: "New category", icon: <Plus size={16} strokeWidth={1.6} /> }]}
+            onChange={this.setCategory}
+          />
+
+        )}
+      >
+
+        {this.state.naming && <input autoFocus maxLength={32} placeholder="Category name" aria-label="Category name" enterKeyHint="done" onKeyDown={this.onNameKey} onBlur={this.onNameBlur} className={inputClass} />}
+
+      </Section>
+
+    );
+
+  }
+
+  // Enter and Escape both end in blur, so a name is saved in one place
+  onNameKey = (event: KeyboardEvent<HTMLInputElement>) => {
+
+    if (event.key === "Escape") {
+
+      event.currentTarget.value = "";
+
+    }
+
+    if (event.key === "Enter" || event.key === "Escape") {
+
+      event.currentTarget.blur();
+
+    }
+
+  };
+
+  onNameBlur = (event: FocusEvent<HTMLInputElement>) => {
+
+    const name = event.target.value.trim();
+
+    if (!name) {
+
+      this.setState({ naming: false });
+      return;
+
+    }
+
+    this.setCategory(name);
+
+  };
 
   deleteAgent = () => this.setState({
 
@@ -236,11 +323,13 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
             {this.renderLook()}
 
-            <Section title="Who it is">
+            <Section title="Description">
 
               <textarea rows={3} value={this.state.persona} aria-label="Who it is" onChange={(event) => { const persona = event.target.value; this.setState({ persona }); this.saver.queue("persona", () => this.patch({ persona })); }} className={inputClass} />
 
             </Section>
+
+            {this.renderCategory()}
 
             <Section
               title="Model"
@@ -262,7 +351,7 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
             </Section>
 
-            <Section title="Memory" description="It edits this too.">
+            <Section title="Memory" description="Context built by and for the agent.">
 
               <textarea rows={8} value={this.state.memory} aria-label="Memory" onChange={(event) => { const memory = event.target.value; this.setState({ memory }); this.saver.queue("memory", () => api(`/agents/${agent.id}/memory`, "PUT", { text: memory })); }} className={`${inputClass} font-mono text-[13px]`} />
 

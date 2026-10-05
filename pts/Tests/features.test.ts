@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { parseQuestion } from "../Agent/Protocol";
 import { Queue } from "../Agent/Queue";
 import { groupTask, isWaiting, MAX_HOPS, mentioned, route } from "../Features/Group";
 import type { Agent, GroupMessage } from "../Store";
@@ -97,7 +98,7 @@ test("watch output is reduced to visible text and diffed by line", () => {
 test("group messages route by mention, and hand-offs stop at the cap", () => {
 
   const agents = [{ id: 1, name: "Scout" }, { id: 2, name: "Scout Two" }, { id: 3, name: "Ops" }] as Agent[];
-  const message = (text: string, agentId: number | null = null): GroupMessage => ({ id: 10, author: agentId ? "agent" : "user", agentId, text, at: 0 });
+  const message = (text: string, agentId: number | null = null): GroupMessage => ({ id: 10, groupId: 4, author: agentId ? "agent" : "user", agentId, text, at: 0 });
 
   expect(mentioned("ask @scout two and @OPS", agents).map((agent) => agent.id).sort()).toEqual([2, 3]);
 
@@ -107,16 +108,21 @@ test("group messages route by mention, and hand-offs stop at the cap", () => {
   expect("recipients" in toEveryone && toEveryone.recipients.length).toBe(3);
   expect("recipients" in toOne && toOne.recipients.map((agent) => agent.id)).toEqual([3]);
 
-  const handoff = route(message("@Scout over to you, not me @Ops", 3), agents, { chain: 10, hops: 0 });
+  const handoff = route(message("@Scout over to you, not me @Ops", 3), agents, { chain: 10, hops: 0, group: 4 });
 
-  expect(handoff).toEqual({ recipients: [agents[0]], origin: { chain: 10, hops: 1 } });
-  expect(route(message("done, nobody tagged", 3), agents, { chain: 10, hops: 2 })).toMatchObject({ recipients: [] });
-  expect(route(message("@Scout again", 3), agents, { chain: 10, hops: MAX_HOPS })).toEqual({ capped: true });
+  // replies go back to the thread the chain started in
+  expect(handoff).toEqual({ recipients: [agents[0]], origin: { chain: 10, hops: 1, group: 4 } });
+  expect(route(message("done, nobody tagged", 3), agents, { chain: 10, hops: 2, group: 4 })).toMatchObject({ recipients: [] });
+  expect(route(message("@Scout again", 3), agents, { chain: 10, hops: MAX_HOPS, group: 4 })).toEqual({ capped: true });
 
-  const task = groupTask(agents[2], agents, [message("earlier")], message("@Ops check the disk"));
+  const task = groupTask(agents[2], agents, [message("earlier")], message("@Ops check the disk"), "Infra");
 
+  expect(task).toStartWith(`[Group thread "Infra".`);
   expect(task).toContain("Scout, Scout Two");
   expect(task).toContain("user: earlier");
+
+  expect(parseQuestion("Which one?\n- The 7:05\n2. The 9:40\n+ Other")).toEqual({ prompt: "Which one?", choices: ["The 7:05", "The 9:40"], write: "Other" });
+  expect(parseQuestion("What's the address?").write).toBe("Your answer");
 
   expect(isWaiting(" Wait. ")).toBe(true);
   expect(isWaiting("Waited for Probe, then wrote the haiku.")).toBe(false);
@@ -128,8 +134,8 @@ test("a hand-off skips an agent already working on the same chain", () => {
   const queue = new Queue(() => new Promise(() => {}), () => {}, () => {}, 1);
   const agent = (id: number) => ({ id, name: `a${id}` }) as Agent;
 
-  queue.enqueue(agent(1), "fetch", { chain: 5, hops: 0 });
-  queue.enqueue(agent(2), "write", { chain: 5, hops: 0 });
+  queue.enqueue(agent(1), "fetch", { chain: 5, hops: 0, group: 0 });
+  queue.enqueue(agent(2), "write", { chain: 5, hops: 0, group: 0 });
 
   expect(queue.busyIn(1, 5)).toBe(true);
   expect(queue.busyIn(2, 5)).toBe(true);

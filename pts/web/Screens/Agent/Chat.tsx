@@ -3,12 +3,13 @@ import { AnimatePresence, motion } from "motion/react";
 import { Component, createRef } from "react";
 
 import { Composer } from "./Composer";
-import { Button, IconButton } from "../../Components/Controls";
+import { Button, IconButton, inputClass } from "../../Components/Controls";
 import { Glyph } from "../../Components/Glyph/Glyph";
 import { withMentions } from "../../Components/Glyph/Mention";
 import { Bar } from "../../Components/Layout";
 import { Memo } from "../../Components/Memo";
 
+import { parseQuestion } from "../../../Agent/Protocol";
 import { AgentsContext } from "../../App/context";
 import type { Agent, AgentEvent } from "../../Lib/api";
 import { buildItems, type Item, type Step } from "../../Lib/thread";
@@ -78,7 +79,9 @@ interface ChatProps {
 
   onSend: (text: string) => Promise<void>;
   onStop: () => void;
-  onAnswer: (allow: boolean) => void;
+
+  /** Allow or refuse; a question is answered in words. */
+  onAnswer: (reply: boolean | string) => void;
 
 }
 
@@ -272,6 +275,59 @@ export class Chat extends Component<ChatProps> {
 
       }
 
+      case "question": {
+
+        const { prompt, choices, write } = parseQuestion(item.text);
+        const open = item.answer === null && agent.state === "waiting" && item.key === lastAsk;
+
+        if (!open) {
+
+          const answered = item.answer !== null && item.answer !== "Skipped.";
+
+          return (
+
+            <div key={item.key} className="flex max-w-md items-start gap-3 text-dim">
+
+              {answered ? <Check size={16} className="mt-1 shrink-0" /> : <X size={16} className="mt-1 shrink-0" />}
+              <span className="text-[14px]">{prompt} — {answered ? item.answer : "Not answered"}</span>
+
+            </div>
+
+          );
+
+        }
+
+        return (
+
+          <section key={item.key} aria-label="Question" className="flex max-w-md flex-col gap-4 rounded-2xl bg-panel p-5">
+
+            <span className="flex flex-col gap-1.5">
+
+              <span className="text-[14px] text-dim">Question</span>
+              <span className="font-serif text-[20px] leading-snug">{prompt}</span>
+
+            </span>
+
+            {choices.length > 0 && (
+
+              <span className="flex flex-col gap-2">
+
+                {choices.map((choice) => <Button key={choice} className="h-auto min-h-11 py-2.5 text-left" onClick={() => this.props.onAnswer(choice)}>{choice}</Button>)}
+
+              </span>
+
+            )}
+
+            {write && <input placeholder={write} aria-label={write} enterKeyHint="send" onKeyDown={(event) => event.key === "Enter" && event.currentTarget.value.trim() && this.props.onAnswer(event.currentTarget.value.trim())} className={inputClass} />}
+
+            <Button onClick={() => this.props.onAnswer(false)}>Skip</Button>
+
+          </section>
+
+        );
+
+      }
+
       case "done":
 
         return <Memo key={item.key} text={item.text} />;
@@ -289,7 +345,7 @@ export class Chat extends Component<ChatProps> {
     const { agent, events } = this.props;
     const busy = agent.state === "running" || agent.state === "waiting";
     const items = buildItems(events ?? [], busy);
-    const lastAsk = [...items].reverse().find((item) => item.kind === "ask" || item.kind === "handoff")?.key ?? null;
+    const lastAsk = [...items].reverse().find((item) => item.kind === "ask" || item.kind === "handoff" || item.kind === "question")?.key ?? null;
     const working = agent.state === "running" && !items.some((item) => item.kind === "work" && item.live);
 
     return (
