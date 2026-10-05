@@ -965,13 +965,19 @@ if (process.env.NODE_ENV !== "test") {
 
   }
 
+  // no top-level await: pm2 require()s this file, and Bun cannot require an async module
   // before the scheduler, so no browser starts without the proxy; a failure stops the server rather than browse direct
-  await setProxy(readSetting("proxy"));
-  await setZone(readSetting("timezone"));
-  warm();
+  setProxy(readSetting("proxy")).then(() => setZone(readSetting("timezone"))).then(() => {
 
-  startScheduler((agent, task) => queue.enqueue(agent, task));
+    warm();
+    startScheduler((agent, task) => queue.enqueue(agent, task));
+    console.log(`pts listening on http://localhost:${server.port}`);
 
-  console.log(`pts listening on http://localhost:${server.port}`);
+  }, (err) => {
+
+    console.error(`pts: could not apply the browser proxy or time zone: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+
+  });
 
 }
