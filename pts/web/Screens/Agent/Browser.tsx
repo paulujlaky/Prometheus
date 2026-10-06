@@ -1,7 +1,7 @@
-import { ArrowLeft, Keyboard, Plus, X } from "lucide-react";
+import { ArrowLeft, ClipboardPaste, Keyboard, Plus, X } from "lucide-react";
 import { Component, createRef, type ChangeEvent, type KeyboardEvent, type PointerEvent, type TouchEvent, type WheelEvent } from "react";
 
-import { Button, IconButton } from "../../Components/Controls";
+import { Button, IconButton, inputClass } from "../../Components/Controls";
 import { Glyph } from "../../Components/Glyph/Glyph";
 import { Bar } from "../../Components/Layout";
 
@@ -11,6 +11,7 @@ interface BrowserProps {
 
   agent: Agent;
   live: LiveChannel;
+  split?: boolean;
 
   onAnswer: (allow: boolean) => void;
 
@@ -24,6 +25,8 @@ interface BrowserState {
   error: string;
 
   typed: string;
+  pasteOpen: boolean;
+  pasteText: string;
 
   tabs: BrowserTab[];
 
@@ -64,13 +67,14 @@ function tabLabel(tab: BrowserTab): string {
 /** One agent's browser, live. Watching is free; taking over pauses the agent's browser work until it is handed back. */
 export class Browser extends Component<BrowserProps, BrowserState> {
 
-  state: BrowserState = { ready: false, blank: false, mine: false, error: "", typed: "", tabs: [] };
+  state: BrowserState = { ready: false, blank: false, mine: false, error: "", typed: "", pasteOpen: false, pasteText: "", tabs: [] };
 
   private frame = createRef<HTMLImageElement>();
   private typer = createRef<HTMLInputElement>();
   private box = createRef<HTMLDivElement>();
   private unsubscribe = () => {};
   private shown = "";
+  private pasteVersion = 0;
   private errorTimer: ReturnType<typeof setTimeout> | undefined;
 
   private press: { x: number; y: number; startX: number; startY: number; moved: boolean; mouse: boolean } | null = null;
@@ -102,6 +106,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
   componentWillUnmount() {
 
+    this.pasteVersion += 1;
     this.unsubscribe();
     this.props.live.send({ live: "unwatch" });
     URL.revokeObjectURL(this.shown);
@@ -149,6 +154,12 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     }
 
+    if (event.mine === false) {
+
+      this.pasteVersion += 1;
+
+    }
+
     this.setState((state) => ({
 
       ready: state.ready || !!event.blank,
@@ -158,6 +169,8 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
       // what was typed belonged to a hold that has ended
       typed: event.mine === false ? "" : state.typed,
+      pasteOpen: event.mine === false ? false : state.pasteOpen,
+      pasteText: event.mine === false ? "" : state.pasteText,
 
     }));
 
@@ -175,10 +188,11 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
   tab = (action: "switch" | "close" | "new", id?: number) => {
 
+    this.pasteVersion += 1;
     this.props.live.send({ live: "tab", action, id });
 
     // what was typed belonged to the tab being left
-    this.setState({ typed: "" });
+    this.setState({ typed: "", pasteOpen: false, pasteText: "" });
 
   };
 
@@ -361,6 +375,61 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
   };
 
+  pasteText = (text: string) => {
+
+    if (!this.state.mine || !text) {
+
+      return;
+
+    }
+
+    if (text.length > 20_000) {
+
+      this.setState({ error: "Paste up to 20,000 characters at a time." });
+      return;
+
+    }
+
+    this.input({ kind: "text", text });
+    this.setState({ typed: "", pasteOpen: false, pasteText: "", error: "" });
+
+  };
+
+  paste = async () => {
+
+    const version = ++this.pasteVersion;
+    const tab = this.state.tabs.find((one) => one.active)?.id;
+
+    try {
+
+      const text = await navigator.clipboard.readText();
+
+      if (version === this.pasteVersion && this.state.mine && tab === this.state.tabs.find((one) => one.active)?.id) {
+
+        if (text) {
+
+          this.pasteText(text);
+
+        } else {
+
+          this.setState({ pasteOpen: true });
+
+        }
+
+      }
+
+    } catch {
+
+      if (version === this.pasteVersion && this.state.mine) {
+
+        this.setState({ pasteOpen: true });
+
+      }
+
+    }
+
+  };
+
   toggleKeyboard = () => {
 
     const typer = this.typer.current;
@@ -459,7 +528,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
   render() {
 
     const { agent } = this.props;
-    const { ready, blank, mine, error, typed } = this.state;
+    const { ready, blank, mine, error, typed, pasteOpen } = this.state;
 
     return (
 
@@ -467,16 +536,15 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
         <Bar
           back={`#/agent/${agent.id}`}
-          icon={<Glyph glyph={agent.glyph} size={30} live={agent.state === "running" || agent.state === "waiting"} />}
-          title={agent.name}
+          backAlways
+          icon={this.props.split ? undefined : <Glyph glyph={agent.glyph} size={30} live={agent.state === "running" || agent.state === "waiting"} />}
+          title={this.props.split ? "Browser" : agent.name}
           actions={(
 
             <>
 
               {mine && <IconButton label="Back" onClick={() => this.input({ kind: "back" })}><ArrowLeft size={19} strokeWidth={1.75} /></IconButton>}
 
-              {/* pressing it must not take focus off the hidden field, or it could never tell an open keyboard to close */}
-              {mine && <span className="hidden pointer-coarse:flex" onPointerDown={(event) => event.preventDefault()}><IconButton label="Keyboard" onClick={this.toggleKeyboard}><Keyboard size={19} strokeWidth={1.75} /></IconButton></span>}
               <Button tone={mine ? "primary" : "quiet"} className="ml-2 shrink-0" onClick={mine ? () => this.props.live.send({ live: "give" }) : this.take}>{mine ? "Hand back" : "Take over"}</Button>
 
             </>
@@ -524,6 +592,37 @@ export class Browser extends Component<BrowserProps, BrowserState> {
           {ready && blank && <span className="flex items-center gap-3 text-[15px] text-dim"><Glyph glyph={agent.glyph} size={22} live />Browser is suspended</span>}
 
         </div>
+
+        {mine && (
+
+          <div className="flex shrink-0 flex-col gap-3 border-t border-line px-3 pt-3 pb-[max(12px,env(safe-area-inset-bottom))] md:hidden pointer-coarse:flex">
+
+            {pasteOpen && (
+
+              <div className="flex flex-col gap-2">
+
+                <label htmlFor="browser-paste" className="text-sm text-dim">Paste text here, then insert it into the selected browser field.</label>
+                <textarea id="browser-paste" autoFocus rows={3} value={this.state.pasteText} onChange={(event) => this.setState({ pasteText: event.target.value })} className={inputClass} />
+                <div className="flex gap-2">
+
+                  <Button className="flex-1" onClick={() => this.setState({ pasteOpen: false, pasteText: "" })}>Cancel</Button>
+                  <Button className="flex-1" disabled={!this.state.pasteText} onClick={() => this.pasteText(this.state.pasteText)}>Insert text</Button>
+
+                </div>
+
+              </div>
+
+            )}
+            <div className="grid grid-cols-2 gap-2">
+
+              <Button className="flex items-center justify-center gap-2" onPointerDown={(event) => event.preventDefault()} onClick={this.toggleKeyboard}><Keyboard size={18} className="block shrink-0" /><span className="leading-[18px]">Keyboard</span></Button>
+              <Button className="flex items-center justify-center gap-2" onClick={this.paste}><ClipboardPaste size={18} className="block shrink-0" /><span className="leading-[18px]">Paste text</span></Button>
+
+            </div>
+
+          </div>
+
+        )}
 
         {/* 16px stops iOS zooming in on focus */}
         {mine && <input ref={this.typer} value={typed} onChange={this.onType} onKeyDown={this.onTypeKey} autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false} aria-label="Type into the page" className="fixed top-0 left-0 size-px text-[16px] opacity-0" />}

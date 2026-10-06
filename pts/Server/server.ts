@@ -14,7 +14,7 @@ import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { isTimeZone, nextAt, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
-import { addGroupMessage, createAgent, createGroupChat, createRoutine, deleteAgent, deleteGroupChat, deletePushSub, deleteRoutine, getAgentById, getGroupChat, getRoutine, listAgents, listEvents, listGroupChats, listGroupMessages, listRoutines, markRead, readCookie, unreadEvents, unreadGroup, trackedChats, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
+import { searchMessages, searchContext, addGroupMessage, createAgent, createGroupChat, createRoutine, deleteAgent, deleteGroupChat, deletePushSub, deleteRoutine, getAgentById, getGroupChat, getRoutine, listAgents, listEvents, listGroupChats, listGroupMessages, listRoutines, markRead, readCookie, unreadEvents, unreadGroup, trackedChats, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
 const TOKEN = process.env.PTS_TOKEN ?? "";
@@ -522,6 +522,39 @@ async function api(req: Request, url: URL): Promise<Response | undefined> {
 
     // Bun answers the handshake itself; a Response after a successful upgrade is an error
     return server.upgrade(req) ? undefined : json({ error: "Expected a WebSocket upgrade" }, 400);
+
+  }
+
+  if (method === "GET" && path === "/api/search") {
+
+    const query = (url.searchParams.get("q") ?? "").trim();
+    const scope = url.searchParams.get("scope") ?? "";
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+
+    if (query.length > 200 || !Number.isSafeInteger(offset) || offset < 0 || (scope && !/^(agent|group):\d+$/.test(scope))) {
+
+      throw new HttpError(400, "Invalid search parameters");
+
+    }
+
+    const hits = query ? searchMessages(query, scope, offset) : [];
+
+    return json({ hits: hits.slice(0, 50), more: hits.length > 50 });
+
+  }
+
+  if (method === "GET" && path === "/api/search/context") {
+
+    const source = url.searchParams.get("source");
+    const id = Number(url.searchParams.get("id"));
+
+    if ((source !== "agent" && source !== "group") || !Number.isSafeInteger(id) || id < 1) {
+
+      throw new HttpError(400, "Invalid message");
+
+    }
+
+    return json(searchContext(source, id));
 
   }
 

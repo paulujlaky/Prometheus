@@ -365,6 +365,59 @@ export function listEvents(agentId: number, limit = 200, before = Number.MAX_SAF
 
 }
 
+export interface SearchHit {
+
+  id: number;
+  source: "agent" | "group";
+  threadId: number;
+  title: string;
+  author: string;
+  text: string;
+  at: number;
+
+}
+
+const SEARCH_MESSAGES = `
+  select e.id, 'agent' as source, e.agent_id as threadId, a.name as title,
+    case when e.kind in ('task', 'user') then 'You' else a.name end as author, e.text, e.at
+  from events e join agents a on a.id = e.agent_id
+  where e.kind in ('task', 'user', 'say', 'done', 'notify', 'question', 'ask', 'handoff', 'error')
+    and not (e.kind = 'done' and lower(trim(e.text, ' .!' || char(9, 10, 13))) = 'wait')
+  union all
+  select m.id, 'group', m.group_id, coalesce(g.name, 'Everyone'),
+    case when m.author = 'user' then 'You' else m.author end, m.text, m.at
+  from group_messages m left join group_chats g on g.id = m.group_id
+`;
+
+export function searchMessages(query: string, scope = "", offset = 0): SearchHit[] {
+
+  return db.query<SearchHit, [string, string, string, number]>(`
+    select * from (${SEARCH_MESSAGES})
+    where instr(lower(text), lower(?)) > 0 and (? = '' or source || ':' || threadId = ?)
+    order by at desc, source, id desc limit 51 offset ?
+  `).all(query, scope, scope, offset);
+
+}
+
+export function searchContext(source: string, id: number): SearchHit[] {
+
+  const hit = db.query<SearchHit, [string, number]>(`select * from (${SEARCH_MESSAGES}) where source = ? and id = ?`).get(source, id);
+
+  if (!hit) {
+
+    return [];
+
+  }
+
+  return db.query<SearchHit, [string, number, number]>(`
+    with messages as (select * from (${SEARCH_MESSAGES}) where source = ?1 and threadId = ?2)
+    select * from (select * from messages where id <= ?3 order by id desc limit 11)
+    union all select * from (select * from messages where id > ?3 order by id limit 10)
+    order by id
+  `).all(source, hit.threadId, id);
+
+}
+
 export function listPushSubs(): string[] {
 
   return db.query<{ json: string }, []>("select json from push_subs").all().map((row) => row.json);

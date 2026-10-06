@@ -1,4 +1,4 @@
-import { Plus, Settings, UserPlus, Users } from "lucide-react";
+import { Plus, Search, Settings, UserPlus, Users } from "lucide-react";
 import { Fragment, type MouseEvent, type ReactNode } from "react";
 
 import { EveryoneGlyph, Glyph, GroupGlyph } from "../../Components/Glyph/Glyph";
@@ -76,6 +76,8 @@ export function Home({ agents, groups, account, selected }: HomeProps) {
 
           <Torch size={32} />
           <span className="grow font-serif text-[24px]">Prometheus</span>
+
+          <a href="#/search" aria-label="Search conversations" title="Search conversations" className="flex size-11 items-center mb-0.5 pl-4 justify-center rounded-xl text-fg hover:text-fg"><Search size={20} /></a>
           <button type="button" popoverTarget="new-menu" onClick={placeMenu} aria-label="New" title="New" className="flex size-11 items-center justify-center rounded-xl text-fg"><Plus size={22} strokeWidth={1.6} /></button>
 
           <div id="new-menu" popover="auto" onClick={(event) => event.currentTarget.hidePopover()} className="m-0 -translate-x-full rounded-xl border border-line bg-panel p-1 text-fg shadow-[0_16px_40px_rgb(0_0_0/0.5)]">

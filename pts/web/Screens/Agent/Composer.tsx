@@ -35,6 +35,40 @@ export class Composer extends Component<ComposerProps, ComposerState> {
   state: ComposerState = { text: "", sending: false, query: null, active: 0 };
 
   private field = createRef<HTMLTextAreaElement>();
+  private observer: ResizeObserver | undefined;
+
+  componentDidMount() {
+
+    this.observer = new ResizeObserver(this.resize);
+    this.observer.observe(this.field.current!.parentElement!);
+    this.resize();
+
+  }
+
+  componentDidUpdate() {
+
+    this.resize();
+
+  }
+
+  componentWillUnmount() {
+
+    this.observer?.disconnect();
+
+  }
+
+  resize = () => {
+
+    const field = this.field.current;
+
+    if (field) {
+
+      field.style.height = "0px";
+      field.style.height = field.scrollHeight + "px";
+
+    }
+
+  };
 
   suggestions(): Agent[] {
 
@@ -156,7 +190,6 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
   render() {
 
-    const rows = Math.min(6, this.state.text.split("\n").length);
     const suggestions = this.suggestions();
 
     return (
@@ -187,7 +220,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
         </AnimatePresence>
 
         <label className="sr-only" htmlFor="composer">{this.props.placeholder}</label>
-        <textarea ref={this.field} id="composer" rows={rows} value={this.state.text} onChange={(event) => this.setState({ text: event.target.value }, this.track)} onKeyDown={this.onKeyDown} onKeyUp={(event) => (event.key.startsWith("Arrow") && !suggestions.length) && this.track()} onClick={this.track} onBlur={() => this.setState({ query: null })} placeholder={this.props.placeholder} className="max-h-40 min-w-0 grow resize-none bg-transparent py-2.5 text-[16px] leading-normal text-fg outline-none placeholder:text-dim" />
+        <textarea ref={this.field} id="composer" rows={1} value={this.state.text} onChange={(event) => this.setState({ text: event.target.value }, this.track)} onKeyDown={this.onKeyDown} onKeyUp={(event) => (event.key.startsWith("Arrow") && !suggestions.length) && this.track()} onClick={this.track} onBlur={() => this.setState({ query: null })} placeholder={this.props.placeholder} className="max-h-[45dvh] min-w-0 grow resize-none bg-transparent py-2.5 text-[16px] leading-normal text-fg outline-none placeholder:text-dim" />
         <button type="submit" aria-label="Send" disabled={!this.state.text.trim() || this.state.sending} className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-fg text-ink disabled:opacity-30"><ArrowUp size={18} strokeWidth={2} /></button>
 
       </form>

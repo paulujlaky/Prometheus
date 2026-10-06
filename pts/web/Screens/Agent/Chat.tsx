@@ -354,6 +354,7 @@ export class Chat extends Component<ChatProps> {
 
         <Bar
           back="#/"
+          backAlways
           icon={<Glyph glyph={agent.glyph} size={30} live={busy} />}
           title={agent.name}
           actions={(
@@ -369,7 +370,7 @@ export class Chat extends Component<ChatProps> {
           )}
         />
 
-        <div ref={this.scroller} onScroll={this.onScroll} className="grow overflow-y-auto">
+        <div ref={this.scroller} onScroll={this.onScroll} className="min-h-0 grow overflow-y-auto">
 
           <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] py-6 md:px-8">
 

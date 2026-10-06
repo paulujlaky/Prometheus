@@ -54,7 +54,7 @@ function validInput(event: unknown): Input | null {
 
     case "text":
 
-      return short(e.text, 2000) ? { kind: "text", text: e.text as string } : null;
+      return short(e.text, 20_000) ? { kind: "text", text: e.text as string } : null;
 
     case "key":
 

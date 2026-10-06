@@ -24,6 +24,60 @@ function call(path: string, init: RequestInit = {}) {
 
 }
 
+test("global search finds older messages, treats wildcards literally, and isolates conversation context", async () => {
+
+  const { createAgent, createGroupChat, addEvent, addGroupMessage, deleteAgent, deleteGroupChat } = await import("../Store");
+  const agent = createAgent("Searchable", "model-1");
+  const other = createAgent("Other search", "model-1");
+  const group = createGroupChat("Search group", [agent.id]);
+  const old = addEvent(agent.id, "old", "done", "Archive needle 100%_complete");
+
+  for (let i = 0; i < 205; i += 1) {
+
+    addEvent(agent.id, `run-${i}`, "done", `Pagination needle ${i}`);
+
+  }
+
+  addEvent(agent.id, "hidden", "assistant", "Raw tool needle");
+  addEvent(other.id, "other", "done", "Other needle");
+  addGroupMessage(group.id, "user", null, "Group needle");
+  addGroupMessage(0, "user", null, "Everyone needle");
+
+  const search = async (query: string) => (await call(`/api/search?${query}`)).json();
+  const literal = await search("q=100%25_complete");
+
+  expect(literal.hits.map((hit: { id: number }) => hit.id)).toEqual([old.id]);
+  expect((await search("q=ARCHIVE%20NEEDLE")).hits).toHaveLength(1);
+  expect((await search("q=Raw%20tool%20needle")).hits).toHaveLength(0);
+  expect((await search("q=%27%20OR%201%3D1--")).hits).toHaveLength(0);
+  expect(await search("q=%20")).toEqual({ hits: [], more: false });
+
+  const first = await search(`q=needle&scope=agent:${agent.id}`);
+  const second = await search(`q=needle&scope=agent:${agent.id}&offset=50`);
+
+  expect(first.hits).toHaveLength(50);
+  expect(first.more).toBe(true);
+  expect(first.hits.every((hit: { threadId: number }) => hit.threadId === agent.id)).toBe(true);
+  expect(new Set([...first.hits, ...second.hits].map((hit) => hit.id)).size).toBe(100);
+  expect((await search(`q=needle&scope=group:${group.id}`)).hits[0].title).toBe("Search group");
+  expect((await search("q=needle&scope=group:0")).hits[0].title).toBe("Everyone");
+
+  const context = await (await call(`/api/search/context?source=agent&id=${old.id}`)).json();
+
+  expect(context.some((hit: { id: number }) => hit.id === old.id)).toBe(true);
+  expect(context.every((hit: { source: string; threadId: number }) => hit.source === "agent" && hit.threadId === agent.id)).toBe(true);
+  expect(context.length).toBeLessThanOrEqual(21);
+  expect((await call("/api/search?offset=-1&q=x")).status).toBe(400);
+  expect((await call("/api/search/context?source=invalid&id=1")).status).toBe(400);
+  expect((await fetch(`${base}/api/search?q=needle`)).status).toBe(401);
+
+  deleteAgent(agent.id);
+  deleteAgent(other.id);
+  deleteGroupChat(group.id);
+  deleteGroupChat(0);
+
+});
+
 test("everything but login needs the token", async () => {
 
   expect((await fetch(`${base}/api/agents`)).status).toBe(401);

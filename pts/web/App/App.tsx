@@ -11,6 +11,7 @@ import { Details } from "../Screens/Agent/Details";
 import { Group } from "../Screens/Group/Group";
 import { Home } from "../Screens/Home/Home";
 import { NewAgent } from "../Screens/Home/NewAgent";
+import { Search } from "../Screens/Home/Search";
 import { NewGroup } from "../Screens/Home/NewGroup";
 
 import { isWaiting } from "../../Features/Group";
@@ -21,7 +22,7 @@ type Route =
 
   | { name: "home" }
   | { name: "agent" | "details" | "browser" | "group"; id: number }
-  | { name: "settings" | "new" | "newGroup" };
+  | { name: "settings" | "new" | "newGroup" | "search" };
 
 /** A chat whose messages can be unread; group 0 is Everyone. */
 type ReadTarget = { agent: number } | { group: number };
@@ -69,7 +70,7 @@ function parseRoute(): Route {
 
   }
 
-  return name === "settings" || name === "new" ? { name } : { name: "home" };
+  return name === "settings" || name === "new" || name === "search" ? { name } : { name: "home" };
 
 }
 
@@ -171,7 +172,17 @@ export class App extends Component<{}, AppState> {
 
   };
 
-  onResize = (event: MediaQueryListEvent) => this.setState({ wide: event.matches });
+  onResize = (event: MediaQueryListEvent) => this.setState({ wide: event.matches }, () => {
+
+    const { route, wide } = this.state;
+
+    if (wide && route.name === "browser") {
+
+      this.markRead({ agent: route.id });
+
+    }
+
+  });
 
   /** Any request can find the session gone; every caller routes that here. */
   guard = (err: unknown) => {
@@ -230,10 +241,15 @@ export class App extends Component<{}, AppState> {
 
   loadFor = (route: Route) => {
 
-    if (route.name === "agent") {
+    if (route.name === "agent" || route.name === "browser") {
 
       this.loadEvents(route.id).catch(this.guard);
-      this.markRead({ agent: route.id });
+
+      if (route.name === "agent" || this.state.wide) {
+
+        this.markRead({ agent: route.id });
+
+      }
 
     }
 
@@ -284,7 +300,7 @@ export class App extends Component<{}, AppState> {
   onMessage = (target: ReadTarget) => {
 
     const { route } = this.state;
-    const open = "agent" in target ? route.name === "agent" && route.id === target.agent : route.name === "group" && route.id === target.group;
+    const open = "agent" in target ? (route.name === "agent" || (route.name === "browser" && this.state.wide)) && route.id === target.agent : route.name === "group" && route.id === target.group;
 
     if (open) {
 
@@ -485,12 +501,6 @@ export class App extends Component<{}, AppState> {
 
       }
 
-      if (route.name === "browser") {
-
-        return <Browser key={agent.id} agent={agent} live={this.live} onAnswer={this.answer(agent.id)} />;
-
-      }
-
       if (route.name === "details") {
 
         return <Details key={agent.id} agent={agent} models={models} onChanged={this.updateAgent} onDeleted={() => { location.hash = "#/"; this.refresh().catch(this.guard); }} />;
@@ -499,14 +509,23 @@ export class App extends Component<{}, AppState> {
 
       return (
 
-        <Chat
-          key={agent.id}
-          agent={agent}
-          events={events[agent.id]}
-          onSend={(text) => api<Agent>(`/agents/${agent.id}/messages`, "POST", { text }).then(this.updateAgent)}
-          onStop={() => api(`/agents/${agent.id}/stop`, "POST").catch(this.guard)}
-          onAnswer={this.answer(agent.id)}
-        />
+        <div className="flex h-full min-h-0">
+
+          <div className={route.name === "browser" ? (this.state.wide ? "h-full w-[40%] min-w-[320px] border-r border-line" : "hidden") : "h-full min-w-0 grow"}>
+
+            <Chat
+              key={agent.id}
+              agent={agent}
+              events={events[agent.id]}
+              onSend={(text) => api<Agent>(`/agents/${agent.id}/messages`, "POST", { text }).then(this.updateAgent)}
+              onStop={() => api(`/agents/${agent.id}/stop`, "POST").catch(this.guard)}
+              onAnswer={this.answer(agent.id)}
+            />
+
+          </div>
+          {route.name === "browser" && <div className="h-full min-w-0 flex-1"><Browser key={agent.id} agent={agent} live={this.live} split={this.state.wide} onAnswer={this.answer(agent.id)} /></div>}
+
+        </div>
 
       );
 
@@ -534,6 +553,12 @@ export class App extends Component<{}, AppState> {
         />
 
       );
+
+    }
+
+    if (route.name === "search") {
+
+      return <Search agents={agents} groups={groups} />;
 
     }
 
@@ -584,10 +609,10 @@ export class App extends Component<{}, AppState> {
     const home = <Home agents={agents} groups={groups} account={account} selected={routeKey(route)} />;
     const screen = route.name === "home" && !wide ? home : this.renderRoute() ?? <Empty text="Pick an agent, or talk to everyone." />;
 
-    // keyed by screen, not agent alone, so moving from a chat to its details fades too
+    // chat and browser share a key so opening the split view preserves the draft
     const page = (
 
-      <motion.div key={`${route.name}/${"id" in route ? route.id : ""}`} className="h-full" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.18 }}>
+      <motion.div key={`${route.name === "browser" ? "agent" : route.name}/${"id" in route ? route.id : ""}`} className="h-full" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.18 }}>
 
         {screen}
 
@@ -605,7 +630,7 @@ export class App extends Component<{}, AppState> {
 
             <div className="flex h-full">
 
-              <aside className="h-full w-[340px] shrink-0 border-r border-line">{home}</aside>
+              {route.name !== "browser" && <aside className="h-full w-[340px] shrink-0 border-r border-line">{home}</aside>}
               <main className="h-full min-w-0 grow">{page}</main>
 
             </div>
