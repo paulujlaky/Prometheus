@@ -1320,7 +1320,7 @@ async function stampPage(browser: Browser, chrome: Chrome, page: Page) {
 
   // a dedicated worker is a child of the page, not of the browser, so the page session is what hears it
   await watchTargets(session, CHILD_TARGETS, true).catch(() => {});
-  await apply((method, params) => session.send(method, params), id, false).catch(() => {});
+  await apply((method, params) => session.send(method as any, params), id, false).catch(() => {});
 
 }
 
