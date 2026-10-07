@@ -4,12 +4,18 @@ import { setPriority } from "node:os";
 import { join, sep } from "node:path";
 import { connect as connectTls } from "node:tls";
 
-import { chromium, errors, type BrowserContext, type CDPSession, type Page } from "playwright";
+import { chromium, errors, type BrowserContext, type CDPSession, type Locator, type Page } from "playwright";
 
 const IDLE_MS = Number(process.env.PTS_BROWSER_IDLE_MS ?? 10 * 60_000);
 const ACTION_MS = 15_000;
 const LOAD_MS = 30_000;
 const INPUT_MS = 10_000;
+
+// an element from the outline is clickable within a moment or covered; waiting longer only stalls the agent
+const ELEMENT_MS = 5_000;
+
+// most pages finish their own fetches within a few seconds; waiting longer only stalls the agent
+const QUIET_MS = 3_000;
 
 // a take-over may first reload a suspended tab
 const LAND_MS = LOAD_MS + ACTION_MS;
@@ -1828,8 +1834,7 @@ async function settle(page: Page) {
 
   await page.waitForLoadState("domcontentloaded", { timeout: LOAD_MS }).catch(() => {});
 
-  // most pages finish their own fetches within a few seconds; waiting longer only stalls the agent
-  await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: QUIET_MS }).catch(() => {});
 
 }
 
@@ -2014,16 +2019,77 @@ export async function look(workspace: string, signal?: AbortSignal): Promise<str
 
 }
 
+/** Pages that keep redrawing (Gmail's inbox, feeds) swap elements out under a ref; say so with the page now instead of timing out. */
+async function byRef<T>(browser: Browser, page: Page, target: string, work: (locator: Locator) => Promise<T>): Promise<T> {
+
+  const locator = page.locator(`aria-ref=${target}`);
+  const gone = async () => new Error(`${target} is no longer on the page — it redrew since you looked, so nothing ran. Use a ref from the page below. If it keeps redrawing, don't retry the click: open the item by its URL, or search for it.\n\n${await read(browser, page)}`);
+
+  if (!(await locator.count())) {
+
+    throw await gone();
+
+  }
+
+  try {
+
+    return await work(locator);
+
+  } catch (err) {
+
+    if (err instanceof errors.TimeoutError && !(await locator.count())) {
+
+      throw await gone();
+
+    }
+
+    throw err;
+
+  }
+
+}
+
 /** What a click or key does shows up a moment after it returns: a new browser, a menu, a navigation starting. */
-async function interact(workspace: string, signal: AbortSignal | undefined, ms: number, work: (page: Page) => Promise<unknown>): Promise<string> {
+async function interact(workspace: string, signal: AbortSignal | undefined, ms: number, work: (page: Page, browser: Browser) => Promise<unknown>): Promise<string> {
 
   const browser = await agentBrowser(workspace, signal, true);
 
   return act(browser, ms, async (chrome) => {
 
-    await work(chrome.page);
-    await Bun.sleep(500);
-    await settle(chrome.page);
+    const page = chrome.page;
+    const pending = new Set<object>();
+    const start = (request: object) => pending.add(request);
+    const end = (request: object) => pending.delete(request);
+
+    // only what the action started counts: Gmail and other apps hold a connection open, so they are never network-idle
+    page.on("request", start).on("requestfinished", end).on("requestfailed", end);
+
+    try {
+
+      await work(page, browser);
+      await Bun.sleep(500);
+
+      if (chrome.page !== page) {
+
+        await settle(chrome.page);
+
+      } else {
+
+        await page.waitForLoadState("domcontentloaded", { timeout: LOAD_MS }).catch(() => {});
+
+        for (const until = Date.now() + QUIET_MS; pending.size && Date.now() < until;) {
+
+          await Bun.sleep(100);
+
+        }
+
+      }
+
+    } finally {
+
+      page.off("request", start).off("requestfinished", end).off("requestfailed", end);
+
+    }
 
     return read(browser, chrome.page);
 
@@ -2035,7 +2101,7 @@ export async function click(workspace: string, ref: string, signal?: AbortSignal
 
   const target = refOf(ref);
 
-  return interact(workspace, signal, LOAD_MS + ACTION_MS * 3, (page) => page.locator(`aria-ref=${target}`).click({ timeout: ACTION_MS }));
+  return interact(workspace, signal, LOAD_MS + ACTION_MS * 3, (page, browser) => byRef(browser, page, target, (locator) => locator.click({ timeout: ELEMENT_MS })));
 
 }
 
@@ -2050,7 +2116,7 @@ export async function type(workspace: string, ref: string, text: string, signal?
   const target = refOf(ref);
   const browser = await agentBrowser(workspace, signal, true);
 
-  await act(browser, ACTION_MS, (chrome) => chrome.page.locator(`aria-ref=${target}`).fill(text, { timeout: ACTION_MS }));
+  await act(browser, ACTION_MS * 3, (chrome) => byRef(browser, chrome.page, target, (locator) => locator.fill(text, { timeout: ELEMENT_MS })));
 
   return `typed ${text.length} characters into ${target}`;
 

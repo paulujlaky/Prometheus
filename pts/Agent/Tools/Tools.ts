@@ -557,7 +557,7 @@ export function applyEdit(cwd: string, target: string, body: string): Result {
 
   if (!pairs.length) {
 
-    return fail("No @@ FIND / @@ REPLACE pair in that block.\n\n  <edit notes.md>\n  @@ FIND\n  old text\n  @@ REPLACE\n  new text\n  </edit>");
+    return fail("No @@ FIND / @@ REPLACE pair in that block. To add text, FIND the line it goes after and REPLACE it with that line plus the new text.\n\n  <edit notes.md>\n  @@ FIND\n  old text\n  @@ REPLACE\n  new text\n  </edit>");
 
   }
 
