@@ -5,13 +5,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [ "$(id -u)" = 0 ]; then
-
-  echo "Run this as the user pts will run as, not as root." >&2
-  exit 1
-
-fi
-
 # bwrap and pasta sandbox agents' commands, ip fences their routes, and systemd-run reaches this user's manager over its bus
 sudo apt-get update -q
 sudo apt-get install -yq curl bubblewrap passt iproute2 unzip dbus-user-session
