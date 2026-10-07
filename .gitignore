@@ -2,7 +2,6 @@ node_modules/
 .env
 *.log
 dist/
-swe/release/
 .DS_Store
 _docs
 

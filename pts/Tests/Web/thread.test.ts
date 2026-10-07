@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { buildItems, describeSchedule, describeWatch } from "../../web/Lib/thread";
+import { buildItems } from "../../web/Lib/thread";
 
 import type { AgentEvent } from "../../Store";
 
@@ -40,7 +40,7 @@ test("a run folds into the user's message, one work row, its cards and the repor
 
 });
 
-test("a routine card reads in words, never cron", () => {
+test("a routine card shows when it next fires, never cron", () => {
 
   const card = (detail: string) => buildItems([
 
@@ -51,9 +51,10 @@ test("a routine card reads in words, never cron", () => {
 
   ], false).find((item) => item.kind === "routine");
 
-  expect(card("created routine 5  schedule 15 * * * *, next Sun, Oct 4, 12:15 AM EDT  — Hourly browser test")).toMatchObject({ when: "Every hour at :15 · first Sun, Oct 4, 12:15 AM EDT", title: "Hourly browser test" });
-  expect(card("created routine 6  schedule 0 9 1 * 0, next Thu, Oct 1, 9:00 AM EDT  — Odd one")).toMatchObject({ when: "Custom schedule · first Thu, Oct 1, 9:00 AM EDT" });
-  expect(card("created routine 7  schedule 0 9 * * 1-5  — Before next existed")).toMatchObject({ when: "Weekdays at 9:00 AM" });
+  expect(card("created routine 5  schedule 15 * * * *, next Sun, Oct 4, 12:15 AM EDT  — Hourly browser test")).toMatchObject({ when: "Next Sun, Oct 4, 12:15 AM EDT", title: "Hourly browser test" });
+  expect(card("created routine 6  schedule 0 9 30 2 *  — Never")).toMatchObject({ when: "Never runs" });
+  expect(card("created routine 7  watch https://example.com/ every 60 min  — Page")).toMatchObject({ when: "Hourly, watching example.com" });
+  expect(card("created routine 8  watch cat stock.txt every 5 min  — Stock")).toMatchObject({ when: "Every 5 min, watching a command" });
 
 });
 
@@ -73,28 +74,6 @@ test("a running run's unanswered steps show live; a finished run drops blocks th
   ], false);
 
   expect(held.find((item) => item.kind === "work")).toMatchObject({ live: false, steps: [{ ok: false }] });
-
-});
-
-test("schedules read as a clock time, and stay exact when the shape is unusual", () => {
-
-  expect(describeSchedule("0 9 * * 1-5")).toBe("Weekdays at 9:00 AM");
-  expect(describeSchedule("30 7 * * *")).toBe("Every day at 7:30 AM");
-  expect(describeSchedule("0 18 * * 5")).toBe("Fridays at 6:00 PM");
-  expect(describeSchedule("0 10 * * 0,6")).toBe("Weekends at 10:00 AM");
-  expect(describeSchedule("0 0 * * *")).toBe("Every day at midnight");
-  expect(describeSchedule("0 12 * * 1")).toBe("Mondays at noon");
-  expect(describeSchedule("*/15 * * * *")).toBe("Every 15 min");
-  expect(describeSchedule("30 * * * *")).toBe("Every hour at :30");
-  expect(describeSchedule("0 */2 * * *")).toBe("Every 2 hours");
-  expect(describeSchedule("0 9 * * 1,3,5")).toBe("Mondays, Wednesdays and Fridays at 9:00 AM");
-  expect(describeSchedule("0 9 1 * *")).toBe("The 1st of every month at 9:00 AM");
-  expect(describeSchedule("0 9 1 1 *")).toBe("January 1st at 9:00 AM");
-  expect(describeSchedule("0 9 1 * 0")).toBe("Custom schedule");
-  expect(describeSchedule("0 9 1 * 0", "America/New_York")).toBe("Custom schedule");
-  expect(describeSchedule("0 9 * * 1-5", "America/New_York")).toMatch(/^Weekdays at 9:00 AM \S+$/);
-  expect(describeWatch("https://example.com/", "60")).toBe("Hourly, watching example.com");
-  expect(describeWatch("cat stock.txt", "5")).toBe("Every 5 min, watching a command");
 
 });
 

@@ -41,9 +41,9 @@ export interface Notice {
 
 }
 
-export async function notify(notice: Notice) {
+export async function notify(userId: number, notice: Notice) {
 
-  await Promise.all(listPushSubs().map(async (json) => {
+  await Promise.all(listPushSubs(userId).map(async (json) => {
 
     const sub = JSON.parse(json) as PushSubscription;
 

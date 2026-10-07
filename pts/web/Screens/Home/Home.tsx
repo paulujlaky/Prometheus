@@ -1,4 +1,4 @@
-import { Plus, Search, Settings, UserPlus, Users } from "lucide-react";
+import { Plus, Settings, UserPlus, Users } from "lucide-react";
 import { Fragment, type MouseEvent, type ReactNode } from "react";
 
 import { EveryoneGlyph, Glyph, GroupGlyph } from "../../Components/Glyph/Glyph";
@@ -44,11 +44,7 @@ function Row({ href, icon, title, status, strong, selected }: { href: string; ic
 
 }
 
-function unread(count: number): string {
-
-  return `${count} new message${count === 1 ? "" : "s"}`;
-
-}
+const unread = (count: number) => `${count} new message${count === 1 ? "" : "s"}`;
 
 // the popover sits in the top layer, so it is placed under the button by hand
 function placeMenu(event: MouseEvent<HTMLButtonElement>) {
@@ -77,7 +73,6 @@ export function Home({ agents, groups, account, selected }: HomeProps) {
           <Torch size={32} />
           <span className="grow font-serif text-[24px]">Prometheus</span>
 
-          <a href="#/search" aria-label="Search conversations" title="Search conversations" className="flex size-11 items-center mb-0.5 pl-4 justify-center rounded-xl text-fg hover:text-fg"><Search size={20} /></a>
           <button type="button" popoverTarget="new-menu" onClick={placeMenu} aria-label="New" title="New" className="flex size-11 items-center justify-center rounded-xl text-fg"><Plus size={22} strokeWidth={1.6} /></button>
 
           <div id="new-menu" popover="auto" onClick={(event) => event.currentTarget.hidePopover()} className="m-0 -translate-x-full rounded-xl border border-line bg-panel p-1 text-fg shadow-[0_16px_40px_rgb(0_0_0/0.5)]">
@@ -92,17 +87,6 @@ export function Home({ agents, groups, account, selected }: HomeProps) {
           </div>
 
         </header>
-
-        {!account.set && (
-
-          <a href="#/settings" className="mx-4 mt-8 flex flex-col gap-1 rounded-2xl bg-panel p-5 no-underline">
-
-            <span className="text-[14px] text-dim">One thing first</span>
-            <span className="font-serif text-[21px] leading-snug">Connect your Boodle account so agents can think.</span>
-
-          </a>
-
-        )}
 
         <nav aria-label="Agents" className="mt-8 flex flex-col">
 
@@ -160,12 +144,12 @@ export function Home({ agents, groups, account, selected }: HomeProps) {
 
       <a href="#/settings" aria-current={selected === "settings" ? "page" : undefined} className={`flex shrink-0 items-center gap-3 border-t border-line px-6 py-3.5 pb-[max(14px,env(safe-area-inset-bottom))] no-underline ${selected === "settings" ? "bg-panel" : ""}`}>
 
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-[14px]" aria-hidden="true">{account.set ? who[0].toUpperCase() : "?"}</span>
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-[14px]" aria-hidden="true">{who[0].toUpperCase()}</span>
 
         <span className="flex min-w-0 grow flex-col leading-tight">
 
-          <span className="truncate text-[14px]">{account.set ? who : "Not connected"}</span>
-          {account.set && account.email && account.name && <span className="truncate text-[12px] text-dim">{account.email}</span>}
+          <span className="truncate text-[14px]">{who}</span>
+          {account.email && account.name && <span className="truncate text-[12px] text-dim">{account.email}</span>}
 
         </span>
 

@@ -2,7 +2,7 @@ import type { RunControl, RunListener } from "./Runner";
 import type { Origin } from "../Features/Group";
 import type { Agent } from "../Store";
 
-const MAX_RUNNING = Number(process.env.PTS_MAX_RUNNING ?? 3);
+const MAX_RUNNING = Number(process.env.PTS_MAX_RUNNING ?? 5);
 
 // a run waiting on the user still holds one of the MAX_RUNNING slots, so an unanswered question must end
 const ANSWER_MS = Number(process.env.PTS_ANSWER_MS ?? 30 * 60_000);
@@ -28,6 +28,8 @@ interface Job {
 
 interface Slot {
 
+  userId: number;
+
   controller: AbortController;
   notes: string[];
 
@@ -37,7 +39,7 @@ interface Slot {
 
 }
 
-/** At most MAX_RUNNING agents think at once, one run per agent; everything else waits its turn in arrival order. */
+/** At most MAX_RUNNING agents think at once across every user, one run per agent; everything else waits its turn. */
 export class Queue {
 
   private running = new Map<number, Slot>();
@@ -60,30 +62,11 @@ export class Queue {
   }
 
   /** Already running or queued for this group chain, so a hand-off to it would only repeat the work. */
-  busyIn(agentId: number, chain: number): boolean {
+  busyIn = (agentId: number, chain: number) => this.running.get(agentId)?.origin?.chain === chain || this.waiting.some((job) => job.agent.id === agentId && job.origin?.chain === chain);
 
-    if (this.running.get(agentId)?.origin?.chain === chain) {
-
-      return true;
-
-    }
-
-    return this.waiting.some((job) => job.agent.id === agentId && job.origin?.chain === chain);
-
-  }
-
-  /** The approval this agent is waiting on, if any. */
-  question(agentId: number): string | null {
-
-    return this.running.get(agentId)?.pending?.question ?? null;
-
-  }
-
-  waitingOn(agentId: number): WaitKind | null {
-
-    return this.running.get(agentId)?.pending?.kind ?? null;
-
-  }
+  /** What this agent is waiting on, if anything. */
+  question = (agentId: number) => this.running.get(agentId)?.pending?.question ?? null;
+  waitingOn = (agentId: number) => this.running.get(agentId)?.pending?.kind ?? null;
 
   /** False when nothing was waiting, e.g. the question already timed out. `kind` limits it to one sort of wait. */
   answer(agentId: number, reply: Reply, kind?: WaitKind): boolean {
@@ -110,11 +93,12 @@ export class Queue {
     if (slot) {
 
       slot.notes.push(text);
-      return;
+
+    } else {
+
+      this.enqueue(agent, text);
 
     }
-
-    this.enqueue(agent, text);
 
   }
 
@@ -159,11 +143,20 @@ export class Queue {
 
   }
 
+  /** The oldest job of whichever user has the fewest runs going, so one user's burst cannot take every slot on a shared host. */
+  private next(): number {
+
+    const load = (job: Job) => [...this.running.values()].filter((slot) => slot.userId === job.agent.userId).length;
+
+    return this.waiting.reduce((best, job, index) => !this.running.has(job.agent.id) && (best === -1 || load(job) < load(this.waiting[best])) ? index : best, -1);
+
+  }
+
   private pump() {
 
     while (this.running.size < this.limit) {
 
-      const index = this.waiting.findIndex((job) => !this.running.has(job.agent.id));
+      const index = this.next();
 
       if (index === -1) {
 
@@ -172,11 +165,11 @@ export class Queue {
       }
 
       const [job] = this.waiting.splice(index, 1);
-      const slot: Slot = { controller: new AbortController(), notes: [], pending: null, origin: job.origin };
+      const slot: Slot = { userId: job.agent.userId, controller: new AbortController(), notes: [], pending: null, origin: job.origin };
       const id = job.agent.id;
 
-      this.running.set(job.agent.id, slot);
-      this.onState(job.agent.id, "running");
+      this.running.set(id, slot);
+      this.onState(id, "running");
 
       const ask = (question: string, kind: WaitKind = "ask") => new Promise<Reply>((resolve) => {
 
@@ -206,7 +199,7 @@ export class Queue {
 
       this.start(job.agent, job.task, control, job.origin).catch((err) => console.error(`run for ${job.agent.name} failed:`, err)).finally(() => {
 
-        this.running.delete(job.agent.id);
+        this.running.delete(id);
 
         // a message that arrived after the agent's last step still deserves an answer
         if (slot.notes.length && !slot.controller.signal.aborted) {
@@ -215,7 +208,7 @@ export class Queue {
 
         }
 
-        this.onState(job.agent.id, this.state(job.agent.id));
+        this.onState(id, this.state(id));
         this.pump();
 
       });

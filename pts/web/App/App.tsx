@@ -3,7 +3,7 @@ import { Component } from "react";
 
 import { Torch } from "../Components/Layout";
 import { Install, mustInstall } from "../Screens/Account/Install";
-import { Login } from "../Screens/Account/Login";
+import { Gate } from "../Screens/Account/Login";
 import { Settings } from "../Screens/Account/Settings";
 import { Browser } from "../Screens/Agent/Browser";
 import { Chat } from "../Screens/Agent/Chat";
@@ -11,7 +11,6 @@ import { Details } from "../Screens/Agent/Details";
 import { Group } from "../Screens/Group/Group";
 import { Home } from "../Screens/Home/Home";
 import { NewAgent } from "../Screens/Home/NewAgent";
-import { Search } from "../Screens/Home/Search";
 import { NewGroup } from "../Screens/Home/NewGroup";
 
 import { isWaiting } from "../../Features/Group";
@@ -22,7 +21,7 @@ type Route =
 
   | { name: "home" }
   | { name: "agent" | "details" | "browser" | "group"; id: number }
-  | { name: "settings" | "new" | "newGroup" | "search" };
+  | { name: "settings" | "new" | "newGroup" };
 
 /** A chat whose messages can be unread; group 0 is Everyone. */
 type ReadTarget = { agent: number } | { group: number };
@@ -64,21 +63,11 @@ function parseRoute(): Route {
 
   }
 
-  if (name === "new" && id === "group") {
-
-    return { name: "newGroup" };
-
-  }
-
-  return name === "settings" || name === "new" || name === "search" ? { name } : { name: "home" };
+  return name === "new" && id === "group" ? { name: "newGroup" } : name === "settings" || name === "new" ? { name } : { name: "home" };
 
 }
 
-function routeKey(route: Route): string {
-
-  return "id" in route ? `${route.name === "group" ? "group" : "agent"}/${route.id}` : route.name;
-
-}
+const routeKey = (route: Route) => "id" in route ? `${route.name === "group" ? "group" : "agent"}/${route.id}` : route.name;
 
 export class App extends Component<{}, AppState> {
 
@@ -100,21 +89,15 @@ export class App extends Component<{}, AppState> {
 
     send: (command: LiveCommand) => {
 
-      if (command.live === "watch") {
+      if (command.live === "watch" || command.live === "unwatch") {
 
-        this.watched = command.agentId;
+        this.watched = command.live === "watch" ? command.agentId : null;
 
       }
 
       if (command.live === "take") {
 
         this.taken = command;
-
-      }
-
-      if (command.live === "unwatch") {
-
-        this.watched = null;
 
       }
 
@@ -187,15 +170,14 @@ export class App extends Component<{}, AppState> {
   /** Any request can find the session gone; every caller routes that here. */
   guard = (err: unknown) => {
 
-    if (err instanceof Unauthorized) {
+    if (!(err instanceof Unauthorized)) {
 
-      this.socket?.close();
-      this.setState({ authed: false });
-      return;
+      return console.error(err);
 
     }
 
-    console.error(err);
+    this.socket?.close();
+    this.setState({ authed: false });
 
   };
 
@@ -206,7 +188,15 @@ export class App extends Component<{}, AppState> {
       await this.refresh();
       this.setState({ authed: true });
       this.connect();
-      this.adoptZone().catch(this.guard);
+
+      // schedules run on the user's clock; until Settings names one, it is this device's rather than the server's
+      const { timezone } = await api<{ timezone: string | null }>("/settings");
+
+      if (!timezone) {
+
+        await api("/settings", "PUT", { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+
+      }
 
     } catch (err) {
 
@@ -216,25 +206,12 @@ export class App extends Component<{}, AppState> {
 
   };
 
-  /** Schedules run on the user's clock; until Settings names one, it is this device's rather than the server's. */
-  adoptZone = async () => {
-
-    const { timezone } = await api<{ timezone: string | null }>("/settings");
-
-    if (!timezone) {
-
-      await api("/settings", "PUT", { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-
-    }
-
-  };
-
   /** Everything the screens show at a glance; also re-run after a reconnect, since events sent while offline are gone. */
   refresh = async () => {
 
-    const [agents, groups, cookie] = await Promise.all([api<Agent[]>("/agents"), api<GroupChat[]>("/groups"), api<Account>("/cookie")]);
+    const [agents, groups, account] = await Promise.all([api<Agent[]>("/agents"), api<GroupChat[]>("/groups"), api<Account>("/cookie")]);
 
-    this.setState({ agents, groups, account: cookie });
+    this.setState({ agents, groups, account });
     this.loadFor(this.state.route);
 
   };
@@ -243,7 +220,7 @@ export class App extends Component<{}, AppState> {
 
     if (route.name === "agent" || route.name === "browser") {
 
-      this.loadEvents(route.id).catch(this.guard);
+      api<AgentEvent[]>(`/agents/${route.id}/events`).then((events) => this.setState((state) => ({ events: { ...state.events, [route.id]: events } }))).catch(this.guard);
 
       if (route.name === "agent" || this.state.wide) {
 
@@ -268,26 +245,12 @@ export class App extends Component<{}, AppState> {
 
   };
 
-  loadEvents = async (agentId: number) => {
+  setUnread = (target: ReadTarget, count: (unread: number) => number) => this.setState((state) => ({
 
-    const events = await api<AgentEvent[]>(`/agents/${agentId}/events`);
+    agents: state.agents.map((agent) => ("agent" in target && agent.id === target.agent ? { ...agent, unread: count(agent.unread) } : agent)),
+    groups: state.groups.map((group) => ("group" in target && group.id === target.group ? { ...group, unread: count(group.unread) } : group)),
 
-    this.setState((state) => ({ events: { ...state.events, [agentId]: events } }));
-
-  };
-
-  setUnread = (target: ReadTarget, count: (unread: number) => number) => {
-
-    if ("agent" in target) {
-
-      this.setState((state) => ({ agents: state.agents.map((agent) => (agent.id === target.agent ? { ...agent, unread: count(agent.unread) } : agent)) }));
-      return;
-
-    }
-
-    this.setState((state) => ({ groups: state.groups.map((group) => (group.id === target.group ? { ...group, unread: count(group.unread) } : group)) }));
-
-  };
+  }));
 
   markRead = (target: ReadTarget) => {
 
@@ -299,17 +262,18 @@ export class App extends Component<{}, AppState> {
   /** A message is read at once in the chat on screen; anywhere else it adds to that chat's unread count. */
   onMessage = (target: ReadTarget) => {
 
-    const { route } = this.state;
-    const open = "agent" in target ? (route.name === "agent" || (route.name === "browser" && this.state.wide)) && route.id === target.agent : route.name === "group" && route.id === target.group;
+    const { route, wide } = this.state;
+    const open = "agent" in target ? (route.name === "agent" || (route.name === "browser" && wide)) && route.id === target.agent : route.name === "group" && route.id === target.group;
 
     if (open) {
 
       this.markRead(target);
-      return;
+
+    } else {
+
+      this.setUnread(target, (unread) => unread + 1);
 
     }
-
-    this.setUnread(target, (unread) => unread + 1);
 
   };
 
@@ -350,119 +314,85 @@ export class App extends Component<{}, AppState> {
 
     socket.onclose = () => {
 
-      if (this.closed || this.state.authed === false) {
+      if (!this.closed && this.state.authed !== false) {
 
-        return;
+        this.retries += 1;
+        setTimeout(this.connect, Math.min(30_000, 1000 * 2 ** this.retries));
 
       }
-
-      this.retries += 1;
-      setTimeout(this.connect, Math.min(30_000, 1000 * 2 ** this.retries));
 
     };
 
   };
 
   /** The server holds push notifications while a window is on screen, since everything shows here live. */
-  reportVisibility = () => {
+  reportVisibility = () => this.sendSocket({ visible: document.visibilityState === "visible" });
 
-    if (this.socket?.readyState === WebSocket.OPEN) {
+  /** Adds a live line to a history on screen; one never opened loads fresh when it is. */
+  append<K extends "events" | "threads">(key: K, id: number, line: AppState[K][number][number]) {
 
-      this.socket.send(JSON.stringify({ visible: document.visibilityState === "visible" }));
+    this.setState((state) => {
 
-    }
+      const known = state[key][id] as { id: number }[] | undefined;
 
-  };
+      return !known || known.some((one) => one.id === line.id) ? null : { [key]: { ...state[key], [id]: [...known, line] } } as Pick<AppState, K>;
+
+    });
+
+  }
 
   onSocket = (message: SocketMessage) => {
 
-    if (message.type === "frame" || message.type === "browser" || message.type === "tabs") {
+    switch (message.type) {
 
-      // mirrors the server, so a reconnect retakes only what this device still had
-      if (message.type === "browser" && message.mine !== undefined) {
+      case "frame":
+      case "browser":
+      case "tabs":
 
-        this.holding = message.mine;
+        // mirrors the server, so a reconnect retakes only what this device still had
+        if (message.type === "browser" && message.mine !== undefined) {
 
-      }
-
-      for (const listener of this.liveListeners) {
-
-        listener(message);
-
-      }
-
-      return;
-
-    }
-
-    if (message.type === "event") {
-
-      const { event } = message;
-
-      this.setState((state) => {
-
-        const known = state.events[event.agentId];
-
-        // an agent whose chat was never opened loads its history fresh when it is
-        if (!known || known.some((one) => one.id === event.id)) {
-
-          return null;
+          this.holding = message.mine;
 
         }
 
-        return { events: { ...state.events, [event.agentId]: [...known, event] } };
+        this.liveListeners.forEach((listener) => listener(message));
+        return;
 
-      });
+      case "event":
 
-      if (event.kind === "say" || (event.kind === "done" && !isWaiting(event.text))) {
+        this.append("events", message.event.agentId, message.event);
 
-        this.onMessage({ agent: event.agentId });
+        if (message.event.kind === "say" || (message.event.kind === "done" && !isWaiting(message.event.text))) {
 
-      }
-
-      return;
-
-    }
-
-    if (message.type === "state") {
-
-      this.setState((state) => ({ agents: state.agents.map((agent) => (agent.id === message.agentId ? { ...agent, state: message.state, question: message.state === "waiting" ? agent.question : null } : agent)) }));
-
-      // the question text is not in the broadcast; fetch it so the card can show it
-      if (message.state === "waiting") {
-
-        api<Agent>(`/agents/${message.agentId}`).then(this.updateAgent).catch(this.guard);
-
-      }
-
-      return;
-
-    }
-
-    if (message.type === "group") {
-
-      const line = message.message;
-
-      this.setState((state) => {
-
-        const known = state.threads[line.groupId];
-
-        // like agent events: a thread never opened loads fresh when it is
-        if (!known || known.some((one) => one.id === line.id)) {
-
-          return null;
+          this.onMessage({ agent: message.event.agentId });
 
         }
 
-        return { threads: { ...state.threads, [line.groupId]: [...known, line] } };
+        return;
 
-      });
+      case "state":
 
-      if (line.author !== "user") {
+        this.setState((state) => ({ agents: state.agents.map((agent) => (agent.id === message.agentId ? { ...agent, state: message.state, question: message.state === "waiting" ? agent.question : null } : agent)) }));
 
-        this.onMessage({ group: line.groupId });
+        // the question text is not in the broadcast; fetch it so the card can show it
+        if (message.state === "waiting") {
 
-      }
+          api<Agent>(`/agents/${message.agentId}`).then(this.updateAgent).catch(this.guard);
+
+        }
+
+        return;
+
+      case "group":
+
+        this.append("threads", message.message.groupId, message.message);
+
+        if (message.message.author !== "user") {
+
+          this.onMessage({ group: message.message.groupId });
+
+        }
 
     }
 
@@ -473,11 +403,31 @@ export class App extends Component<{}, AppState> {
   /** Allow or refuse what the agent waits on; words answer its question. */
   answer = (agentId: number) => (reply: boolean | string) => api<Agent>(`/agents/${agentId}/answer`, "POST", typeof reply === "string" ? { text: reply } : { allow: reply }).then(this.updateAgent).catch(this.guard);
 
-  agentById(id: number): Agent | undefined {
+  signIn = async (key: string) => {
 
-    return this.state.agents.find((agent) => agent.id === id);
+    await api("/login", "POST", { key }).catch((err) => {
 
-  }
+      throw err instanceof Unauthorized ? new Error("That key did not work") : err;
+
+    });
+
+    await this.start();
+
+  };
+
+  /** Nothing works without Boodle, so the app waits behind this until a cookie is in. */
+  connectBoodle = async (cookie: string) => {
+
+    await api("/cookie", "PUT", { cookie }).catch((err) => {
+
+      this.guard(err);
+      throw err;
+
+    });
+
+    await this.refresh();
+
+  };
 
   signOut = async () => {
 
@@ -489,11 +439,11 @@ export class App extends Component<{}, AppState> {
 
   renderRoute() {
 
-    const { route, events, agents, groups, threads, models } = this.state;
+    const { route, events, agents, groups, threads, models, wide } = this.state;
 
     if (route.name === "agent" || route.name === "details" || route.name === "browser") {
 
-      const agent = this.agentById(route.id);
+      const agent = agents.find((one) => one.id === route.id);
 
       if (!agent) {
 
@@ -507,11 +457,13 @@ export class App extends Component<{}, AppState> {
 
       }
 
+      const browser = route.name === "browser";
+
       return (
 
         <div className="flex h-full min-h-0">
 
-          <div className={route.name === "browser" ? (this.state.wide ? "h-full w-[40%] min-w-[320px] border-r border-line" : "hidden") : "h-full min-w-0 grow"}>
+          <div className={browser ? (wide ? "h-full w-[40%] min-w-[320px] border-r border-line" : "hidden") : "h-full min-w-0 grow"}>
 
             <Chat
               key={agent.id}
@@ -523,7 +475,7 @@ export class App extends Component<{}, AppState> {
             />
 
           </div>
-          {route.name === "browser" && <div className="h-full min-w-0 flex-1"><Browser key={agent.id} agent={agent} live={this.live} split={this.state.wide} onAnswer={this.answer(agent.id)} /></div>}
+          {browser && <div className="h-full min-w-0 flex-1"><Browser key={agent.id} agent={agent} live={this.live} split={wide} onAnswer={this.answer(agent.id)} /></div>}
 
         </div>
 
@@ -556,27 +508,19 @@ export class App extends Component<{}, AppState> {
 
     }
 
-    if (route.name === "search") {
+    switch (route.name) {
 
-      return <Search agents={agents} groups={groups} />;
+      case "new":
 
-    }
+        return <NewAgent onCreated={(agent) => { this.setState({ agents: [...agents, agent] }); location.hash = `#/agent/${agent.id}`; }} />;
 
-    if (route.name === "new") {
+      case "newGroup":
 
-      return <NewAgent onCreated={(agent) => { this.setState({ agents: [...agents, agent] }); location.hash = `#/agent/${agent.id}`; }} />;
+        return <NewGroup agents={agents} onCreated={(group) => { this.setState({ groups: [...groups, group] }); location.hash = `#/group/${group.id}`; }} />;
 
-    }
+      case "settings":
 
-    if (route.name === "newGroup") {
-
-      return <NewGroup agents={agents} onCreated={(group) => { this.setState({ groups: [...groups, group] }); location.hash = `#/group/${group.id}`; }} />;
-
-    }
-
-    if (route.name === "settings") {
-
-      return <Settings onCookie={() => { this.setState({ models: null }); this.refresh().catch(this.guard); }} onSignOut={this.signOut} />;
+        return <Settings onCookie={() => { this.setState({ models: null }); this.refresh().catch(this.guard); }} onSignOut={this.signOut} />;
 
     }
 
@@ -602,7 +546,27 @@ export class App extends Component<{}, AppState> {
 
     if (!authed) {
 
-      return <Login onDone={this.start} />;
+      return <Gate key="login" title="Prometheus" label="Secret key" action="Sign in" secret submit={this.signIn} />;
+
+    }
+
+    if (!account.set) {
+
+      return (
+
+        <Gate key="connect" title="Connect Boodle" label="Boodle cookie" action="Connect" submit={this.connectBoodle}>
+
+          <div className="flex flex-col gap-3 text-center text-[13px] leading-relaxed text-dim">
+
+            <p className="m-0">Paste the Cookie header from any box.boodle.ai request in your browser's dev tools. Your agents think on your own Boodle account.</p>
+            <p className="m-0">Your cookie is stored on this server so agents can work while you are away. Only connect if you trust whoever runs it.</p>
+            <button type="button" onClick={this.signOut} className="mt-2 text-[14px] text-fg">Sign out</button>
+
+          </div>
+
+        </Gate>
+
+      );
 
     }
 

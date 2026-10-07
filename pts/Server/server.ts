@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
@@ -14,20 +13,15 @@ import { groupTask, isWaiting, MAX_HOPS, route, type Origin } from "../Features/
 import { Live, type LiveMessage } from "./Live";
 import { notify, VAPID_PUBLIC_KEY } from "./Push";
 import { isTimeZone, nextAt, routineTask, startScheduler, validateRoutine } from "../Features/Routines";
-import { searchMessages, searchContext, addGroupMessage, createAgent, createGroupChat, createRoutine, deleteAgent, deleteGroupChat, deletePushSub, deleteRoutine, getAgentById, getGroupChat, getRoutine, listAgents, listEvents, listGroupChats, listGroupMessages, listRoutines, markRead, readCookie, unreadEvents, unreadGroup, trackedChats, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent } from "../Store";
+import { addGroupMessage, createAgent, createGroupChat, createRoutine, deleteAgent, deleteGroupChat, deletePushSub, deleteRoutine, getAgentById, getGroupChat, getRoutine, listAgents, listEvents, listGroupChats, listGroupMessages, listRoutines, listUsers, markRead, readCookie, unreadEvents, unreadGroup, trackedChats, userByKey, userDir, userZone, workspaceOf, readMemory, readSetting, readUserDoc, savePushSub, updateAgent, updateRoutine, writeCookie, writeMemory, writeSetting, writeUserDoc, type Agent, type User } from "../Store";
 
 const PORT = Number(process.env.PTS_PORT ?? 7420);
-const TOKEN = process.env.PTS_TOKEN ?? "";
+
+// one proxy for every user's browsers, http://user:pass@host:port; Bun reads it from .env
+const PROXY = process.env.PTS_PROXY?.trim() || null;
 const SESSION_COOKIE = "pts_session";
 const RECENT_GROUP = 20;
 const WEB = join(import.meta.dir, "..", "web", "dist");
-const TOPIC = "events";
-
-if (TOKEN.length < 24) {
-
-  throw new Error("Set PTS_TOKEN to a random string of at least 24 characters: openssl rand -hex 24");
-
-}
 
 class HttpError extends Error {
 
@@ -39,52 +33,86 @@ class HttpError extends Error {
 
 }
 
-let client: BoodleClient | null = null;
-let models: { id: string; name: string }[] | null = null;
-let account: { name: string | null; email: string | null } | null = null;
+type Socket = ServerWebSocket<{ userId: number }>;
+type Account = { name: string | null; email: string | null };
 
-/** undefined until looked up; null when Boodle has no preference we can match. */
-let preferredModel: string | null | undefined;
+/** What the server keeps for each user between requests: their Boodle client and what it has looked up. */
+interface Tenant {
+
+  client: BoodleClient | null;
+  models: { id: string; name: string }[] | null;
+  account: Account | null;
+
+  /** undefined until looked up; null when Boodle has no preference we can match. */
+  preferredModel?: string | null;
+
+}
+
+const tenants = new Map<number, Tenant>();
+
+function tenant(userId: number): Tenant {
+
+  if (!tenants.has(userId)) {
+
+    tenants.set(userId, { client: null, models: null, account: null });
+
+  }
+
+  return tenants.get(userId)!;
+
+}
+
+function boodle(userId: number): BoodleClient {
+
+  const state = tenant(userId);
+  const cookie = state.client ? null : readCookie(userId);
+
+  if (!state.client && !cookie) {
+
+    throw new HttpError(503, "No Boodle cookie yet. Paste one in settings.");
+
+  }
+
+  return (state.client ??= new BoodleClient({ cookie: cookie! }));
+
+}
+
+async function modelsOf(userId: number) {
+
+  return (tenant(userId).models ??= (await boodle(userId).listCustomModels()).map(({ id, name }) => ({ id, name })));
+
+}
 
 /**
  * The model new agents get: the user's pick in settings, else the one they prefer in Boodle itself.
  * Boodle stores that preference as a chat assistant, so it is matched to a bot model by the upstream model id.
  */
-async function defaultModel(): Promise<string | null> {
+async function defaultModel(userId: number): Promise<string | null> {
 
-  const chosen = readSetting("defaultModel");
+  const state = tenant(userId);
+  const chosen = readSetting(userId, "defaultModel");
 
-  if (chosen) {
+  if (chosen || state.preferredModel !== undefined) {
 
-    return chosen;
-
-  }
-
-  if (preferredModel === undefined) {
-
-    const client = boodle();
-    const [assistants, custom] = await Promise.all([client.listAssistants(), client.listCustomModels()]);
-    const preferred = assistants.find((assistant) => assistant.id === client.preferredAssistantId);
-
-    preferredModel = custom.find((model) => preferred?.model && model.model === preferred.model)?.id ?? custom.find((model) => model.name === preferred?.name)?.id ?? custom[0]?.id ?? null;
+    return chosen || state.preferredModel!;
 
   }
 
-  return preferredModel;
+  const client = boodle(userId);
+  const [assistants, custom] = await Promise.all([client.listAssistants(), client.listCustomModels()]);
+  const preferred = assistants.find((assistant) => assistant.id === client.preferredAssistantId);
+
+  return (state.preferredModel = custom.find((model) => preferred?.model && model.model === preferred.model)?.id ?? custom.find((model) => model.name === preferred?.name)?.id ?? custom[0]?.id ?? null);
 
 }
 
-async function settingsView() {
-
-  return { defaultModel: readCookie() ? await defaultModel() : null, timezone: readSetting("timezone") || null, proxy: proxyLabel(proxyUrl(readSetting("proxy"))) };
-
-}
+const settingsView = async (userId: number) => ({ defaultModel: readCookie(userId) ? await defaultModel(userId) : null, timezone: readSetting(userId, "timezone") || null });
 
 /** Sockets whose window is on screen right now. */
-const watching = new Set<ServerWebSocket<unknown>>();
+const watching = new Set<Socket>();
 
 /** Boodle nests the person two levels down, as `user.user`. */
-function accountOf(bootstrap: { user?: unknown }): { name: string | null; email: string | null } {
+function accountOf(bootstrap: { user?: unknown }): Account {
 
   const person = (bootstrap.user as { user?: { name?: unknown; email?: unknown } } | undefined)?.user;
 
@@ -92,83 +120,68 @@ function accountOf(bootstrap: { user?: unknown }): { name: string | null; email:
 
 }
 
-function boodle(): BoodleClient {
+/** Each user's sockets subscribe to their own topic, so nobody sees another's agents. */
+const broadcast = (userId: number, message: unknown) => server.publish(`user:${userId}`, JSON.stringify(message));
 
-  if (!client) {
+// a finished task does not buzz on its own: the agent decides, with <notify>, when it is worth it
+const BUZZ: Partial<Record<RunEvent["kind"], (name: string) => string>> = {
 
-    const cookie = readCookie();
+  notify: (name) => name,
+  ask: (name) => `${name} needs your OK`,
+  handoff: (name) => `${name} needs you in the browser`,
+  question: (name) => `${name} has a question`,
 
-    if (!cookie) {
-
-      throw new HttpError(503, "No Boodle cookie yet. Paste one in settings.");
-
-    }
-
-    client = new BoodleClient({ cookie });
-
-  }
-
-  return client;
-
-}
-
-function broadcast(message: unknown) {
-
-  server.publish(TOPIC, JSON.stringify(message));
-
-}
+};
 
 function onRunEvent(event: RunEvent) {
 
-  if (event.kind === "delta") {
+  // an agent deleted mid-run has nobody left to tell
+  const agent = getAgentById(event.agentId);
 
-    broadcast({ type: "delta", agentId: event.agentId, text: event.text });
+  if (!agent) {
+
     return;
 
   }
 
-  broadcast({ type: "event", event });
-
-  const name = getAgentById(event.agentId)?.name ?? "An agent";
+  broadcast(agent.userId, event.kind === "delta" ? { type: "delta", agentId: event.agentId, text: event.text } : { type: "event", event });
 
   // someone with the app open sees all of this live; buzzing their phone as well is noise
-  if (watching.size) {
+  if (event.kind === "delta" || [...watching].some((ws) => ws.data.userId === agent.userId)) {
 
     return;
 
   }
 
-  // a finished task does not buzz on its own: the agent decides, with <notify>, when it is worth it
-  if (event.kind === "notify" || event.kind === "ask" || event.kind === "handoff" || event.kind === "question") {
+  const title = BUZZ[event.kind];
 
-    notify({ title: event.kind === "ask" ? `${name} needs your OK` : event.kind === "handoff" ? `${name} needs you in the browser` : event.kind === "question" ? `${name} has a question` : name, body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
-    return;
+  if (title) {
+
+    notify(agent.userId, { title: title(agent.name), body: event.text.split("\n")[0], agentId: event.agentId }).catch(() => {});
+
+  } else if (event.kind === "error" && event.text !== "Stopped by the user.") {
+
+    // the SDK surfaces Boodle's status in the message; a 401 means the pasted cookie has expired
+    const expired = /failed: 40[13]\b/.test(event.text);
+
+    notify(agent.userId, {
+
+      title: expired ? "Boodle cookie expired" : `${agent.name} hit a problem`,
+      body: expired ? "Paste a fresh cookie in settings to get agents working again." : event.text.slice(0, 200),
+      agentId: event.agentId,
+
+    }).catch(() => {});
 
   }
-
-  if (event.kind !== "error" || event.text === "Stopped by the user.") {
-
-    return;
-
-  }
-
-  // the SDK surfaces Boodle's status in the message; a 401 means the pasted cookie has expired
-  const expired = /failed: 40[13]\b/.test(event.text);
-
-  notify({
-
-    title: expired ? "Boodle cookie expired" : `${name} hit a problem`,
-    body: expired ? "Paste a fresh cookie in settings to get agents working again." : event.text.slice(0, 200),
-    agentId: event.agentId,
-
-  }).catch(() => {});
 
 }
 
-/** Saves and shows a thread message, then wakes whoever in that thread it routes to. Group 0 is Everyone. */
-function postGroup(groupId: number, author: string, agentId: number | null, text: string, origin: Origin | null = null) {
+const postSystem = (userId: number, groupId: number, author: string, agentId: number | null, text: string) => broadcast(userId, { type: "group", message: addGroupMessage(userId, groupId, author, agentId, text) });
 
-  const group = groupId ? getGroupChat(groupId) : null;
+/** Saves and shows a thread message, then wakes whoever in that thread it routes to. Group 0 is Everyone. */
+function postGroup(userId: number, groupId: number, author: string, agentId: number | null, text: string, origin: Origin | null = null) {
+
+  const group = groupId ? getGroupChat(userId, groupId) : null;
 
   // a reply finishing after its group was deleted has nowhere to go
   if (groupId && !group) {
@@ -177,29 +190,23 @@ function postGroup(groupId: number, author: string, agentId: number | null, text
 
   }
 
-  const recent = listGroupMessages(groupId, RECENT_GROUP);
-  const message = addGroupMessage(groupId, author, agentId, text);
-  const agents = group ? listAgents().filter((agent) => group.members.includes(agent.id)) : listAgents();
+  const recent = listGroupMessages(userId, groupId, RECENT_GROUP);
+  const message = addGroupMessage(userId, groupId, author, agentId, text);
+  const agents = listAgents(userId).filter((agent) => !group || group.members.includes(agent.id));
 
-  broadcast({ type: "group", message });
+  broadcast(userId, { type: "group", message });
 
   const next = route(message, agents, origin);
 
   if ("capped" in next) {
 
     // posted directly: routed like a user message, the note would wake everyone
-    broadcast({ type: "group", message: addGroupMessage(groupId, "system", null, `Hand-off limit reached (${MAX_HOPS} in a row). @mention an agent to keep going.`) });
+    postSystem(userId, groupId, "system", null, `Hand-off limit reached (${MAX_HOPS} in a row). @mention an agent to keep going.`);
     return;
 
   }
 
-  for (const agent of next.recipients) {
-
-    if (agentId !== null && queue.busyIn(agent.id, next.origin.chain)) {
-
-      continue;
-
-    }
+  for (const agent of next.recipients.filter((one) => agentId === null || !queue.busyIn(one.id, next.origin.chain))) {
 
     queue.enqueue(agent, groupTask(agent, agents, recent, message, group?.name), next.origin);
 
@@ -209,7 +216,7 @@ function postGroup(groupId: number, author: string, agentId: number | null, text
 
 async function start(agent: Agent, task: string, control: RunControl, origin?: Origin) {
 
-  const end = await runAgent(boodle(), agent, task, control);
+  const end = await runAgent(boodle(agent.userId), agent, task, control);
 
   if (!origin || end.text === "Stopped by the user." || isWaiting(end.text)) {
 
@@ -219,42 +226,41 @@ async function start(agent: Agent, task: string, control: RunControl, origin?: O
 
   if (end.kind === "done") {
 
-    postGroup(origin.group, agent.name, agent.id, end.text, origin);
-    return;
+    postGroup(agent.userId, origin.group, agent.name, agent.id, end.text, origin);
 
-  }
+  } else if (!origin.group || getGroupChat(agent.userId, origin.group)) {
 
-  if (!origin.group || getGroupChat(origin.group)) {
-
-    broadcast({ type: "group", message: addGroupMessage(origin.group, agent.name, agent.id, `Could not finish: ${end.text}`) });
+    postSystem(agent.userId, origin.group, agent.name, agent.id, `Could not finish: ${end.text}`);
 
   }
 
 }
 
-const queue = new Queue(start, onRunEvent, (agentId: number, state: AgentState) => broadcast({ type: "state", agentId, state }));
+const queue = new Queue(start, onRunEvent, (agentId: number, state: AgentState) => {
+
+  const agent = getAgentById(agentId);
+
+  if (agent) {
+
+    broadcast(agent.userId, { type: "state", agentId, state });
+
+  }
+
+});
 
 // handing the browser back is how the user answers a <handoff>
 const live = new Live((agentId) => queue.answer(agentId, true, "handoff"));
 
-function view(agent: Agent) {
-
-  return { id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, category: agent.category, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id), waitingOn: queue.waitingOn(agent.id), unread: unreadEvents(agent.id) };
-
-}
+const view = (agent: Agent) => ({ id: agent.id, name: agent.name, modelId: agent.modelId, persona: agent.persona, glyph: agent.glyph, category: agent.category, createdAt: agent.createdAt, state: queue.state(agent.id), question: queue.question(agent.id), waitingOn: queue.waitingOn(agent.id), unread: unreadEvents(agent) });
 
 /** Everyone first, as group 0 with no member list, since it is all of them. */
-function groupViews() {
+const groupViews = (userId: number) => [{ id: 0, name: "Everyone", members: [] as number[], createdAt: 0 }, ...listGroupChats(userId)].map((group) => ({ ...group, unread: unreadGroup(userId, group.id) }));
 
-  return [{ id: 0, name: "Everyone", members: [] as number[], createdAt: 0 }, ...listGroupChats()].map((group) => ({ ...group, unread: unreadGroup(group.id) }));
-
-}
-
-function groupIdOr404(value: unknown): number {
+function groupIdOr404(userId: number, value: unknown): number {
 
   const id = Number(value ?? 0);
 
-  if (!Number.isInteger(id) || (id && !getGroupChat(id))) {
+  if (!Number.isInteger(id) || (id && !getGroupChat(userId, id))) {
 
     throw new HttpError(404, "No such group chat");
 
@@ -264,29 +270,15 @@ function groupIdOr404(value: unknown): number {
 
 }
 
-function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => Response.json(body, { status, headers });
+const ok = () => json({ ok: true });
+const sessionCookie = (value: string, age: number) => ({ "Set-Cookie": `${SESSION_COOKIE}=${value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${age}` });
 
-  return Response.json(body, { status, headers });
+/** A page of history scrolling upward: `limit` items before `before`. */
+const page = (url: URL) => [Math.min(500, Number(url.searchParams.get("limit") ?? 200)), Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER)] as const;
 
-}
-
-function same(a: string, b: string): boolean {
-
-  const x = Buffer.from(a);
-  const y = Buffer.from(b);
-
-  return x.length === y.length && timingSafeEqual(x, y);
-
-}
-
-function authorized(req: Request): boolean {
-
-  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
-  const session = new Bun.CookieMap(req.headers.get("cookie") ?? "").get(SESSION_COOKIE) ?? "";
-
-  return same(bearer, TOKEN) || same(session, TOKEN);
-
-}
+/** The key from the CLI, as a bearer token or the cookie a sign-in set. */
+const userOf = (req: Request): User | null => userByKey(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "") ?? userByKey(new Bun.CookieMap(req.headers.get("cookie") ?? "").get(SESSION_COOKIE) ?? "");
 
 async function body<T>(req: Request): Promise<T> {
 
@@ -314,11 +306,28 @@ function text(value: unknown, field: string): string {
 
 }
 
-function agentOr404(id: number): Agent {
+const optional = (value: unknown, field: string) => value === undefined ? undefined : text(value, field);
+
+function filled(value: unknown, field: string): string {
+
+  const message = text(value, field).trim();
+
+  if (!message) {
+
+    throw new HttpError(400, `${field} is empty`);
+
+  }
+
+  return message;
+
+}
+
+/** Another user's agent answers exactly like one that does not exist. */
+function agentOr404(userId: number, id: number): Agent {
 
   const agent = getAgentById(id);
 
-  if (!agent) {
+  if (agent?.userId !== userId) {
 
     throw new HttpError(404, "No such agent");
 
@@ -330,164 +339,142 @@ function agentOr404(id: number): Agent {
 
 async function login(req: Request): Promise<Response> {
 
-  const { token } = await body<{ token?: unknown }>(req);
+  const key = (await body<{ key?: unknown }>(req)).key;
 
-  if (typeof token !== "string" || !same(token, TOKEN)) {
+  if (typeof key !== "string" || !userByKey(key.trim())) {
 
-    // one guess a second keeps a long random token out of brute-force reach
+    // one guess a second keeps a long random key out of brute-force reach
     await Bun.sleep(1000);
 
-    return json({ error: "Wrong token" }, 401);
+    return json({ error: "That key did not work" }, 401);
 
   }
 
-  return json({ ok: true }, 200, { "Set-Cookie": `${SESSION_COOKIE}=${TOKEN}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=31536000` });
+  return json({ ok: true }, 200, sessionCookie(key.trim(), 31536000));
 
 }
 
-async function agentRoute(req: Request, url: URL, agent: Agent, action: string | undefined): Promise<Response> {
+async function agentRoute(req: Request, url: URL, agent: Agent, action = ""): Promise<Response> {
 
-  const method = req.method;
+  const route = `${req.method} ${action}`;
 
-  if (!action && method === "GET") {
+  switch (route) {
 
-    return json(view(agent));
+    case "GET ":
 
-  }
+      return json(view(agent));
 
-  if (!action && method === "PATCH") {
+    case "PATCH ": {
 
-    const changes = await body<{ modelId?: unknown; persona?: unknown; glyph?: unknown; category?: unknown }>(req);
-    const category = changes.category === undefined ? undefined : text(changes.category, "category").trim();
+      const changes = await body<{ modelId?: unknown; persona?: unknown; glyph?: unknown; category?: unknown }>(req);
+      const glyph = optional(changes.glyph, "glyph");
+      const category = optional(changes.category, "category")?.trim();
 
-    if (changes.glyph !== undefined && !isGlyph(text(changes.glyph, "glyph"))) {
+      if (glyph !== undefined && !isGlyph(glyph)) {
 
-      throw new HttpError(400, "glyph must be shape:color from the known sets");
+        throw new HttpError(400, "glyph must be shape:color from the known sets");
 
-    }
+      }
 
-    if (category && category.length > 32) {
+      if (category && category.length > 32) {
 
-      throw new HttpError(400, "Categories are at most 32 characters");
+        throw new HttpError(400, "Categories are at most 32 characters");
 
-    }
+      }
 
-    updateAgent(agent.id, {
+      updateAgent(agent.id, { modelId: optional(changes.modelId, "modelId"), persona: optional(changes.persona, "persona"), glyph, category });
 
-      modelId: changes.modelId === undefined ? undefined : text(changes.modelId, "modelId"),
-      persona: changes.persona === undefined ? undefined : text(changes.persona, "persona"),
-      glyph: changes.glyph as string | undefined,
-      category,
-
-    });
-
-    return json(view(agentOr404(agent.id)));
-
-  }
-
-  if (!action && method === "DELETE") {
-
-    queue.stop(agent.id);
-    await closeBrowser(workspaceOf(agent), true);
-
-    if (agent.botDraftId) {
-
-      await boodle().deleteCustomBot(agent.botDraftId).catch(() => {});
+      return json(view(getAgentById(agent.id)!));
 
     }
 
-    deleteAgent(agent.id);
+    case "DELETE ":
 
-    return json({ ok: true });
+      queue.stop(agent.id);
+      await closeBrowser(workspaceOf(agent), true);
 
-  }
+      if (agent.botDraftId) {
 
-  if (action === "events" && method === "GET") {
+        await boodle(agent.userId).deleteCustomBot(agent.botDraftId).catch(() => {});
 
-    const limit = Math.min(500, Number(url.searchParams.get("limit") ?? 200));
-    const before = Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
+      }
 
-    return json(listEvents(agent.id, limit, before));
+      deleteAgent(agent.id);
 
-  }
+      return ok();
 
-  if (action === "messages" && method === "POST") {
+    case "GET events":
 
-    const message = text((await body<{ text?: unknown }>(req)).text, "text").trim();
+      return json(listEvents(agent.id, ...page(url)));
 
-    if (!message) {
+    case "POST messages": {
 
-      throw new HttpError(400, "text is empty");
+      const message = filled((await body<{ text?: unknown }>(req)).text, "text");
 
-    }
+      // fail now rather than queue a run that can only error once it starts
+      boodle(agent.userId);
+      queue.send(agent, message);
 
-    // fail now rather than queue a run that can only error once it starts
-    boodle();
-    queue.send(agent, message);
-
-    return json(view(agent));
-
-  }
-
-  if (action === "answer" && method === "POST") {
-
-    const { allow, text: reply } = await body<{ allow?: unknown; text?: unknown }>(req);
-
-    if (typeof allow !== "boolean" && typeof reply !== "string") {
-
-      throw new HttpError(400, "allow must be true or false, or text the answer to a question");
+      return json(view(agent));
 
     }
 
-    // words only ever answer a question, never an approval
-    if (!(typeof reply === "string" ? queue.answer(agent.id, reply, "question") : queue.answer(agent.id, allow as boolean))) {
+    case "POST answer": {
 
-      throw new HttpError(409, "Nothing is waiting for an answer");
+      const { allow, text: reply } = await body<{ allow?: unknown; text?: unknown }>(req);
+
+      if (typeof allow !== "boolean" && typeof reply !== "string") {
+
+        throw new HttpError(400, "allow must be true or false, or text the answer to a question");
+
+      }
+
+      // words only ever answer a question, never an approval
+      if (!(typeof reply === "string" ? queue.answer(agent.id, reply, "question") : queue.answer(agent.id, allow as boolean))) {
+
+        throw new HttpError(409, "Nothing is waiting for an answer");
+
+      }
+
+      return json(view(agent));
 
     }
 
-    return json(view(agent));
+    case "POST stop":
 
-  }
+      queue.stop(agent.id);
 
-  if (action === "stop" && method === "POST") {
+      return json(view(agent));
 
-    queue.stop(agent.id);
+    case "GET memory":
 
-    return json(view(agent));
+      return json({ text: readMemory(agent) });
 
-  }
+    case "PUT memory":
 
-  if (action === "memory" && method === "GET") {
+      writeMemory(agent, text((await body<{ text?: unknown }>(req)).text, "text"));
 
-    return json({ text: readMemory(agent) });
+      return ok();
 
-  }
+    case "GET routines": {
 
-  if (action === "memory" && method === "PUT") {
+      const zone = userZone(agent.userId);
 
-    writeMemory(agent, text((await body<{ text?: unknown }>(req)).text, "text"));
+      return json(listRoutines(agent.id).map((routine) => ({ ...routine, nextAt: nextAt(routine, zone) })));
 
-    return json({ ok: true });
+    }
 
-  }
+    case "POST routines": {
 
-  if (action === "routines" && method === "GET") {
+      const input = await body<{ kind?: unknown; spec?: unknown; target?: unknown; title?: unknown; task?: unknown }>(req);
+      const spec = text(input.spec, "spec").trim();
+      const target = optional(input.target, "target")?.trim() ?? "";
 
-    return json(listRoutines(agent.id).map((routine) => ({ ...routine, nextAt: nextAt(routine) })));
+      validateRoutine(input.kind, spec, target);
 
-  }
+      return json(createRoutine(agent.id, { kind: input.kind as "schedule" | "watch", spec, target, title: optional(input.title, "title")?.trim().replace(/"/g, "") ?? "", task: text(input.task, "task").trim() }), 201);
 
-  if (action === "routines" && method === "POST") {
-
-    const input = await body<{ kind?: unknown; spec?: unknown; target?: unknown; title?: unknown; task?: unknown }>(req);
-    const spec = text(input.spec, "spec").trim();
-    const target = input.target === undefined ? "" : text(input.target, "target").trim();
-    const title = input.title === undefined ? "" : text(input.title, "title").trim().replace(/"/g, "");
-
-    validateRoutine(input.kind, spec, target);
-
-    return json(createRoutine(agent.id, { kind: input.kind as "schedule" | "watch", spec, target, title, task: text(input.task, "task").trim() }), 201);
+    }
 
   }
 
@@ -495,379 +482,308 @@ async function agentRoute(req: Request, url: URL, agent: Agent, action: string |
 
 }
 
+async function routineRoute(req: Request, userId: number, id: number, run: boolean): Promise<Response> {
+
+  const routine = getRoutine(id);
+
+  if (!routine || getAgentById(routine.agentId)?.userId !== userId) {
+
+    throw new HttpError(404, "No such routine");
+
+  }
+
+  if (run && req.method === "POST") {
+
+    // a watch run by hand skips the check and just does its task
+    queue.enqueue(agentOr404(userId, routine.agentId), routineTask({ ...routine, kind: "schedule" }, userZone(userId)));
+
+    return ok();
+
+  }
+
+  if (req.method === "DELETE") {
+
+    deleteRoutine(routine.id);
+
+    return ok();
+
+  }
+
+  if (req.method !== "PATCH") {
+
+    throw new HttpError(404, "Not found");
+
+  }
+
+  const changes = await body<{ spec?: unknown; target?: unknown; task?: unknown; enabled?: unknown }>(req);
+  const spec = optional(changes.spec, "spec")?.trim();
+  const target = optional(changes.target, "target")?.trim();
+
+  if (changes.enabled !== undefined && typeof changes.enabled !== "boolean") {
+
+    throw new HttpError(400, "enabled must be true or false");
+
+  }
+
+  validateRoutine(routine.kind, spec ?? routine.spec, target ?? routine.target);
+  updateRoutine(routine.id, { spec, target, task: optional(changes.task, "task"), enabled: changes.enabled as boolean | undefined });
+
+  return json(getRoutine(routine.id));
+
+}
+
+async function saveSettings(req: Request, userId: number): Promise<Response> {
+
+  const input = await body<{ defaultModel?: unknown; timezone?: unknown }>(req);
+  const modelId = optional(input.defaultModel, "defaultModel");
+  const timezone = optional(input.timezone, "timezone")?.trim();
+
+  if (modelId === undefined && timezone === undefined) {
+
+    throw new HttpError(400, "Nothing to save");
+
+  }
+
+  if (modelId !== undefined && !(await modelsOf(userId)).some((model) => model.id === modelId)) {
+
+    throw new HttpError(400, "That model is not available to this Boodle account");
+
+  }
+
+  if (timezone && !isTimeZone(timezone)) {
+
+    throw new HttpError(400, "Unknown time zone. Use a name like America/New_York.");
+
+  }
+
+  if (modelId !== undefined) {
+
+    writeSetting(userId, "defaultModel", modelId);
+
+  }
+
+  if (timezone !== undefined) {
+
+    writeSetting(userId, "timezone", timezone);
+    await setZone(userDir(userId), timezone);
+
+  }
+
+  return json(await settingsView(userId));
+
+}
+
 async function api(req: Request, url: URL): Promise<Response | undefined> {
 
-  const { pathname: path } = url;
-  const method = req.method;
+  const path = url.pathname;
+  const route = `${req.method} ${path}`;
 
-  if (method === "POST" && path === "/api/login") {
+  if (route === "POST /api/login") {
 
     return login(req);
 
   }
 
-  if (!authorized(req)) {
+  const user = userOf(req);
+
+  if (!user) {
 
     return json({ error: "Unauthorized" }, 401);
 
   }
 
-  if (method === "POST" && path === "/api/logout") {
-
-    return json({ ok: true }, 200, { "Set-Cookie": `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0` });
-
-  }
+  const userId = user.id;
 
   if (path === "/api/ws") {
 
     // Bun answers the handshake itself; a Response after a successful upgrade is an error
-    return server.upgrade(req) ? undefined : json({ error: "Expected a WebSocket upgrade" }, 400);
+    return server.upgrade(req, { data: { userId } }) ? undefined : json({ error: "Expected a WebSocket upgrade" }, 400);
 
   }
 
-  if (method === "GET" && path === "/api/search") {
-
-    const query = (url.searchParams.get("q") ?? "").trim();
-    const scope = url.searchParams.get("scope") ?? "";
-    const offset = Number(url.searchParams.get("offset") ?? 0);
-
-    if (query.length > 200 || !Number.isSafeInteger(offset) || offset < 0 || (scope && !/^(agent|group):\d+$/.test(scope))) {
-
-      throw new HttpError(400, "Invalid search parameters");
-
-    }
-
-    const hits = query ? searchMessages(query, scope, offset) : [];
-
-    return json({ hits: hits.slice(0, 50), more: hits.length > 50 });
-
-  }
-
-  if (method === "GET" && path === "/api/search/context") {
-
-    const source = url.searchParams.get("source");
-    const id = Number(url.searchParams.get("id"));
-
-    if ((source !== "agent" && source !== "group") || !Number.isSafeInteger(id) || id < 1) {
-
-      throw new HttpError(400, "Invalid message");
-
-    }
-
-    return json(searchContext(source, id));
-
-  }
-
-  if (method === "GET" && path === "/api/agents") {
-
-    return json(listAgents().map(view));
-
-  }
-
-  if (method === "POST" && path === "/api/agents") {
-
-    const input = await body<{ name?: unknown; modelId?: unknown; persona?: unknown }>(req);
-    const modelId = input.modelId === undefined ? await defaultModel() : text(input.modelId, "modelId");
-
-    if (!modelId) {
-
-      throw new HttpError(503, "No model to give it yet. Connect Boodle in settings.");
-
-    }
-
-    return json(view(createAgent(text(input.name, "name").trim(), modelId, input.persona === undefined ? "" : text(input.persona, "persona"))), 201);
-
-  }
-
-  if (method === "GET" && path === "/api/settings") {
-
-    return json(await settingsView());
-
-  }
-
-  if (method === "PUT" && path === "/api/settings") {
-
-    const input = await body<{ defaultModel?: unknown; timezone?: unknown; proxy?: unknown }>(req);
-
-    if (input.defaultModel === undefined && input.timezone === undefined && input.proxy === undefined) {
-
-      throw new HttpError(400, "Nothing to save");
-
-    }
-
-    if (input.defaultModel !== undefined) {
-
-      const modelId = text(input.defaultModel, "defaultModel");
-
-      models ??= (await boodle().listCustomModels()).map(({ id, name }) => ({ id, name }));
-
-      if (!models.some((model) => model.id === modelId)) {
-
-        throw new HttpError(400, "That model is not available to this Boodle account");
-
-      }
-
-      writeSetting("defaultModel", modelId);
-
-    }
-
-    if (input.timezone !== undefined) {
-
-      const timezone = text(input.timezone, "timezone").trim();
-
-      if (timezone && !isTimeZone(timezone)) {
-
-        throw new HttpError(400, "Unknown time zone. Use a name like America/New_York.");
-
-      }
-
-      writeSetting("timezone", timezone);
-      await setZone(timezone);
-
-    }
-
-    if (input.proxy !== undefined) {
-
-      const proxy = text(input.proxy, "proxy").trim();
-
-      try {
-
-        proxyUrl(proxy);
-
-      } catch (err) {
-
-        throw new HttpError(400, err instanceof Error ? err.message : String(err));
-
-      }
-
-      await setProxy(proxy);
-      writeSetting("proxy", proxy);
-
-    }
-
-    return json(await settingsView());
-
-  }
-
-  const match = /^\/api\/agents\/(\d+)(?:\/(\w+))?$/.exec(path);
-
-  if (match) {
-
-    return agentRoute(req, url, agentOr404(Number(match[1])), match[2]);
-
-  }
-
+  const agentMatch = /^\/api\/agents\/(\d+)(?:\/(\w+))?$/.exec(path);
   const routineMatch = /^\/api\/routines\/(\d+)(\/run)?$/.exec(path);
-
-  if (routineMatch) {
-
-    const routine = getRoutine(Number(routineMatch[1]));
-
-    if (!routine) {
-
-      throw new HttpError(404, "No such routine");
-
-    }
-
-    if (routineMatch[2] && method === "POST") {
-
-      // a watch run by hand skips the check and just does its task
-      queue.enqueue(agentOr404(routine.agentId), routineTask({ ...routine, kind: "schedule" }));
-
-      return json({ ok: true });
-
-    }
-
-    if (method === "DELETE") {
-
-      deleteRoutine(routine.id);
-
-      return json({ ok: true });
-
-    }
-
-    if (method === "PATCH") {
-
-      const changes = await body<{ spec?: unknown; target?: unknown; task?: unknown; enabled?: unknown }>(req);
-      const spec = changes.spec === undefined ? undefined : text(changes.spec, "spec").trim();
-      const target = changes.target === undefined ? undefined : text(changes.target, "target").trim();
-
-      if (changes.enabled !== undefined && typeof changes.enabled !== "boolean") {
-
-        throw new HttpError(400, "enabled must be true or false");
-
-      }
-
-      validateRoutine(routine.kind, spec ?? routine.spec, target ?? routine.target);
-      updateRoutine(routine.id, { spec, target, task: changes.task === undefined ? undefined : text(changes.task, "task"), enabled: changes.enabled as boolean | undefined });
-
-      return json(getRoutine(routine.id));
-
-    }
-
-  }
-
-  if (method === "GET" && path === "/api/group") {
-
-    const limit = Math.min(500, Number(url.searchParams.get("limit") ?? 200));
-    const before = Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
-
-    return json(listGroupMessages(groupIdOr404(url.searchParams.get("group")), limit, before));
-
-  }
-
-  if (method === "POST" && path === "/api/group") {
-
-    const input = await body<{ text?: unknown; group?: unknown }>(req);
-    const message = text(input.text, "text").trim();
-    const groupId = groupIdOr404(input.group);
-
-    if (!message) {
-
-      throw new HttpError(400, "text is empty");
-
-    }
-
-    boodle();
-    postGroup(groupId, "user", null, message);
-
-    return json({ ok: true }, 201);
-
-  }
-
-  if (method === "GET" && path === "/api/groups") {
-
-    return json(groupViews());
-
-  }
-
-  if (method === "POST" && path === "/api/groups") {
-
-    const input = await body<{ name?: unknown; members?: unknown }>(req);
-    const members = Array.isArray(input.members) ? [...new Set(input.members.map(Number))].map((id) => getAgentById(id)) : [];
-
-    if (members.length < 2 || members.some((agent) => !agent)) {
-
-      throw new HttpError(400, "members must name at least two agents");
-
-    }
-
-    // quotes would break the thread title the agent's chat reads back
-    const name = (input.name === undefined ? "" : text(input.name, "name")).trim().replace(/"/g, "").slice(0, 60) || members.map((agent) => agent!.name).join(", ");
-
-    return json({ ...createGroupChat(name, members.map((agent) => agent!.id)), unread: 0 }, 201);
-
-  }
 
   // never 0: Everyone cannot be deleted
   const groupMatch = /^\/api\/groups\/([1-9]\d*)$/.exec(path);
 
-  if (groupMatch && method === "DELETE") {
+  if (agentMatch) {
 
-    deleteGroupChat(groupIdOr404(groupMatch[1]));
-
-    return json({ ok: true });
+    return agentRoute(req, url, agentOr404(userId, Number(agentMatch[1])), agentMatch[2]);
 
   }
 
-  if (method === "POST" && path === "/api/read") {
+  if (routineMatch) {
 
-    const input = await body<{ agent?: unknown; group?: unknown }>(req);
+    return routineRoute(req, userId, Number(routineMatch[1]), Boolean(routineMatch[2]));
 
-    if (input.agent !== undefined) {
+  }
 
-      markRead("agent", agentOr404(Number(input.agent)).id);
+  if (groupMatch && req.method === "DELETE") {
 
-    } else {
+    deleteGroupChat(userId, groupIdOr404(userId, groupMatch[1]));
 
-      markRead("group", groupIdOr404(input.group));
+    return ok();
+
+  }
+
+  switch (route) {
+
+    case "POST /api/logout":
+
+      return json({ ok: true }, 200, sessionCookie("", 0));
+
+    case "GET /api/agents":
+
+      return json(listAgents(userId).map(view));
+
+    case "POST /api/agents": {
+
+      const input = await body<{ name?: unknown; modelId?: unknown; persona?: unknown }>(req);
+      const modelId = optional(input.modelId, "modelId") ?? (await defaultModel(userId));
+
+      if (!modelId) {
+
+        throw new HttpError(503, "No model to give it yet. Connect Boodle in settings.");
+
+      }
+
+      return json(view(createAgent(userId, text(input.name, "name").trim(), modelId, optional(input.persona, "persona") ?? "")), 201);
 
     }
 
-    return json({ ok: true });
+    case "GET /api/settings":
 
-  }
+      return json(await settingsView(userId));
 
-  if (method === "GET" && path === "/api/models") {
+    case "PUT /api/settings":
 
-    models ??= (await boodle().listCustomModels()).map(({ id, name }) => ({ id, name }));
+      return saveSettings(req, userId);
 
-    return json(models);
+    case "GET /api/group":
 
-  }
+      return json(listGroupMessages(userId, groupIdOr404(userId, url.searchParams.get("group")), ...page(url)));
 
-  if (method === "GET" && path === "/api/user") {
+    case "POST /api/group": {
 
-    return json({ text: readUserDoc() });
+      const input = await body<{ text?: unknown; group?: unknown }>(req);
+      const message = filled(input.text, "text");
+      const groupId = groupIdOr404(userId, input.group);
 
-  }
+      boodle(userId);
+      postGroup(userId, groupId, "user", null, message);
 
-  if (method === "PUT" && path === "/api/user") {
+      return json({ ok: true }, 201);
 
-    writeUserDoc(text((await body<{ text?: unknown }>(req)).text, "text"));
+    }
 
-    return json({ ok: true });
+    case "GET /api/groups":
 
-  }
+      return json(groupViews(userId));
 
-  if (method === "GET" && path === "/api/cookie") {
+    case "POST /api/groups": {
 
-    const cookie = readCookie();
+      const input = await body<{ name?: unknown; members?: unknown }>(req);
+      const members = Array.isArray(input.members) ? [...new Set(input.members.map(Number))].map((id) => getAgentById(id)) : [];
 
-    if (cookie && !account) {
+      if (members.length < 2 || members.some((agent) => agent?.userId !== userId)) {
+
+        throw new HttpError(400, "members must name at least two agents");
+
+      }
+
+      // quotes would break the thread title the agent's chat reads back
+      const name = (optional(input.name, "name") ?? "").trim().replace(/"/g, "").slice(0, 60) || members.map((agent) => agent!.name).join(", ");
+
+      return json({ ...createGroupChat(userId, name, members.map((agent) => agent!.id)), unread: 0 }, 201);
+
+    }
+
+    case "POST /api/read": {
+
+      const input = await body<{ agent?: unknown; group?: unknown }>(req);
+
+      if (input.agent !== undefined) {
+
+        markRead(userId, "agent", agentOr404(userId, Number(input.agent)).id);
+
+      } else {
+
+        markRead(userId, "group", groupIdOr404(userId, input.group));
+
+      }
+
+      return ok();
+
+    }
+
+    case "GET /api/models":
+
+      return json(await modelsOf(userId));
+
+    case "GET /api/user":
+
+      return json({ text: readUserDoc(userId) });
+
+    case "PUT /api/user":
+
+      writeUserDoc(userId, text((await body<{ text?: unknown }>(req)).text, "text"));
+
+      return ok();
+
+    case "GET /api/cookie": {
+
+      const state = tenant(userId);
 
       // an expired cookie still reads as set; the PWA shows it without a name, and runs say why they fail
-      account = await boodle().getUser().then(accountOf).catch(() => null);
+      if (user.cookie && !state.account) {
+
+        state.account = await boodle(userId).getUser().then(accountOf).catch(() => null);
+
+      }
+
+      return json({ set: Boolean(user.cookie), userId: user.cookie ? parseSession(user.cookie).userId : null, name: state.account?.name ?? null, email: state.account?.email ?? null });
 
     }
 
-    return json({ set: Boolean(cookie), userId: cookie ? parseSession(cookie).userId : null, name: account?.name ?? null, email: account?.email ?? null });
+    case "PUT /api/cookie": {
 
-  }
+      const cookie = text((await body<{ cookie?: unknown }>(req)).cookie, "cookie").trim();
+      const next = new BoodleClient({ cookie });
 
-  if (method === "PUT" && path === "/api/cookie") {
+      // a cookie that cannot load the user is one that will fail every run
+      const account = accountOf(await next.getUser().catch((err) => {
 
-    const cookie = text((await body<{ cookie?: unknown }>(req)).cookie, "cookie").trim();
-    const next = new BoodleClient({ cookie });
+        throw new HttpError(400, `Boodle rejected that cookie: ${err instanceof Error ? err.message : err}`);
 
-    // a cookie that cannot load the user is one that will fail every run
-    const bootstrap = await next.getUser().catch((err) => {
+      }));
 
-      throw new HttpError(400, `Boodle rejected that cookie: ${err instanceof Error ? err.message : err}`);
+      writeCookie(userId, cookie);
+      tenants.set(userId, { client: next, models: null, account });
 
-    });
+      return json({ ok: true, userId: next.userId, ...account });
 
-    writeCookie(cookie);
-    client = next;
-    models = null;
-    preferredModel = undefined;
-    account = accountOf(bootstrap);
+    }
 
-    return json({ ok: true, userId: next.userId, ...account });
+    case "GET /api/push":
 
-  }
+      return json({ publicKey: VAPID_PUBLIC_KEY });
 
-  if (method === "GET" && path === "/api/push") {
+    case "POST /api/push": {
 
-    return json({ publicKey: VAPID_PUBLIC_KEY });
+      const sub = (await body<{ subscription?: { endpoint?: unknown } }>(req)).subscription;
 
-  }
+      savePushSub(userId, text(sub?.endpoint, "subscription.endpoint"), JSON.stringify(sub));
 
-  if (method === "POST" && path === "/api/push") {
+      return ok();
 
-    const sub = (await body<{ subscription?: { endpoint?: unknown } }>(req)).subscription;
+    }
 
-    savePushSub(text(sub?.endpoint, "subscription.endpoint"), JSON.stringify(sub));
+    case "DELETE /api/push":
 
-    return json({ ok: true });
+      deletePushSub(text((await body<{ endpoint?: unknown }>(req)).endpoint, "endpoint"));
 
-  }
-
-  if (method === "DELETE" && path === "/api/push") {
-
-    deletePushSub(text((await body<{ endpoint?: unknown }>(req)).endpoint, "endpoint"));
-
-    return json({ ok: true });
+      return ok();
 
   }
 
@@ -898,6 +814,8 @@ function serveWeb(pathname: string): Response {
 
 export const server = Bun.serve({
 
+  // a proxy in front terminates TLS; nothing else should reach the server directly
+  hostname: process.env.PTS_HOST ?? "127.0.0.1",
   port: PORT,
 
   async fetch(req) {
@@ -916,13 +834,7 @@ export const server = Bun.serve({
 
     } catch (err) {
 
-      if (err instanceof HttpError) {
-
-        return json({ error: err.message }, err.status);
-
-      }
-
-      return json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      return json({ error: err instanceof Error ? err.message : String(err) }, err instanceof HttpError ? err.status : 400);
 
     }
 
@@ -930,14 +842,16 @@ export const server = Bun.serve({
 
   websocket: {
 
-    open(ws: ServerWebSocket<unknown>) {
+    data: {} as { userId: number },
 
-      ws.subscribe(TOPIC);
+    open(ws: Socket) {
+
+      ws.subscribe(`user:${ws.data.userId}`);
 
     },
 
     // a client says whether its window is on screen, and drives the live browser; everything else is HTTP
-    message(ws: ServerWebSocket<unknown>, raw) {
+    message(ws: Socket, raw) {
 
       let message: { visible?: unknown } | LiveMessage;
 
@@ -954,11 +868,8 @@ export const server = Bun.serve({
       if ("live" in message) {
 
         live.message(ws, message);
-        return;
 
-      }
-
-      if (message.visible === true) {
+      } else if (message.visible === true) {
 
         watching.add(ws);
 
@@ -970,7 +881,7 @@ export const server = Bun.serve({
 
     },
 
-    close(ws: ServerWebSocket<unknown>) {
+    close(ws: Socket) {
 
       watching.delete(ws);
       live.close(ws);
@@ -991,16 +902,27 @@ if (process.env.NODE_ENV !== "test") {
 
   }
 
-  // nothing runs yet, so every tracked chat was left by a crash or a failed delete
-  if (readCookie()) {
+  const users = listUsers();
 
-    dropChats(boodle(), trackedChats());
+  if (!users.length) {
+
+    console.log("pts: nobody can sign in yet. Make a key: bun pts/cli.ts key <name>");
 
   }
 
+  // nothing runs yet, so every tracked chat was left by a crash or a failed delete
+  for (const user of users.filter((one) => one.cookie)) {
+
+    dropChats(boodle(user.id), trackedChats(user.id));
+
+  }
+
+  // localhost goes through the proxy too; without one, agents' browsers can reach every service on this machine
+  console.log(PROXY ? `pts: browsers go through ${proxyLabel(proxyUrl(PROXY))}` : "pts: no PTS_PROXY, so agents' browsers can reach this machine's local services");
+
   // no top-level await: pm2 require()s this file, and Bun cannot require an async module
   // before the scheduler, so no browser starts without the proxy; a failure stops the server rather than browse direct
-  setProxy(readSetting("proxy")).then(() => setZone(readSetting("timezone"))).then(() => {
+  setProxy(PROXY).then(() => Promise.all(users.map((user) => setZone(userDir(user.id), readSetting(user.id, "timezone"))))).then(() => {
 
     warm();
     startScheduler((agent, task) => queue.enqueue(agent, task));
@@ -1008,7 +930,7 @@ if (process.env.NODE_ENV !== "test") {
 
   }, (err) => {
 
-    console.error(`pts: could not apply the browser proxy or time zone: ${err instanceof Error ? err.message : err}`);
+    console.error(`pts: could not apply a browser proxy or time zone: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
 
   });

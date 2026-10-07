@@ -9,9 +9,6 @@
     ".": "./sdk/index.ts"
   },
   "scripts": {
-    "swe:compile": "bun swe/scripts/compile.ts",
-    "swe:build": "bun run swe:compile && electron-builder --publish never",
-    "swe": "bun run swe:compile && electron swe/dist/main.cjs",
     "pts": "bun pts/cli.ts",
     "pts:serve": "bun pts/Server/server.ts",
     "pts:web": "vite build --config pts/web/vite.config.ts",
@@ -24,84 +21,18 @@
     "@types/react-dom": "^19.2.4",
     "@types/web-push": "^3.6.4",
     "@vitejs/plugin-react": "^6.0.5",
-    "electron": "^43.3.0",
-    "electron-builder": "^26.15.3",
     "playwright": "^1.62.1",
-    "shadcn": "^4.16.2",
     "tailwindcss": "^4.3.3",
-    "tw-animate-css": "^1.4.0",
     "typescript": "^5.9.2",
     "vite": "^8.2.1"
   },
   "dependencies": {
-    "@ast-grep/cli": "^0.45.1",
     "@fontsource-variable/geist": "^5.3.0",
-    "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@shadcn/react": "^0.3.0",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
     "lucide-react": "^1.31.0",
     "motion": "^13.1.0",
-    "radix-ui": "^1.6.7",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "shiki": "^4.4.2",
-    "streamdown": "^2.5.0",
-    "tailwind-merge": "^3.6.0",
     "web-push": "^3.6.7"
-  },
-  "trustedDependencies": [
-    "@ast-grep/cli"
-  ],
-  "build": {
-    "appId": "com.boombox.agent",
-    "productName": "Boombox",
-    "icon": "swe/assets/icon.ico",
-    "electronLanguages": ["en-US"],
-    "directories": {
-      "app": "swe/dist",
-      "output": "swe/release"
-    },
-    "files": [
-      "**/*",
-      "!**/node_modules/**",
-      "!**/.env",
-      "!**/.env.*"
-    ],
-    "extraResources": [
-      {
-        "from": "swe/assets/icon.ico",
-        "to": "icon.ico"
-      },
-      {
-        "from": "swe/assets/icon.png",
-        "to": "icon.png"
-      }
-    ],
-    "asar": true,
-    "npmRebuild": false,
-    "win": {
-      "icon": "swe/assets/icon.ico",
-      "target": ["portable"],
-      "extraResources": [
-        {
-          "from": "node_modules/@ast-grep/cli-win32-x64-msvc/sg.exe",
-          "to": "bin/sg.exe"
-        }
-      ]
-    },
-    "mac": {
-      "icon": "swe/assets/icon.png",
-      "target": ["dmg"]
-    },
-    "linux": {
-      "icon": "swe/assets/icon.png",
-      "target": ["AppImage"]
-    },
-    "portable": {
-      "artifactName": "Boombox.exe"
-    }
   }
 }

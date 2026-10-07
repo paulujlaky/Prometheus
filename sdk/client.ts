@@ -530,7 +530,7 @@ export class BoodleClient {
       name,
       modelId: options.llmId,
       instructions: options.instructions,
-      description: "Boombox SWE agent",
+      description: "Boombox agent",
 
     });
 

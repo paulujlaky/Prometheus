@@ -1,6 +1,6 @@
 # Boombox
 
-TypeScript SDK **and** desktop coding agent built on-top of the Boodlebox semi-public API (`https://box.boodle.ai/api`), which promises “unlimited tokens.”
+TypeScript SDK **and** multi-user agents server built on-top of the Boodlebox semi-public API (`https://box.boodle.ai/api`), which promises “unlimited tokens.”
 
 ## Setup
 
@@ -12,51 +12,23 @@ Be sure to set the full, required browser `Cookie` header. Otherwise, nothing wi
 
 ---
 
-## Coding Agent (`swe/`)
+## Agents Server (`pts/`)
 
-An agent loop in an Electron window, built for models with **no native tool calling**. The model writes
-tagged blocks in plain text; the app runs them on your machine and posts the results back. No JSON, so
-nothing has to be escaped — the hardest thing a model has to get right is copying a line of code exactly.
+Prometheus runs persistent agents for several people on one Linux server. Each person signs in with a key and
+connects their own Boodle account; agents' commands run in a sandbox with no access to the host or each other.
 
-### Run The Agent
+On a fresh Debian or Ubuntu VPS, as the user it should run as:
 
 ```bash
-bun run swe
+git clone <this repo> && cd Boombox
+bash pts/setup.sh           # installs everything, writes .env and stops
+nano .env                   # fill it in, see .env.example
+bash pts/setup.sh           # finishes the install
+bun run pts:serve           # starts pts on 127.0.0.1:7420
+bun pts/cli.ts key alice    # prints alice's sign-in key
 ```
 
-That builds the renderer (Vite) and the process (Bun), then launches Electron.
-
-`bun run swe:build` packages a standalone executable into `swe/release`.
-
-### Using The Agent
-
-1. Choose a **working folder** (last path is remembered).
-2. Pick a **model** (grouped by provider) and an **approval mode**.
-3. Describe a task. The system prompt ships a map of the repo — every file with its line count and
-   top-level symbols — plus your `CLAUDE.md` / `AGENTS.md` inline, so discovery and house style
-   both cost zero turns.
-4. Each reply is a line of intent plus one or more action blocks, which run in order.
-5. Results go back as `[verb ok]` / `[verb failed]`. The loop ends on `<done>` or the step limit.
-
-### Protocol
-
-```
-<ls>       list a directory: files, line counts, symbols
-<read>     whole files or a line range, always numbered
-<grep>     literal text or /regex/, grouped by file
-<edit>     @@ FIND / @@ REPLACE pairs against exact file text
-<write>    create or replace a file
-<delete>   remove files (asks first)
-<run>      shell: build, test, git (asks first)
-<say>      a line to the user
-<done>     final summary, ends the run
-```
-
-Blocks are forgiving where it costs nothing: verb synonyms (`list`, `search`, `bash`, `finish`) resolve,
-`<edit path="x">` and `<edit x>` are the same, an unclosed block still runs, and `<<<<<<< SEARCH` works
-wherever `@@ FIND` does. Edits match exactly first, then ignoring trailing space, then ignoring
-indentation — and a stale FIND comes back with the nearest real lines attached, so it is fixed in one
-turn instead of three.
+Keeping pts running and putting HTTPS in front of it are up to you. To update, `git pull` and run `bash pts/setup.sh` again.
 
 ---
 

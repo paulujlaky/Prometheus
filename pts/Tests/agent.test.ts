@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { close, closeAll, handBack, input, look, open, proxyLabel, proxyUrl, setProxy, setZone, tab, takeOver, watch } from "../Agent/Tools/Browser";
+import { close, closeAll, handBack, input, look, open, profileOf, proxyLabel, proxyUrl, setProxy, setZone, tab, takeOver, watch } from "../Agent/Tools/Browser";
 import { Queue, type AgentState } from "../Agent/Queue";
 import { runShell } from "../Agent/Tools/Shell";
 import { applyEdit, execute, relPath } from "../Agent/Tools/Tools";
@@ -118,6 +118,42 @@ test.skipIf(process.platform !== "linux")("commands run sandboxed in the workspa
   expect(readFileSync(join(cwd, "made.txt"), "utf8")).toBe("hi\n");
 
   expect((await runShell("sleep 5", cwd, undefined, 300)).exitCode).toBe(124);
+
+});
+
+test.skipIf(process.platform !== "linux")("an agent cannot reach the host through its network, links or FIFOs", async () => {
+
+  const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+  const secret = join(mkdtempSync(join(tmpdir(), "pts-host-")), "secret.txt");
+  const host = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("host service") });
+  const run = (action: { verb?: string; path?: string; body?: string }) => execute({ verb: "read", path: "", label: "", body: "", ...action } as Action, cwd);
+
+  writeFileSync(secret, "host secret");
+
+  try {
+
+    const shell = await runShell(`ln -s ${secret} out; ln -s ${dirname(secret)} dir; mkfifo pipe; curl -sS -m 3 http://127.0.0.1:${host.port}/ 2>&1; grep CapEff /proc/self/status; ls /etc/shadow 2>&1`, cwd);
+
+    expect(shell.output).not.toContain("host service");
+    expect(shell.output).toContain("CapEff:\t0000000000000000");
+    expect(shell.output).toContain("No such file");
+
+    for (const action of [{ path: "out" }, { path: "dir/secret.txt" }, { verb: "write", path: "out", body: "x" }, { verb: "edit", path: "out", body: "@@ FIND\nhost\n@@ REPLACE\nx" }, { verb: "write", path: "dir/new.txt", body: "x" }]) {
+
+      expect((await run(action)).text).toContain("outside your workspace");
+
+    }
+
+    expect((await run({ path: "pipe" })).text).toContain("not a regular file");
+    expect((await run({ verb: "grep", body: "host secret" })).text).toStartWith("no matches");
+    expect((await run({ verb: "ls" })).text).toContain("out  link");
+    expect(readFileSync(secret, "utf8")).toBe("host secret");
+
+  } finally {
+
+    host.stop(true);
+
+  }
 
 });
 
@@ -525,7 +561,7 @@ function widthOf(jpeg: Buffer): number {
 
 function chromePid(cwd: string): number {
 
-  return Number(readlinkSync(join(cwd, ".browser", "SingletonLock")).split("-").pop());
+  return Number(readlinkSync(join(profileOf(cwd), "SingletonLock")).split("-").pop());
 
 }
 
@@ -725,7 +761,7 @@ test.skipIf(process.platform !== "linux")("tabs open, switch and close, and come
 
     await close(cwd);
 
-    expect(JSON.parse(readFileSync(join(cwd, ".browser", "Tabs.json"), "utf8"))).toEqual({ active: 0, tabs: [{ url: `${url}/one`, title: "One" }, { url: `${url}/two`, title: "Two" }] });
+    expect(JSON.parse(readFileSync(join(profileOf(cwd), "Tabs.json"), "utf8"))).toEqual({ active: 0, tabs: [{ url: `${url}/one`, title: "One" }, { url: `${url}/two`, title: "Two" }] });
 
     // a new Chromium shows the tab that was in front, and loads the other when it is switched to
     expect(await look(cwd)).toContain("One");
@@ -786,6 +822,7 @@ test.skipIf(process.platform !== "linux")("the browser goes through a proxy that
 
   const port = (upstream.address() as { port: number }).port;
   const cwd = mkdtempSync(join(tmpdir(), "pts-"));
+  const host = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("<h1>Direct to the host</h1>", { headers: { "Content-Type": "text/html" } }) });
 
   try {
 
@@ -793,6 +830,9 @@ test.skipIf(process.platform !== "linux")("the browser goes through a proxy that
 
     // nothing resolves proxied.test; only the proxy can answer for it
     expect(await open(cwd, "http://proxied.test/")).toContain("Through the proxy");
+
+    // loopback too, so a page cannot reach this machine's own services
+    expect(await open(cwd, `http://127.0.0.1:${host.port}/`)).toContain("Through the proxy");
     expect(auths.length).toBeGreaterThan(0);
     expect(auths.every((auth) => auth === `Basic ${Buffer.from("agent:s@fe").toString("base64")}`)).toBe(true);
 
@@ -801,6 +841,7 @@ test.skipIf(process.platform !== "linux")("the browser goes through a proxy that
     await setProxy(null);
     await closeAll();
     upstream.close();
+    host.stop(true);
 
   }
 
@@ -814,19 +855,19 @@ test.skipIf(process.platform !== "linux")("the browser keeps the user's time zon
 
   try {
 
-    await setZone("Asia/Tokyo");
+    await setZone(tmpdir(), "Asia/Tokyo");
     expect(await open(cwd, url)).toContain("Asia/Tokyo -540");
 
     // a running browser restarts onto the change
-    await setZone("Europe/Berlin");
+    await setZone(tmpdir(), "Europe/Berlin");
     expect(await open(cwd, url)).toContain("Europe/Berlin -60");
 
-    await setZone(null);
+    await setZone(tmpdir(), null);
     expect(await open(cwd, url)).not.toContain("Europe/Berlin");
 
   } finally {
 
-    await setZone(null);
+    await setZone(tmpdir(), null);
     await closeAll();
     site.stop(true);
 

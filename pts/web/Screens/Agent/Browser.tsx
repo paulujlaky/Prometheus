@@ -38,31 +38,11 @@ const TAP_SLOP = 8;
 // keys a phone keyboard reports while composing; the text arrives through the change event instead
 const PASSIVE_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "Unidentified", "Process", "Dead", "Backspace"]);
 
-function needsYou(agent: Agent): boolean {
+// what was typed or pasted belongs to the field and the hold it was meant for
+const UNTYPED = { typed: "", pasteOpen: false, pasteText: "" };
 
-  return agent.state === "waiting" && agent.waitingOn === "handoff";
-
-}
-
-function tabLabel(tab: BrowserTab): string {
-
-  if (tab.title) {
-
-    return tab.title;
-
-  }
-
-  try {
-
-    return tab.url === "about:blank" ? "New tab" : new URL(tab.url).hostname;
-
-  } catch {
-
-    return "New tab";
-
-  }
-
-}
+const needsYou = (agent: Agent) => agent.state === "waiting" && agent.waitingOn === "handoff";
+const tabLabel = (tab: BrowserTab) => tab.title || (/^https?:\/\//.test(tab.url) ? new URL(tab.url).hostname : "New tab");
 
 /** One agent's browser, live. Watching is free; taking over pauses the agent's browser work until it is handed back. */
 export class Browser extends Component<BrowserProps, BrowserState> {
@@ -167,10 +147,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
       mine: event.mine ?? state.mine,
       error: event.error ?? state.error,
 
-      // what was typed belonged to a hold that has ended
-      typed: event.mine === false ? "" : state.typed,
-      pasteOpen: event.mine === false ? false : state.pasteOpen,
-      pasteText: event.mine === false ? "" : state.pasteText,
+      ...(event.mine === false ? UNTYPED : { typed: state.typed, pasteOpen: state.pasteOpen, pasteText: state.pasteText }),
 
     }));
 
@@ -190,9 +167,7 @@ export class Browser extends Component<BrowserProps, BrowserState> {
 
     this.pasteVersion += 1;
     this.props.live.send({ live: "tab", action, id });
-
-    // what was typed belonged to the tab being left
-    this.setState({ typed: "", pasteOpen: false, pasteText: "" });
+    this.setState(UNTYPED);
 
   };
 
@@ -391,40 +366,31 @@ export class Browser extends Component<BrowserProps, BrowserState> {
     }
 
     this.input({ kind: "text", text });
-    this.setState({ typed: "", pasteOpen: false, pasteText: "", error: "" });
+    this.setState({ ...UNTYPED, error: "" });
 
   };
 
+  /** The clipboard, straight into the page; a browser that will not hand it over gets a field to paste into instead. */
   paste = async () => {
 
     const version = ++this.pasteVersion;
-    const tab = this.state.tabs.find((one) => one.active)?.id;
+    const activeTab = () => this.state.tabs.find((one) => one.active)?.id;
+    const tab = activeTab();
+    const text = await navigator.clipboard.readText().catch(() => "");
 
-    try {
+    if (version !== this.pasteVersion || !this.state.mine) {
 
-      const text = await navigator.clipboard.readText();
+      return;
 
-      if (version === this.pasteVersion && this.state.mine && tab === this.state.tabs.find((one) => one.active)?.id) {
+    }
 
-        if (text) {
+    if (!text) {
 
-          this.pasteText(text);
+      this.setState({ pasteOpen: true });
 
-        } else {
+    } else if (tab === activeTab()) {
 
-          this.setState({ pasteOpen: true });
-
-        }
-
-      }
-
-    } catch {
-
-      if (version === this.pasteVersion && this.state.mine) {
-
-        this.setState({ pasteOpen: true });
-
-      }
+      this.pasteText(text);
 
     }
 

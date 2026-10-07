@@ -9,7 +9,7 @@ import { parseGlyph } from "../../../Features/Glyph";
 import { AgentsContext } from "../../App/context";
 import { api, type Agent, type Model, type Routine } from "../../Lib/api";
 import { Autosave } from "../../Lib/autosave";
-import { describeSchedule, describeWatch, routineTitle } from "../../Lib/thread";
+import { describeWatch, routineTitle } from "../../Lib/thread";
 
 interface DetailsProps {
 
@@ -49,9 +49,7 @@ function when(routine: Routine, timeZone: string | null): string {
 
   }
 
-  const next = routine.nextAt ? new Date(routine.nextAt).toLocaleString("en-US", { timeZone: timeZone ?? undefined, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
-
-  return `${describeSchedule(routine.spec, timeZone)}${next ? ` · next ${next}` : ""}`;
+  return routine.nextAt ? `Next ${new Date(routine.nextAt).toLocaleString("en-US", { timeZone: timeZone ?? undefined, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })}` : routine.enabled ? "Never runs" : "Paused";
 
 }
 

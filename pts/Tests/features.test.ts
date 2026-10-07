@@ -8,11 +8,15 @@ import { Queue } from "../Agent/Queue";
 import { groupTask, isWaiting, MAX_HOPS, mentioned, route } from "../Features/Group";
 import type { Agent, GroupMessage } from "../Store";
 
-// Routines reads the store, which opens its database at import
-process.env.PTS_HOME ??= mkdtempSync(join(tmpdir(), "pts-routines-"));
+// Routines reads the store, which opens its database at import; never the PTS_HOME a .env names
+process.env.PTS_HOME = mkdtempSync(join(tmpdir(), "pts-routines-"));
 
 const { clockOf, lineChanges, nextRun, parseCron, parseInterval, routineBlock, visibleText } = await import("../Features/Routines");
-const { createAgent, listRoutines } = await import("../Store");
+const { createAgent, getUser, issueKey, listRoutines } = await import("../Store");
+
+issueKey("features");
+
+const USER = getUser("features")!.id;
 
 test("schedules fire on the next matching minute of the user's clock", () => {
 
@@ -62,15 +66,15 @@ test("schedules fire on the next matching minute of the user's clock", () => {
 
 test("an agent's routine block creates, lists and removes its own routines", () => {
 
-  const mine = createAgent(`Planner${Date.now()}`, "model-1");
-  const other = createAgent(`Other${Date.now()}`, "model-1");
+  const mine = createAgent(USER, `Planner${Date.now()}`, "model-1");
+  const other = createAgent(USER, `Other${Date.now()}`, "model-1");
 
-  expect(routineBlock(mine.id, "").text).toBe("You have no routines.");
-  expect(routineBlock(mine.id, "schedule: every morning\ntask: x").ok).toBe(false);
-  expect(routineBlock(mine.id, "schedule: 0 8 * * 1-5").ok).toBe(false);
+  expect(routineBlock(mine, "").text).toBe("You have no routines.");
+  expect(routineBlock(mine, "schedule: every morning\ntask: x").ok).toBe(false);
+  expect(routineBlock(mine, "schedule: 0 8 * * 1-5").ok).toBe(false);
 
-  const daily = routineBlock(mine.id, "schedule: 0 8 * * 1-5\ntitle: HN digest\ntask: Summarise HN.\nKeep it to five bullets.");
-  const watch = routineBlock(mine.id, "watch: curl -s https://example.com > page.txt && cat page.txt\nevery: 30\ntask: Report changes.");
+  const daily = routineBlock(mine, "schedule: 0 8 * * 1-5\ntitle: HN digest\ntask: Summarise HN.\nKeep it to five bullets.");
+  const watch = routineBlock(mine, "watch: curl -s https://example.com > page.txt && cat page.txt\nevery: 30\ntask: Report changes.");
 
   expect(daily.ok && watch.ok).toBe(true);
 
@@ -78,10 +82,10 @@ test("an agent's routine block creates, lists and removes its own routines", () 
 
   expect(first).toMatchObject({ kind: "schedule", spec: "0 8 * * 1-5", title: "HN digest", task: "Summarise HN.\nKeep it to five bullets." });
   expect(second).toMatchObject({ kind: "watch", spec: "30", target: "curl -s https://example.com > page.txt && cat page.txt", title: "" });
-  expect(routineBlock(mine.id, "").text.split("\n").length).toBe(2);
+  expect(routineBlock(mine, "").text.split("\n").length).toBe(2);
 
-  expect(routineBlock(other.id, `remove: ${first.id}`).ok).toBe(false);
-  expect(routineBlock(mine.id, `remove: ${first.id}`).ok).toBe(true);
+  expect(routineBlock(other, `remove: ${first.id}`).ok).toBe(false);
+  expect(routineBlock(mine, `remove: ${first.id}`).ok).toBe(true);
   expect(listRoutines(mine.id).map((routine) => routine.id)).toEqual([second.id]);
 
 });
@@ -144,6 +148,30 @@ test("a hand-off skips an agent already working on the same chain", () => {
 
 });
 
+test("a free slot goes to the user with the fewest runs going, not just the oldest job", async () => {
+
+  const finish = new Map<number, () => void>();
+  const started: number[] = [];
+  const queue = new Queue((job) => new Promise<void>((resolve) => { started.push(job.id); finish.set(job.id, resolve); }), () => {}, () => {}, 2);
+  const agent = (id: number, userId: number) => ({ id, userId, name: `a${id}` }) as Agent;
+
+  for (const id of [1, 2, 3]) {
+
+    queue.enqueue(agent(id, 1), "burst");
+
+  }
+
+  queue.enqueue(agent(9, 2), "mine");
+
+  expect(started).toEqual([1, 2]);
+
+  finish.get(1)!();
+  await Bun.sleep(0);
+
+  expect(started).toEqual([1, 2, 9]);
+
+});
+
 test("finished chats are deleted from Boodle, and a failed delete stays tracked for the next sweep", async () => {
 
   const { dropChats } = await import("../Agent/Runner");
@@ -170,15 +198,15 @@ test("finished chats are deleted from Boodle, and a failed delete stays tracked 
 
   for (const id of Object.keys(statuses)) {
 
-    trackChat(id, 7);
+    trackChat(id, 7, USER);
 
   }
 
-  trackChat("other", 8);
+  trackChat("other", 8, USER);
 
-  await dropChats(client as never, trackedChats(7));
+  await dropChats(client as never, trackedChats(USER, 7));
 
   expect(deleted.sort()).toEqual(["down", "gone", "ok"]);
-  expect(trackedChats().sort()).toEqual(["down", "other"]);
+  expect(trackedChats(USER).sort()).toEqual(["down", "other"]);
 
 });

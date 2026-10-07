@@ -28,233 +28,13 @@ export type Item =
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
 
-/** The title, or for routines made before titles, the task's first line. */
-export function routineTitle(routine: Routine): string {
-
-  return routine.title || routine.task.split("\n")[0];
-
-}
-
-const DAYS = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"];
-const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-function ordinal(day: number): string {
-
-  const teen = day % 100;
-  const ending = teen >= 11 && teen <= 13 ? "th" : ["th", "st", "nd", "rd"][day % 10] ?? "th";
-
-  return `${day}${ending}`;
-
-}
-
-/** 12-hour clock. Midnight and noon read as words; other times keep the minutes. */
-function clock(hourText: string, minuteText: string): string | null {
-
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-
-  if (!/^\d{1,2}$/.test(hourText) || !/^\d{1,2}$/.test(minuteText) || hour > 23 || minute > 59) {
-
-    return null;
-
-  }
-
-  if (minute === 0 && (hour === 0 || hour === 12)) {
-
-    return hour ? "noon" : "midnight";
-
-  }
-
-  return `${hour % 12 || 12}:${minuteText.padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
-
-}
-
-function dayPhrase(weekday: string): string | null {
-
-  if (weekday === "*") {
-
-    return "Every day";
-
-  }
-
-  if (weekday === "1-5") {
-
-    return "Weekdays";
-
-  }
-
-  if (weekday === "0,6" || weekday === "6,0") {
-
-    return "Weekends";
-
-  }
-
-  if (/^[0-7]$/.test(weekday)) {
-
-    return DAYS[Number(weekday)];
-
-  }
-
-  const range = /^([0-7])-([0-7])$/.exec(weekday);
-
-  if (range && Number(range[1]) <= Number(range[2])) {
-
-    return `${DAYS[Number(range[1])]} to ${DAYS[Number(range[2])]}`;
-
-  }
-
-  const days = weekday.split(",");
-
-  if (days.length > 1 && days.every((day) => /^[0-7]$/.test(day))) {
-
-    const names = days.map((day) => DAYS[Number(day)]);
-
-    return names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-
-  }
-
-  return null;
-
-}
-
-function scheduleWords(spec: string): string {
-
-  const parts = spec.trim().split(/\s+/);
-
-  if (parts.length !== 5) {
-
-    return spec;
-
-  }
-
-  const [minute, hour, day, month, weekday] = parts;
-
-  if (day === "*" && month === "*" && weekday === "*") {
-
-    if (hour === "*") {
-
-      if (minute === "0") {
-
-        return "Every hour";
-
-      }
-
-      const every = /^\*\/(\d+)$/.exec(minute)?.[1];
-
-      if (every) {
-
-        return every === "1" ? "Every minute" : `Every ${every} min`;
-
-      }
-
-      if (/^\d{1,2}$/.test(minute) && Number(minute) < 60) {
-
-        return `Every hour at :${minute.padStart(2, "0")}`;
-
-      }
-
-    }
-
-    const everyHour = minute === "0" ? /^\*\/(\d+)$/.exec(hour)?.[1] : undefined;
-
-    if (everyHour) {
-
-      return everyHour === "1" ? "Every hour" : `Every ${everyHour} hours`;
-
-    }
-
-  }
-
-  const time = clock(hour, minute);
-
-  if (!time) {
-
-    return spec;
-
-  }
-
-  if (day === "*" && month === "*") {
-
-    const days = dayPhrase(weekday);
-
-    return days ? `${days} at ${time}` : spec;
-
-  }
-
-  if (weekday === "*" && month === "*" && /^\d{1,2}$/.test(day)) {
-
-    const date = Number(day);
-
-    return date >= 1 && date <= 31 ? `The ${ordinal(date)} of every month at ${time}` : spec;
-
-  }
-
-  if (weekday === "*" && /^\d{1,2}$/.test(day) && /^\d{1,2}$/.test(month)) {
-
-    const date = Number(day);
-    const monthIndex = Number(month) - 1;
-
-    if (date >= 1 && date <= 31 && monthIndex >= 0 && monthIndex < 12) {
-
-      return `${MONTHS[monthIndex]} ${ordinal(date)} at ${time}`;
-
-    }
-
-  }
-
-  return spec;
-
-}
-
-/** Short label such as EDT. Empty when the name is not a real zone. */
-export function zoneLabel(timeZone: string, at = new Date()): string {
-
-  try {
-
-    return new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(at).find((part) => part.type === "timeZoneName")?.value ?? "";
-
-  } catch {
-
-    return "";
-
-  }
-
-}
-
-/** Common cron shapes in words. A time zone adds its abbreviation. Anything unusual stays as the raw spec. */
-export function describeSchedule(spec: string, timeZone?: string | null): string {
-
-  const words = scheduleWords(spec);
-
-  // cron is for the agent; a shape too unusual for words still reads as words, with the next run beside it
-  if (words === spec) {
-
-    return "Custom schedule";
-
-  }
-
-  if (!timeZone) {
-
-    return words;
-
-  }
-
-  const zone = zoneLabel(timeZone);
-
-  return zone ? `${words} ${zone}` : words;
-
-}
-
-export function describeWatch(target: string, minutes: string): string {
-
-  const what = /^https?:\/\//i.test(target) ? target.replace(/^https?:\/\//i, "").replace(/\/$/, "") : "a command";
-
-  return `${minutes === "60" ? "Hourly" : `Every ${minutes} min`}, watching ${what}`;
-
-}
-
-const RESULT_HEAD =/^\[([a-z]+) (ok|failed)\]$/gm;
+const RESULT_HEAD = /^\[([a-z]+) (ok|failed)\]$/gm;
 const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "tab", "submit", "handoff"]);
+
+/** The title, or for a routine the agent left untitled, the task's first line. */
+export const routineTitle = (routine: Routine) => routine.title || routine.task.split("\n")[0];
+
+export const describeWatch = (target: string, minutes: string) => `${minutes === "60" ? "Hourly" : `Every ${minutes} min`}, watching ${/^https?:\/\//i.test(target) ? target.replace(/^https?:\/\//i, "").replace(/\/$/, "") : "a command"}`;
 
 /** `[verb ok]` sections of one result event, in the order the blocks ran. */
 function splitResults(text: string): { ok: boolean; text: string }[] {
@@ -275,35 +55,30 @@ function taskItem(event: AgentEvent): Item {
 
   const key = `t${event.id}`;
   const text = event.text;
-
-  if (text.startsWith("[Group thread")) {
-
-    const said = /New message from ([^:\n]+):\n\n([\s\S]*?)(?:\n\nYour <done>|$)/.exec(text);
-
-    // tasks from before group chats name no thread; they all came from Everyone
-    const where = /^\[Group thread "(.*?)"/.exec(text)?.[1] ?? "Everyone";
-
-    return { kind: "note", key, text: said ? `${said[1]} in ${where}: ${said[2].trim()}` : `From ${where}` };
-
-  }
-
-  if (text.startsWith("[Scheduled routine")) {
-
-    const title = /^\[Scheduled routine "(.*?)": /.exec(text)?.[1];
-
-    return { kind: "note", key, text: `Routine: ${title ?? text.replace(/^\[[^\]]*\]\s*/, "").split("\n")[0]}` };
-
-  }
-
+  const group = /^\[Group thread "(.*?)"[\s\S]*?New message from ([^:\n]+):\n\n([\s\S]*?)(?:\n\nYour <done>|$)/.exec(text);
+  const routine = /^\[Scheduled routine(?: "(.*?)")?: /.exec(text);
   const watch = /^\[Watch(?: "(.*?)")?: (.*?) changed/.exec(text);
 
-  if (watch) {
+  if (group) {
 
-    return { kind: "note", key, text: watch[1] ? `Watch: ${watch[1]}` : `Watch: ${watch[2]} changed` };
+    return { kind: "note", key, text: `${group[2]} in ${group[1]}: ${group[3].trim()}` };
 
   }
 
-  return { kind: "user", key, text };
+  if (routine) {
+
+    return { kind: "note", key, text: `Routine: ${routine[1] ?? text.replace(/^\[[^\]]*\]\s*/, "").split("\n")[0]}` };
+
+  }
+
+  return watch ? { kind: "note", key, text: watch[1] ? `Watch: ${watch[1]}` : `Watch: ${watch[2]} changed` } : { kind: "user", key, text };
+
+}
+
+/** What the user answered, from the event after the card's own. */
+function answerOf(run: AgentEvent[], index: number): string | null {
+
+  return run[index + 1]?.kind === "user" ? run[index + 1].text : null;
 
 }
 
@@ -311,14 +86,13 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
   const items: Item[] = [];
   const runs = new Map<string, AgentEvent[]>();
+  const lastRun = events.at(-1)?.runId;
 
   for (const event of events) {
 
     runs.set(event.runId, [...(runs.get(event.runId) ?? []), event]);
 
   }
-
-  const lastRun = events[events.length - 1]?.runId;
 
   for (const [runId, run] of runs) {
 
@@ -331,107 +105,79 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
     for (const [index, event] of run.entries()) {
 
       const key = `e${event.id}`;
+      const answer = answerOf(run, index);
 
-      if (event.kind === "task") {
+      switch (event.kind) {
 
-        items.push(taskItem(event));
-        continue;
+        case "task":
 
-      }
+          items.push(taskItem(event));
+          break;
 
-      if (event.kind === "user") {
+        case "user":
 
-        const previous = run[index - 1];
+          // an approval's answer belongs to its card, not the chat
+          if (!/^(ask|handoff|question)$/.test(run[index - 1]?.kind ?? "")) {
 
-        // an approval's answer belongs to its card, not the chat
-        if (previous?.kind === "ask" || previous?.kind === "handoff" || previous?.kind === "question") {
+            items.push({ kind: "user", key, text: event.text });
 
-          continue;
+          }
 
-        }
+          break;
 
-        items.push({ kind: "user", key, text: event.text });
-        continue;
+        case "say":
+        case "notify":
 
-      }
+          items.push({ kind: event.kind, key, text: event.text });
+          break;
 
-      if (event.kind === "say" || event.kind === "notify") {
+        case "assistant":
 
-        items.push({ kind: event.kind, key, text: event.text });
-        continue;
+          // says get results too, so they stay in `pending` to keep results lined up with their blocks
+          pending = parseActions(event.text).filter((action) => action.verb !== "done").map((action) => ({ verb: action.verb, label: action.label || `${action.verb} ${action.path}`.trim(), ok: null, detail: "" }));
+          steps.push(...pending.filter((step) => step.verb !== "say" && step.verb !== "notify"));
+          break;
 
-      }
+        case "result": {
 
-      if (event.kind === "assistant") {
+          const results = splitResults(event.text);
 
-        // says get results too, so they stay in `pending` to keep results lined up with their blocks
-        pending = parseActions(event.text).filter((action) => action.verb !== "done").map((action) => ({
+          pending.forEach((step, i) => {
 
-          verb: action.verb,
-          label: action.label || `${action.verb} ${action.path}`.trim(),
+            step.ok = results[i]?.ok ?? null;
+            step.detail = results[i]?.text ?? "";
 
-          ok: null,
-          detail: "",
+          });
 
-        }));
-
-        steps.push(...pending.filter((step) => step.verb !== "say" && step.verb !== "notify"));
-        continue;
-
-      }
-
-      if (event.kind === "result") {
-
-        const results = splitResults(event.text);
-
-        for (const [i, step] of pending.entries()) {
-
-          step.ok = results[i]?.ok ?? null;
-          step.detail = results[i]?.text ?? "";
+          pending = [];
+          break;
 
         }
 
-        pending = [];
-        continue;
+        case "ask":
 
-      }
+          after.push({ kind: "ask", key, text: event.text, answer: answer === null ? null : answer === "Allowed." ? "allowed" : "refused" });
+          break;
 
-      if (event.kind === "ask") {
+        case "handoff":
 
-        const answer = run[index + 1]?.kind === "user" ? (run[index + 1].text === "Allowed." ? "allowed" : "refused") : null;
+          after.push({ kind: "handoff", key, text: event.text, answer: answer === null ? null : answer === "Done." ? "done" : "skipped" });
+          break;
 
-        after.push({ kind: "ask", key, text: event.text, answer });
-        continue;
+        case "question":
 
-      }
+          after.push({ kind: "question", key, text: event.text, answer });
+          break;
 
-      if (event.kind === "handoff") {
+        default:
 
-        const answer = run[index + 1]?.kind === "user" ? (run[index + 1].text === "Done." ? "done" : "skipped") : null;
+          ended = true;
 
-        after.push({ kind: "handoff", key, text: event.text, answer });
-        continue;
+          if (event.kind === "error" || event.text.trim().toLowerCase() !== "wait") {
 
-      }
+            after.push({ kind: event.kind as "done" | "error", key, text: event.text });
 
-      if (event.kind === "question") {
-
-        after.push({ kind: "question", key, text: event.text, answer: run[index + 1]?.kind === "user" ? run[index + 1].text : null });
-        continue;
-
-      }
-
-      ended = true;
-
-      if (event.kind === "done" && event.text.trim().toLowerCase() !== "wait") {
-
-        after.push({ kind: "done", key, text: event.text });
-
-      }
-
-      if (event.kind === "error") {
-
-        after.push({ kind: "error", key, text: event.text });
+          }
 
       }
 
@@ -441,9 +187,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
     if (ran.length) {
 
-      const seconds = Math.max(1, Math.round((run[run.length - 1].at - run[0].at) / 1000));
-
-      items.push({ kind: "work", key: `w${runId}`, steps: ran, seconds, live: !ended && busy && runId === lastRun });
+      items.push({ kind: "work", key: `w${runId}`, steps: ran, seconds: Math.max(1, Math.round((run.at(-1)!.at - run[0].at) / 1000)), live: !ended && busy && runId === lastRun });
 
     }
 
@@ -452,29 +196,28 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
     if (page) {
 
-      const [url, title] = page.detail.split("\n");
+      const [url, title = ""] = page.detail.split("\n");
 
-      items.push({ kind: "page", key: `p${runId}`, url, title: title ?? "" });
+      items.push({ kind: "page", key: `p${runId}`, url, title });
 
     }
 
-    for (const step of ran) {
+    ran.forEach((step, i) => {
 
-      if (step.verb === "routine" && step.ok && step.detail.startsWith("created routine")) {
+      if (step.verb !== "routine" || !step.ok || !step.detail.startsWith("created routine")) {
 
-        const [when, title = ""] = step.detail.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
-
-        const watch = /^watch (.+) every (\d+) min/.exec(when);
-
-        // "schedule 0 9 * * 1-5, next Mon, Oct 5, 9:00 AM EDT"; results from before the rework have no next
-        const schedule = /^schedule (\S+\s+\S+\s+\S+\s+\S+\s+\S+)(?:, next (.+))?$/.exec(when);
-        const first = schedule?.[2] ? ` · first ${schedule[2]}` : "";
-
-        items.push({ kind: "routine", key: `r${runId}${steps.indexOf(step)}`, when: watch ? describeWatch(watch[1], watch[2]) : `${describeSchedule(schedule?.[1] ?? "")}${first}`, title });
+        return;
 
       }
 
-    }
+      // "schedule 0 9 * * 1-5, next Mon, Oct 5, 9:00 AM EDT — Morning digest"
+      const [when, title = ""] = step.detail.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
+      const watch = /^watch (.+) every (\d+) min/.exec(when);
+      const next = /, next (.+)$/.exec(when)?.[1];
+
+      items.push({ kind: "routine", key: `r${runId}${i}`, when: watch ? describeWatch(watch[1], watch[2]) : next ? `Next ${next}` : "Never runs", title });
+
+    });
 
     items.push(...after);
 

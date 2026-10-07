@@ -3,15 +3,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const TOKEN = "test-token-0123456789abcdef";
-
 // the store and server read these once, at import
 process.env.PTS_HOME = mkdtempSync(join(tmpdir(), "pts-server-"));
-process.env.PTS_TOKEN = TOKEN;
 process.env.PTS_PORT = "0";
-process.env.BOODLE_COOKIE = "";
 
 const { server } = await import("../Server/server");
+const { getUser, issueKey } = await import("../Store");
+
+const TOKEN = issueKey("tester");
+const USER = getUser("tester")!.id;
 
 const base = `http://localhost:${server.port}`;
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
@@ -24,70 +24,16 @@ function call(path: string, init: RequestInit = {}) {
 
 }
 
-test("global search finds older messages, treats wildcards literally, and isolates conversation context", async () => {
-
-  const { createAgent, createGroupChat, addEvent, addGroupMessage, deleteAgent, deleteGroupChat } = await import("../Store");
-  const agent = createAgent("Searchable", "model-1");
-  const other = createAgent("Other search", "model-1");
-  const group = createGroupChat("Search group", [agent.id]);
-  const old = addEvent(agent.id, "old", "done", "Archive needle 100%_complete");
-
-  for (let i = 0; i < 205; i += 1) {
-
-    addEvent(agent.id, `run-${i}`, "done", `Pagination needle ${i}`);
-
-  }
-
-  addEvent(agent.id, "hidden", "assistant", "Raw tool needle");
-  addEvent(other.id, "other", "done", "Other needle");
-  addGroupMessage(group.id, "user", null, "Group needle");
-  addGroupMessage(0, "user", null, "Everyone needle");
-
-  const search = async (query: string) => (await call(`/api/search?${query}`)).json();
-  const literal = await search("q=100%25_complete");
-
-  expect(literal.hits.map((hit: { id: number }) => hit.id)).toEqual([old.id]);
-  expect((await search("q=ARCHIVE%20NEEDLE")).hits).toHaveLength(1);
-  expect((await search("q=Raw%20tool%20needle")).hits).toHaveLength(0);
-  expect((await search("q=%27%20OR%201%3D1--")).hits).toHaveLength(0);
-  expect(await search("q=%20")).toEqual({ hits: [], more: false });
-
-  const first = await search(`q=needle&scope=agent:${agent.id}`);
-  const second = await search(`q=needle&scope=agent:${agent.id}&offset=50`);
-
-  expect(first.hits).toHaveLength(50);
-  expect(first.more).toBe(true);
-  expect(first.hits.every((hit: { threadId: number }) => hit.threadId === agent.id)).toBe(true);
-  expect(new Set([...first.hits, ...second.hits].map((hit) => hit.id)).size).toBe(100);
-  expect((await search(`q=needle&scope=group:${group.id}`)).hits[0].title).toBe("Search group");
-  expect((await search("q=needle&scope=group:0")).hits[0].title).toBe("Everyone");
-
-  const context = await (await call(`/api/search/context?source=agent&id=${old.id}`)).json();
-
-  expect(context.some((hit: { id: number }) => hit.id === old.id)).toBe(true);
-  expect(context.every((hit: { source: string; threadId: number }) => hit.source === "agent" && hit.threadId === agent.id)).toBe(true);
-  expect(context.length).toBeLessThanOrEqual(21);
-  expect((await call("/api/search?offset=-1&q=x")).status).toBe(400);
-  expect((await call("/api/search/context?source=invalid&id=1")).status).toBe(400);
-  expect((await fetch(`${base}/api/search?q=needle`)).status).toBe(401);
-
-  deleteAgent(agent.id);
-  deleteAgent(other.id);
-  deleteGroupChat(group.id);
-  deleteGroupChat(0);
-
-});
-
-test("everything but login needs the token", async () => {
+test("everything but login needs a key", async () => {
 
   expect((await fetch(`${base}/api/agents`)).status).toBe(401);
   expect((await fetch(`${base}/api/agents`, { headers: { Authorization: "Bearer nope" } })).status).toBe(401);
 
-  const wrong = await fetch(`${base}/api/login`, { method: "POST", body: JSON.stringify({ token: "nope" }) });
+  const wrong = await fetch(`${base}/api/login`, { method: "POST", body: JSON.stringify({ key: "nope" }) });
 
   expect(wrong.status).toBe(401);
 
-  const right = await fetch(`${base}/api/login`, { method: "POST", body: JSON.stringify({ token: TOKEN }) });
+  const right = await fetch(`${base}/api/login`, { method: "POST", body: JSON.stringify({ key: TOKEN }) });
   const cookie = right.headers.get("set-cookie") ?? "";
 
   expect(cookie).toContain("HttpOnly");
@@ -105,7 +51,7 @@ test("agents can be created, changed, remembered and deleted", async () => {
 
   // without a model in the request it falls back to the default, which needs Boodle to resolve
   expect((await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "Modelless" }) })).status).toBe(503);
-  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: null, proxy: null });
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: null });
 
   const duplicate = await call("/api/agents", { method: "POST", body: JSON.stringify({ name: "tester", modelId: "model-1" }) });
 
@@ -171,8 +117,8 @@ test("categories, group chats and unread counts", async () => {
   addEvent(a, "r1", "say", "On it.");
   addEvent(a, "r1", "done", "Wait.");
   addEvent(a, "r1", "done", "Found it.");
-  addGroupMessage(group.id, "Bob", b, "Hi.");
-  addGroupMessage(group.id, "user", null, "Mine.");
+  addGroupMessage(USER, group.id, "Bob", b, "Hi.");
+  addGroupMessage(USER, group.id, "user", null, "Mine.");
 
   expect((await (await call(`/api/agents/${a}`)).json()).unread).toBe(2);
   expect((await (await call("/api/groups")).json()).map((one: { unread: number }) => one.unread)).toEqual([0, 1]);
@@ -189,6 +135,36 @@ test("categories, group chats and unread counts", async () => {
 
 });
 
+test("users only ever see their own agents, threads and messages, and a new key retires the old one", async () => {
+
+  const { addGroupMessage } = await import("../Store");
+  const other = issueKey("other");
+  const as = (key: string, path: string, init: RequestInit = {}) => fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" } });
+  const make = async (key: string, name: string) => (await (await as(key, "/api/agents", { method: "POST", body: JSON.stringify({ name, modelId: "model-1" }) })).json()).id as number;
+
+  // a name only has to be unique per user
+  const [mine, theirs] = [await make(TOKEN, "Private"), await make(other, "Private")];
+
+  expect(theirs).toBeNumber();
+  expect((await (await as(other, "/api/agents")).json()).map((agent: { id: number }) => agent.id)).toEqual([theirs]);
+  expect((await as(other, `/api/agents/${mine}`)).status).toBe(404);
+  expect((await as(other, `/api/agents/${mine}`, { method: "DELETE" })).status).toBe(404);
+  expect((await as(other, `/api/agents/${mine}/memory`, { method: "PUT", body: JSON.stringify({ text: "x" }) })).status).toBe(404);
+  expect((await as(other, "/api/groups", { method: "POST", body: JSON.stringify({ members: [mine, theirs] }) })).status).toBe(400);
+  expect((await as(other, "/api/read", { method: "POST", body: JSON.stringify({ agent: mine }) })).status).toBe(404);
+
+  addGroupMessage(USER, 0, "user", null, "Everyone private");
+
+  expect(await (await as(other, "/api/group")).json()).toEqual([]);
+  expect(await (await as(other, "/api/cookie")).json()).toMatchObject({ set: false });
+
+  const fresh = issueKey("other");
+
+  expect((await as(other, "/api/agents")).status).toBe(401);
+  expect((await as(fresh, "/api/agents")).status).toBe(200);
+
+});
+
 test("a time zone is saved and rejected when it is not a real one", async () => {
 
   expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "Not/AZone" }) })).status).toBe(400);
@@ -196,27 +172,12 @@ test("a time zone is saved and rejected when it is not a real one", async () => 
 
   const saved = await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "America/New_York" }) });
 
-  expect(await saved.json()).toEqual({ defaultModel: null, timezone: "America/New_York", proxy: null });
-  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: "America/New_York", proxy: null });
+  expect(await saved.json()).toEqual({ defaultModel: null, timezone: "America/New_York" });
+  expect(await (await call("/api/settings")).json()).toEqual({ defaultModel: null, timezone: "America/New_York" });
 
   const cleared = await call("/api/settings", { method: "PUT", body: JSON.stringify({ timezone: "  " }) });
 
   expect((await cleared.json()).timezone).toBe(null);
-
-});
-
-test("a proxy is saved without ever being shown back, and refused when it is not HTTP", async () => {
-
-  expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({ proxy: "socks5://proxy.example:1080" }) })).status).toBe(400);
-
-  const saved = await call("/api/settings", { method: "PUT", body: JSON.stringify({ proxy: "user:secret@proxy.example:8080" }) });
-
-  expect((await saved.json()).proxy).toBe("http://user@proxy.example:8080");
-  expect(JSON.stringify(await (await call("/api/settings")).json())).not.toContain("secret");
-
-  const cleared = await call("/api/settings", { method: "PUT", body: JSON.stringify({ proxy: "" }) });
-
-  expect((await cleared.json()).proxy).toBe(null);
 
 });
 

@@ -1,9 +1,9 @@
 import type { ServerWebSocket } from "bun";
 
-import { handBack, input, takeOver, userTab, watch, type Input, type TabAction } from "../Agent/Tools/Browser";
+import { handBack, input, reason, takeOver, userTab, watch, type Input, type TabAction } from "../Agent/Tools/Browser";
 import { getAgentById, workspaceOf } from "../Store";
 
-type Socket = ServerWebSocket<unknown>;
+type Socket = ServerWebSocket<{ userId: number }>;
 
 // a take-over left alone (phone locked, tab forgotten) must not park the agent forever
 const HOLD_MS = Number(process.env.PTS_HOLD_MS ?? 5 * 60_000);
@@ -31,9 +31,10 @@ interface View {
 
 }
 
+/** Only the known fields of a well-formed input, so nothing else from the socket reaches the page. */
 function validInput(event: unknown): Input | null {
 
-  const e = event as Record<string, unknown> | null;
+  const e = event as Record<string, any> | null;
   const unit = (...values: unknown[]) => values.every((value) => typeof value === "number" && value >= 0 && value <= 1);
   const delta = (...values: unknown[]) => values.every((value) => typeof value === "number" && Math.abs(value) <= 10);
   const short = (value: unknown, max: number) => typeof value === "string" && value.length > 0 && value.length <= max;
@@ -42,23 +43,23 @@ function validInput(event: unknown): Input | null {
 
     case "click":
 
-      return unit(e.x, e.y) ? { kind: "click", x: e.x as number, y: e.y as number } : null;
+      return unit(e.x, e.y) ? { kind: "click", x: e.x, y: e.y } : null;
 
     case "scroll":
 
-      return unit(e.x, e.y) && delta(e.dx, e.dy) ? { kind: "scroll", x: e.x as number, y: e.y as number, dx: e.dx as number, dy: e.dy as number } : null;
+      return unit(e.x, e.y) && delta(e.dx, e.dy) ? { kind: "scroll", x: e.x, y: e.y, dx: e.dx, dy: e.dy } : null;
 
     case "drag":
 
-      return unit(e.x, e.y, e.toX, e.toY) ? { kind: "drag", x: e.x as number, y: e.y as number, toX: e.toX as number, toY: e.toY as number } : null;
+      return unit(e.x, e.y, e.toX, e.toY) ? { kind: "drag", x: e.x, y: e.y, toX: e.toX, toY: e.toY } : null;
 
     case "text":
 
-      return short(e.text, 20_000) ? { kind: "text", text: e.text as string } : null;
+      return short(e.text, 20_000) ? { kind: "text", text: e.text } : null;
 
     case "key":
 
-      return short(e.key, 40) ? { kind: "key", key: e.key as string } : null;
+      return short(e.key, 40) ? { kind: "key", key: e.key } : null;
 
     case "back":
 
@@ -67,12 +68,6 @@ function validInput(event: unknown): Input | null {
   }
 
   return null;
-
-}
-
-function reason(err: unknown): string {
-
-  return err instanceof Error ? err.message.split("\n")[0] : String(err);
 
 }
 
@@ -91,69 +86,48 @@ export class Live {
 
   message(ws: Socket, message: LiveMessage) {
 
+    const view = this.views.get(ws);
+    const mine = view && this.holders.get(view.agentId)?.ws === ws;
+    const fail = (err: unknown) => this.send(ws, { type: "browser", agentId: view?.agentId, error: reason(err) });
+
     if (message.live === "watch") {
 
       this.watch(ws, message.agentId);
-      return;
 
-    }
-
-    if (message.live === "unwatch") {
+    } else if (message.live === "unwatch") {
 
       this.unwatch(ws);
-      return;
 
-    }
-
-    const view = this.views.get(ws);
-
-    if (!view) {
-
-      return;
-
-    }
-
-    if (message.live === "take") {
+    } else if (view && message.live === "take") {
 
       const size = Number.isFinite(message.width) && Number.isFinite(message.height) ? { width: message.width!, height: message.height! } : undefined;
 
-      this.take(ws, view, size);
-      return;
+      clearTimeout(this.holders.get(view.agentId)?.timer);
 
-    }
+      // the latest device to ask gets the browser; the one that had it drops back to watching
+      this.holders.set(view.agentId, { ws, workspace: view.workspace, timer: setTimeout(() => this.give(view.agentId), HOLD_MS) });
+      takeOver(view.workspace, size).catch(fail);
+      this.status(view.agentId);
 
-    if (this.holders.get(view.agentId)?.ws !== ws) {
-
-      return;
-
-    }
-
-    if (message.live === "give") {
+    } else if (mine && message.live === "give") {
 
       this.give(view.agentId);
-      return;
 
-    }
-
-    if (message.live === "tab") {
-
-      if (["switch", "close", "new"].includes(message.action) && (message.action === "new" || Number.isInteger(message.id))) {
-
-        this.renew(view.agentId, HOLD_MS);
-        userTab(view.workspace, message.action, message.id).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
-
-      }
-
-      return;
-
-    }
-
-    const event = validInput(message.event);
-
-    if (event) {
+    } else if (mine && message.live === "tab" && ["switch", "close", "new"].includes(message.action) && (message.action === "new" || Number.isInteger(message.id))) {
 
       this.renew(view.agentId, HOLD_MS);
-      input(view.workspace, event).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
+      userTab(view.workspace, message.action, message.id).catch(fail);
+
+    } else if (mine && message.live === "input") {
+
+      const event = validInput(message.event);
+
+      if (event) {
+
+        this.renew(view.agentId, HOLD_MS);
+        input(view.workspace, event).catch(fail);
+
+      }
 
     }
 
@@ -204,7 +178,8 @@ export class Live {
 
     this.unwatch(ws);
 
-    if (!agent) {
+    // another user's agent is as good as missing
+    if (agent?.userId !== ws.data.userId) {
 
       return;
 
@@ -257,17 +232,6 @@ export class Live {
       this.give(view.agentId);
 
     }
-
-  }
-
-  /** The latest device to ask gets the browser; the one that had it drops back to watching. */
-  private take(ws: Socket, view: View, size?: { width: number; height: number }) {
-
-    clearTimeout(this.holders.get(view.agentId)?.timer);
-    this.holders.set(view.agentId, { ws, workspace: view.workspace, timer: setTimeout(() => this.give(view.agentId), HOLD_MS) });
-
-    takeOver(view.workspace, size).catch((err) => this.send(ws, { type: "browser", agentId: view.agentId, error: reason(err) }));
-    this.status(view.agentId);
 
   }
 

@@ -1,39 +1,53 @@
-// Drives agents from a terminal, no server needed: bun pts/cli.ts <command>
+// Run on the server: hands out sign-in keys, and drives agents from a terminal without the server. bun pts/cli.ts <command>
 
 import { BoodleClient } from "../sdk/index";
 
 import { closeAll, setProxy, setZone } from "./Agent/Tools/Browser";
 import { runAgent, type RunEvent } from "./Agent/Runner";
-import { createAgent, getAgent, HOME, listAgents, listEvents, readSetting, workspaceOf } from "./Store";
+import { createAgent, deleteUser, getAgent, getUser, HOME, issueKey, listAgents, listEvents, listUsers, readSetting, userDir, workspaceOf, type User } from "./Store";
 
 const USAGE = `usage:
-  bun pts/cli.ts models
-  bun pts/cli.ts new <name> <modelId> [persona...]
-  bun pts/cli.ts list
-  bun pts/cli.ts send <name> <task...>
-  bun pts/cli.ts log <name>`;
+  bun pts/cli.ts key <user>       make the user, or give them a new key; the old one stops working
+  bun pts/cli.ts remove <user>    delete the user and everything of theirs but their files
+  bun pts/cli.ts list             users and their agents
+  bun pts/cli.ts models <user>
+  bun pts/cli.ts new <user> <name> <modelId> [persona...]
+  bun pts/cli.ts send <user> <name> <task...>
+  bun pts/cli.ts log <user> <name>`;
 
-function client(): BoodleClient {
+function userNamed(name: string | undefined): User {
 
-  const cookie = process.env.BOODLE_COOKIE?.trim();
+  const user = name ? getUser(name) : null;
 
-  if (!cookie) {
+  if (!user) {
 
-    throw new Error("BOODLE_COOKIE is not set (put it in .env at the repo root)");
+    throw new Error(`No user named ${name ?? "(none)"}. Try: bun pts/cli.ts list`);
 
   }
 
-  return new BoodleClient({ cookie });
+  return user;
 
 }
 
-function agentNamed(name: string | undefined) {
+function client(user: User): BoodleClient {
 
-  const agent = name ? getAgent(name) : null;
+  if (!user.cookie) {
+
+    throw new Error(`${user.name} has not connected Boodle yet; they paste their cookie in the app`);
+
+  }
+
+  return new BoodleClient({ cookie: user.cookie });
+
+}
+
+function agentNamed(user: User, name: string | undefined) {
+
+  const agent = name ? getAgent(user.id, name) : null;
 
   if (!agent) {
 
-    throw new Error(`No agent named ${name ?? "(none)"}. Try: bun pts/cli.ts list`);
+    throw new Error(`${user.name} has no agent named ${name ?? "(none)"}. Try: bun pts/cli.ts list`);
 
   }
 
@@ -45,9 +59,54 @@ const [command, ...args] = process.argv.slice(2);
 
 switch (command) {
 
+  case "key": {
+
+    if (!args[0]) {
+
+      throw new Error(USAGE);
+
+    }
+
+    console.log(`${args[0]} signs in with this key. It is shown once; run this again for a new one.\n\n  ${issueKey(args[0])}\n`);
+
+    break;
+
+  }
+
+  case "remove": {
+
+    const user = userNamed(args[0]);
+
+    deleteUser(user.id);
+    console.log(`removed ${user.name}. Their workspaces are still in ${userDir(user.id)}, and their Prometheus bots in their Boodle account.`);
+
+    break;
+
+  }
+
+  case "list": {
+
+    console.log(`home: ${HOME}`);
+
+    for (const user of listUsers()) {
+
+      console.log(`\n${user.name}${user.cookie ? "" : "  (Boodle not connected)"}`);
+
+      for (const agent of listAgents(user.id)) {
+
+        console.log(`  ${agent.name}  model ${agent.modelId}${agent.botAssistantId ? `  bot ${agent.botAssistantId}` : ""}`);
+
+      }
+
+    }
+
+    break;
+
+  }
+
   case "models": {
 
-    for (const model of await client().listCustomModels()) {
+    for (const model of await client(userNamed(args[0])).listCustomModels()) {
 
       console.log(`${model.id}  ${model.name}`);
 
@@ -59,7 +118,7 @@ switch (command) {
 
   case "new": {
 
-    const [name, modelId, ...persona] = args;
+    const [name, modelId, ...persona] = args.slice(1);
 
     if (!name || !modelId) {
 
@@ -67,7 +126,7 @@ switch (command) {
 
     }
 
-    const agent = createAgent(name, modelId, persona.join(" "));
+    const agent = createAgent(userNamed(args[0]).id, name, modelId, persona.join(" "));
 
     console.log(`created ${agent.name} → ${workspaceOf(agent)}`);
 
@@ -75,24 +134,11 @@ switch (command) {
 
   }
 
-  case "list": {
-
-    console.log(`home: ${HOME}`);
-
-    for (const agent of listAgents()) {
-
-      console.log(`${agent.name}  model ${agent.modelId}${agent.botAssistantId ? `  bot ${agent.botAssistantId}` : ""}`);
-
-    }
-
-    break;
-
-  }
-
   case "send": {
 
-    const [name, ...task] = args;
-    const agent = agentNamed(name);
+    const user = userNamed(args[0]);
+    const agent = agentNamed(user, args[1]);
+    const task = args.slice(2);
 
     if (!task.length) {
 
@@ -124,9 +170,9 @@ switch (command) {
 
     };
 
-    await setProxy(readSetting("proxy"));
-    await setZone(readSetting("timezone"));
-    await runAgent(client(), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen, ask: async (question, kind) => (kind === "question" ? (prompt(`\n${question}\n>`) ?? false) : confirm(`\n${question}\nAllow?`)) });
+    await setProxy(process.env.PTS_PROXY?.trim() || null);
+    await setZone(userDir(user.id), readSetting(user.id, "timezone"));
+    await runAgent(client(user), agent, task.join(" "), { signal: controller.signal, takeNotes: () => [], listen, ask: async (question, kind) => (kind === "question" ? (prompt(`\n${question}\n>`) ?? false) : confirm(`\n${question}\nAllow?`)) });
 
     // the browser keeps the process alive until its contexts close
     await closeAll();
@@ -137,7 +183,9 @@ switch (command) {
 
   case "log": {
 
-    for (const event of listEvents(agentNamed(args[0]).id)) {
+    const user = userNamed(args[0]);
+
+    for (const event of listEvents(agentNamed(user, args[1]).id)) {
 
       console.log(`── ${event.kind}  ${new Date(event.at).toISOString()} ──\n${event.text}\n`);
 

@@ -3,7 +3,7 @@ import { BoodleClient, ChatSession } from "../../sdk/index";
 import { look, pageUrl, pinned } from "./Tools/Browser";
 import type { Reply, WaitKind } from "./Queue";
 import { execute } from "./Tools/Tools";
-import { botInstructions, formatResults, NUDGE, parseActions, parseQuestion, taskMessage, type Result } from "./Protocol";
+import { botInstructions, formatResults, NUDGE, parseActions, parseQuestion, taskMessage, type Action, type Result } from "./Protocol";
 import { localTime, routineBlock } from "../Features/Routines";
 import { addEvent, getAgentById, readMemory, readUserDoc, recentRuns, saveBot, trackChat, trackedChats, untrackChat, userZone, workspaceOf, type Agent, type AgentEvent } from "../Store";
 
@@ -38,11 +38,11 @@ export interface RunControl {
 
 }
 
-function clip(text: string, max = RECENT_CHARS): string {
+function clip(text: string): string {
 
   const one = text.replace(/\s+/g, " ").trim();
 
-  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+  return one.length > RECENT_CHARS ? `${one.slice(0, RECENT_CHARS - 1)}…` : one;
 
 }
 
@@ -53,29 +53,14 @@ async function ensureBot(client: BoodleClient, agent: Agent): Promise<string> {
   const hash = Bun.hash(`${agent.modelId}\n${instructions}`).toString(36);
 
   // a delete in Boodle leaves the stored id behind, so reuse it only while the bot is still listed
-  if (agent.botAssistantId && agent.botHash === hash) {
+  if (agent.botAssistantId && agent.botHash === hash && (await client.listCustomBotDrafts()).entries.some((entry) => entry.published?.id === agent.botAssistantId)) {
 
-    const { entries } = await client.listCustomBotDrafts();
-
-    if (entries.some((entry) => entry.published?.id === agent.botAssistantId)) {
-
-      return agent.botAssistantId;
-
-    }
+    return agent.botAssistantId;
 
   }
 
-  const created = await client.createCustomBot({
-
-    name: `Prometheus · ${agent.name}`,
-    modelId: agent.modelId,
-    instructions,
-    description: "Prometheus agent",
-
-  });
-
-  const published = await client.publishCustomBot(created.draft.id);
-  const assistantId = published.published?.id;
+  const created = await client.createCustomBot({ name: `Prometheus · ${agent.name}`, modelId: agent.modelId, instructions, description: "Prometheus agent" });
+  const assistantId = (await client.publishCustomBot(created.draft.id)).published?.id;
 
   if (!assistantId) {
 
@@ -83,9 +68,9 @@ async function ensureBot(client: BoodleClient, agent: Agent): Promise<string> {
 
   }
 
+  // the old bot is dead weight in the account, but losing it is not worth failing the run
   if (agent.botDraftId) {
 
-    // the old bot is dead weight in the account, but losing it is not worth failing the run
     await client.deleteCustomBot(agent.botDraftId).catch(() => {});
 
   }
@@ -101,22 +86,14 @@ export async function dropChats(client: BoodleClient, ids: string[]) {
 
   await Promise.all(ids.map(async (id) => {
 
-    try {
+    // already gone, or left behind on an account whose cookie was swapped out; retrying cannot help
+    const done = await client.deleteChat(id).then(() => true, (err) => / (403|404) /.test(String(err)));
 
-      await client.deleteChat(id);
+    if (done) {
 
-    } catch (err) {
-
-      // already gone, or left behind on an account whose cookie was swapped out; retrying cannot help
-      if (!/ (403|404) /.test(String(err))) {
-
-        return;
-
-      }
+      untrackChat(id);
 
     }
-
-    untrackChat(id);
 
   }));
 
@@ -131,6 +108,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
   const { signal, listen } = control;
   const runId = crypto.randomUUID();
   const cwd = workspaceOf(agent);
+  const zone = userZone(agent.userId);
 
   const record = (kind: AgentEvent["kind"], text: string) => {
 
@@ -143,7 +121,137 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
   };
 
+  const check = () => {
+
+    if (signal.aborted) {
+
+      throw new Error("aborted");
+
+    }
+
+  };
+
+  const wait = async (question: string, kind?: WaitKind) => {
+
+    const reply = await control.ask(question, kind);
+
+    check();
+
+    return reply;
+
+  };
+
   let notified = false;
+
+  /** One block that is not <done>. A failed result stops the blocks behind it, except a refused <notify>. */
+  async function step(action: Action): Promise<Result> {
+
+    const body = action.body.trim();
+    const line = body.split("\n")[0];
+    const pass = (text: string): Result => ({ verb: action.verb, ok: true, text });
+    const fail = (text: string): Result => ({ verb: action.verb, ok: false, text });
+
+    switch (action.verb) {
+
+      case "say":
+
+        record("say", body);
+
+        return pass("shown to the user");
+
+      case "notify":
+
+        // one buzz per task: a second would be the agent narrating, which is what the limit exists to stop
+        if (notified || !line) {
+
+          return fail(notified ? "You already notified the user this task. Put the rest in <done>." : "notify needs one line to send.");
+
+        }
+
+        notified = true;
+        record("notify", line);
+
+        return pass("sent to the user's phone");
+
+      case "routine":
+
+        return { verb: action.verb, ...routineBlock(agent, action.body) };
+
+      case "submit": {
+
+        if (!action.path || !body) {
+
+          return fail("submit needs the button's ref on the tag and one line saying what it sends:\n\n  <submit e31>\n  Send the reply to Sam\n  </submit>");
+
+        }
+
+        const question = `${body}\n${await pageUrl(cwd)}`;
+
+        record("ask", question);
+
+        const allowed = (await wait(question)) === true;
+
+        record("user", allowed ? "Allowed." : "Not allowed.");
+
+        if (!allowed) {
+
+          return fail("The user did not allow this. Do not send it another way. If the task cannot go on without it, say so in <done>.");
+
+        }
+
+        return { ...(await execute({ ...action, verb: "click" }, cwd, signal, zone)), verb: "submit" };
+
+      }
+
+      case "ask": {
+
+        if (!parseQuestion(body).prompt) {
+
+          return fail("ask needs the question on its first line, then any choices one per line:\n\n  <ask>\n  Which one?\n  - The first\n  - The second\n  </ask>");
+
+        }
+
+        record("question", body);
+
+        const reply = await wait(body, "question");
+        const answer = typeof reply === "string" ? reply.trim() : "";
+
+        record("user", answer || "Skipped.");
+
+        return pass(answer ? `The user answered: ${answer}` : "The user skipped the question. Decide it yourself and keep going.");
+
+      }
+
+      case "handoff": {
+
+        if (!line) {
+
+          return fail("handoff needs one line saying what the user should do in the browser.");
+
+        }
+
+        record("handoff", line);
+
+        const finished = (await pinned(cwd, () => wait(line, "handoff"))) === true;
+
+        record("user", finished ? "Done." : "Skipped.");
+
+        if (!finished) {
+
+          return fail("The user did not do it. If the task cannot go on without it, say so in <done>.");
+
+        }
+
+        // the page first, like every browser result, so the chat shows where the user left off
+        return pass(`${await look(cwd, signal).catch((err: Error) => err.message)}\n\n[harness]\nThe user handed the browser back; this is the page as they left it.`);
+
+      }
+
+    }
+
+    return execute(action, cwd, signal, zone);
+
+  }
 
   const recent = recentRuns(agent.id).map((run) => `- ${new Date(run.at).toISOString().slice(0, 16).replace("T", " ")} — ${clip(run.task)} → ${clip(run.outcome) || "no outcome"}`);
 
@@ -165,16 +273,12 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
     const assistantId = await ensureBot(client, agent);
 
-    if (signal.aborted) {
-
-      throw new Error("aborted");
-
-    }
+    check();
 
     // tracked before connecting, so a chat whose socket never opens is still cleaned up
     const chat = await client.createChat();
 
-    trackChat(chat.id, agent.id);
+    trackChat(chat.id, agent.id, agent.userId);
 
     session = await ChatSession.open(client, chat.id, { assistantId, refreshOnComplete: false });
 
@@ -188,18 +292,14 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
     });
 
-    let message = taskMessage({ user: readUserDoc(), memory: readMemory(agent), recent, now: `${localTime(Date.now())} (${userZone()})` }, task);
+    let message = taskMessage({ user: readUserDoc(agent.userId), memory: readMemory(agent), recent, now: `${localTime(Date.now(), zone)} (${zone})` }, task);
     let misses = 0;
 
-    for (let step = 1; step <= MAX_STEPS; step += 1) {
+    for (let turnNo = 1; turnNo <= MAX_STEPS; turnNo += 1) {
 
       const notes = control.takeNotes();
 
-      for (const note of notes) {
-
-        record("user", note);
-
-      }
+      notes.forEach((note) => record("user", note));
 
       if (notes.length) {
 
@@ -230,13 +330,12 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
       misses = 0;
 
-      const batch = actions.slice(0, MAX_ACTIONS_PER_TURN);
       const results: Result[] = [];
 
       let unseen = false;
       let heldDone = false;
 
-      for (const action of batch) {
+      for (const action of actions.slice(0, MAX_ACTIONS_PER_TURN)) {
 
         // a report written before the output came back can only guess at it
         if (action.verb === "done" && unseen) {
@@ -254,162 +353,13 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
 
         unseen ||= LOOKING.has(action.verb);
 
-        if (action.verb === "say") {
+        const result = await step(action);
 
-          record("say", action.body.trim());
-          results.push({ verb: "say", ok: true, text: "shown to the user" });
-          continue;
-
-        }
-
-        if (action.verb === "notify") {
-
-          const line = action.body.trim().split("\n")[0];
-
-          // one buzz per task: a second would be the agent narrating, which is what the limit exists to stop
-          if (notified || !line) {
-
-            results.push({ verb: "notify", ok: false, text: notified ? "You already notified the user this task. Put the rest in <done>." : "notify needs one line to send." });
-            continue;
-
-          }
-
-          notified = true;
-          record("notify", line);
-          results.push({ verb: "notify", ok: true, text: "sent to the user's phone" });
-          continue;
-
-        }
-
-        if (action.verb === "routine") {
-
-          const result = { verb: action.verb, ...routineBlock(agent.id, action.body) };
-
-          results.push(result);
-
-          if (!result.ok) {
-
-            break;
-
-          }
-
-          continue;
-
-        }
-
-        if (action.verb === "submit") {
-
-          const what = action.body.trim();
-
-          if (!action.path || !what) {
-
-            results.push({ verb: "submit", ok: false, text: "submit needs the button's ref on the tag and one line saying what it sends:\n\n  <submit e31>\n  Send the reply to Sam\n  </submit>" });
-            break;
-
-          }
-
-          const question = `${what}\n${await pageUrl(cwd)}`;
-
-          record("ask", question);
-
-          const allowed = (await control.ask(question)) === true;
-
-          if (signal.aborted) {
-
-            throw new Error("aborted");
-
-          }
-
-          record("user", allowed ? "Allowed." : "Not allowed.");
-
-          if (!allowed) {
-
-            results.push({ verb: "submit", ok: false, text: "The user did not allow this. Do not send it another way. If the task cannot go on without it, say so in <done>." });
-            break;
-
-          }
-
-        }
-
-        if (action.verb === "ask") {
-
-          const question = action.body.trim();
-
-          if (!parseQuestion(question).prompt) {
-
-            results.push({ verb: "ask", ok: false, text: "ask needs the question on its first line, then any choices one per line:\n\n  <ask>\n  Which one?\n  - The first\n  - The second\n  </ask>" });
-            break;
-
-          }
-
-          record("question", question);
-
-          const reply = await control.ask(question, "question");
-
-          if (signal.aborted) {
-
-            throw new Error("aborted");
-
-          }
-
-          const answer = typeof reply === "string" ? reply.trim() : "";
-
-          record("user", answer || "Skipped.");
-          results.push({ verb: "ask", ok: true, text: answer ? `The user answered: ${answer}` : "The user skipped the question. Decide it yourself and keep going." });
-          continue;
-
-        }
-
-        if (action.verb === "handoff") {
-
-          const what = action.body.trim().split("\n")[0];
-
-          if (!what) {
-
-            results.push({ verb: "handoff", ok: false, text: "handoff needs one line saying what the user should do in the browser." });
-            break;
-
-          }
-
-          record("handoff", what);
-
-          const finished = (await pinned(cwd, () => control.ask(what, "handoff"))) === true;
-
-          if (signal.aborted) {
-
-            throw new Error("aborted");
-
-          }
-
-          record("user", finished ? "Done." : "Skipped.");
-
-          if (!finished) {
-
-            results.push({ verb: "handoff", ok: false, text: "The user did not do it. If the task cannot go on without it, say so in <done>." });
-            break;
-
-          }
-
-          const page = await look(cwd, signal).catch((err: Error) => err.message);
-
-          // the page first, like every browser result, so the chat shows where the user left off
-          results.push({ verb: "handoff", ok: true, text: `${page}\n\n[harness]\nThe user handed the browser back; this is the page as they left it.` });
-          continue;
-
-        }
-
-        const result = await execute(action.verb === "submit" ? { ...action, verb: "click" } : action, cwd, signal, userZone());
-
-        if (signal.aborted) {
-
-          throw new Error("aborted");
-
-        }
-
+        check();
         results.push({ ...result, verb: action.verb });
 
         // a failed block usually invalidates the ones behind it; let the model look first
-        if (!result.ok) {
+        if (!result.ok && action.verb !== "notify") {
 
           break;
 
@@ -449,7 +399,7 @@ export async function runAgent(client: BoodleClient, queued: Agent, task: string
     session?.dispose();
 
     // an agent runs one task at a time, so every chat tracked for it is finished, including earlier failed deletes
-    await dropChats(client, trackedChats(agent.id));
+    await dropChats(client, trackedChats(agent.userId, agent.id));
 
   }
 

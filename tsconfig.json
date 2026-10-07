@@ -18,19 +18,10 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "forceConsistentCasingInFileNames": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": [
-        "./swe/*"
-      ]
-    }
+    "forceConsistentCasingInFileNames": true
   },
   "include": [
     "sdk/**/*",
-    "vite.config.ts",
-    "test/**/*",
-    "swe/**/*",
     "pts/**/*"
   ]
 }

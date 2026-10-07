@@ -1,6 +1,6 @@
 import { AppWindow, Bell, Calendar, Check, ChevronRight, Globe, SlidersHorizontal, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Component, createRef } from "react";
+import { Component, createRef, type ReactNode } from "react";
 
 import { Composer } from "./Composer";
 import { Button, IconButton, inputClass } from "../../Components/Controls";
@@ -72,6 +72,44 @@ class Work extends Component<{ steps: Step[]; seconds: number; live: boolean }, 
 
 }
 
+/** A card's answer, once the agent stopped waiting on it. */
+function Answered({ ok, text }: { ok: boolean; text: string }) {
+
+  return (
+
+    <div className="flex max-w-md items-start gap-3 text-dim">
+
+      {ok ? <Check size={16} className="mt-1 shrink-0" /> : <X size={16} className="mt-1 shrink-0" />}
+      <span className="text-[14px]">{text}</span>
+
+    </div>
+
+  );
+
+}
+
+/** What the agent is waiting on right now. */
+function Waiting({ label, title, children }: { label: string; title: string; children: ReactNode }) {
+
+  return (
+
+    <section aria-label={label} className="flex max-w-md flex-col gap-4 rounded-2xl bg-panel p-5">
+
+      <span className="flex flex-col gap-1.5">
+
+        <span className="text-[14px] text-dim">{label}</span>
+        <span className="font-serif text-[20px] leading-snug">{title}</span>
+
+      </span>
+
+      {children}
+
+    </section>
+
+  );
+
+}
+
 interface ChatProps {
 
   agent: Agent;
@@ -133,6 +171,7 @@ export class Chat extends Component<ChatProps> {
   renderItem(item: Item, lastAsk: string | null) {
 
     const { agent } = this.props;
+    const open = "answer" in item && item.answer === null && agent.state === "waiting" && item.key === lastAsk;
 
     switch (item.kind) {
 
@@ -190,34 +229,18 @@ export class Chat extends Component<ChatProps> {
       case "ask": {
 
         const [what, where] = item.text.split("\n");
-        const open = item.answer === null && agent.state === "waiting" && item.key === lastAsk;
 
         if (!open) {
 
-          return (
-
-            <div key={item.key} className="flex max-w-md items-start gap-3 text-dim">
-
-              {item.answer === "allowed" ? <Check size={16} className="mt-1 shrink-0" /> : <X size={16} className="mt-1 shrink-0" />}
-              <span className="text-[14px]">{item.answer === "allowed" ? "Sent with your OK" : "Not sent"} — {what}</span>
-
-            </div>
-
-          );
+          return <Answered ok={item.answer === "allowed"} text={`${item.answer === "allowed" ? "Sent with your OK" : "Not sent"} — ${what}`} />;
 
         }
 
         return (
 
-          <section key={item.key} aria-label="Approval" className="flex max-w-md flex-col gap-4 rounded-2xl bg-panel p-5">
+          <Waiting label="Send this?" title={what}>
 
-            <span className="flex flex-col gap-1.5">
-
-              <span className="text-[14px] text-dim">Send this?</span>
-              <span className="font-serif text-[20px] leading-snug">{what}</span>
-              {where && <span className="truncate font-mono text-[12px] text-dim">{where}</span>}
-
-            </span>
+            {where && <span className="-mt-2.5 truncate font-mono text-[12px] text-dim">{where}</span>}
 
             <span className="flex gap-2">
 
@@ -226,41 +249,23 @@ export class Chat extends Component<ChatProps> {
 
             </span>
 
-          </section>
+          </Waiting>
 
         );
 
       }
 
-      case "handoff": {
-
-        const open = item.answer === null && agent.state === "waiting" && item.key === lastAsk;
+      case "handoff":
 
         if (!open) {
 
-          return (
-
-            <div key={item.key} className="flex max-w-md items-start gap-3 text-dim">
-
-              {item.answer === "done" ? <Check size={16} className="mt-1 shrink-0" /> : <X size={16} className="mt-1 shrink-0" />}
-              <span className="text-[14px]">{item.answer === "done" ? "Done in the browser" : "Skipped"} — {item.text}</span>
-
-            </div>
-
-          );
+          return <Answered ok={item.answer === "done"} text={`${item.answer === "done" ? "Done in the browser" : "Skipped"} — ${item.text}`} />;
 
         }
 
         return (
 
-          <section key={item.key} aria-label="Needs you" className="flex max-w-md flex-col gap-4 rounded-2xl bg-panel p-5">
-
-            <span className="flex flex-col gap-1.5">
-
-              <span className="text-[14px] text-dim">Needs you in the browser</span>
-              <span className="font-serif text-[20px] leading-snug">{item.text}</span>
-
-            </span>
+          <Waiting label="Needs you in the browser" title={item.text}>
 
             <span className="flex gap-2">
 
@@ -269,44 +274,24 @@ export class Chat extends Component<ChatProps> {
 
             </span>
 
-          </section>
+          </Waiting>
 
         );
-
-      }
 
       case "question": {
 
         const { prompt, choices, write } = parseQuestion(item.text);
-        const open = item.answer === null && agent.state === "waiting" && item.key === lastAsk;
+        const answered = item.answer !== null && item.answer !== "Skipped.";
 
         if (!open) {
 
-          const answered = item.answer !== null && item.answer !== "Skipped.";
-
-          return (
-
-            <div key={item.key} className="flex max-w-md items-start gap-3 text-dim">
-
-              {answered ? <Check size={16} className="mt-1 shrink-0" /> : <X size={16} className="mt-1 shrink-0" />}
-              <span className="text-[14px]">{prompt} — {answered ? item.answer : "Not answered"}</span>
-
-            </div>
-
-          );
+          return <Answered ok={answered} text={`${prompt} — ${answered ? item.answer : "Not answered"}`} />;
 
         }
 
         return (
 
-          <section key={item.key} aria-label="Question" className="flex max-w-md flex-col gap-4 rounded-2xl bg-panel p-5">
-
-            <span className="flex flex-col gap-1.5">
-
-              <span className="text-[14px] text-dim">Question</span>
-              <span className="font-serif text-[20px] leading-snug">{prompt}</span>
-
-            </span>
+          <Waiting label="Question" title={prompt}>
 
             {choices.length > 0 && (
 
@@ -322,7 +307,7 @@ export class Chat extends Component<ChatProps> {
 
             <Button onClick={() => this.props.onAnswer(false)}>Skip</Button>
 
-          </section>
+          </Waiting>
 
         );
 

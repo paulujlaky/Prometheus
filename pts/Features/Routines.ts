@@ -84,8 +84,7 @@ export function isTimeZone(zone: string): boolean {
 
   try {
 
-    Intl.DateTimeFormat("en-US", { timeZone: zone });
-    return true;
+    return Boolean(Intl.DateTimeFormat("en-US", { timeZone: zone }));
 
   } catch {
 
@@ -100,14 +99,9 @@ const clocks = new Map<string, Intl.DateTimeFormat>();
 /** The wall clock at `at` in `zone`. */
 export function clockOf(at: number, zone: string) {
 
-  let format = clocks.get(zone);
+  const format = clocks.get(zone) ?? new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", weekday: "short", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
 
-  if (!format) {
-
-    format = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", weekday: "short", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
-    clocks.set(zone, format);
-
-  }
+  clocks.set(zone, format);
 
   const parts = Object.fromEntries(format.formatToParts(at).map((part) => [part.type, part.value]));
 
@@ -150,16 +144,16 @@ export function nextRun(cron: Cron, zone: string, after: number): number | null 
 }
 
 /** How the agent and its notes read a time: on the user's clock, with the zone's short name. */
-export function localTime(at: number, zone = userZone()): string {
+export function localTime(at: number, zone: string): string {
 
   return new Date(at).toLocaleString("en-US", { timeZone: zone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 
 }
 
 /** When a routine next fires; null for watches and paused ones. */
-export function nextAt(routine: Routine, now = Date.now()): number | null {
+export function nextAt(routine: Routine, zone: string, now = Date.now()): number | null {
 
-  return routine.kind === "schedule" && routine.enabled ? nextRun(parseCron(routine.spec), userZone(), now) : null;
+  return routine.kind === "schedule" && routine.enabled ? nextRun(parseCron(routine.spec), zone, now) : null;
 
 }
 
@@ -236,7 +230,7 @@ export async function observe(routine: Routine, agent: Agent): Promise<string> {
 
   }
 
-  const { output, exitCode } = await runShell(routine.target, workspaceOf(agent), undefined, CHECK_TIMEOUT_MS, userZone());
+  const { output, exitCode } = await runShell(routine.target, workspaceOf(agent), undefined, CHECK_TIMEOUT_MS, userZone(agent.userId));
 
   return `exit ${exitCode}\n${output}`.slice(0, MAX_OUTPUT);
 
@@ -248,20 +242,7 @@ export function lineChanges(before: string, after: string): string {
   const old = new Set(before.split("\n"));
   const now = new Set(after.split("\n"));
 
-  const section = (title: string, lines: string[]) => {
-
-    if (!lines.length) {
-
-      return "";
-
-    }
-
-    const shown = lines.slice(0, MAX_DIFF_LINES).map((line) => `  ${line}`).join("\n");
-    const more = lines.length > MAX_DIFF_LINES ? `\n  ... ${lines.length - MAX_DIFF_LINES} more` : "";
-
-    return `${title}:\n${shown}${more}`;
-
-  };
+  const section = (title: string, lines: string[]) => lines.length ? `${title}:\n${lines.slice(0, MAX_DIFF_LINES).map((line) => `  ${line}`).join("\n")}${lines.length > MAX_DIFF_LINES ? `\n  ... ${lines.length - MAX_DIFF_LINES} more` : ""}` : "";
 
   return [
 
@@ -272,25 +253,18 @@ export function lineChanges(before: string, after: string): string {
 
 }
 
-/** The title, or for routines made before titles, the task's first line. */
-export function routineTitle(routine: Routine): string {
+/** The title, or for a routine the agent left untitled, the task's first line. */
+export const routineTitle = (routine: Routine) => routine.title || routine.task.split("\n")[0];
 
-  return routine.title || routine.task.split("\n")[0];
+export function routineTask(routine: Routine, zone: string, changes?: string): string {
 
-}
-
-export function routineTask(routine: Routine, changes?: string): string {
-
-  // the chat reads the quoted title back out of this header; older headers have none
+  // the chat reads the quoted title back out of this header
   const named = routine.title ? ` "${routine.title}"` : "";
+  const quiet = "The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.";
 
-  if (routine.kind === "schedule") {
-
-    return `[Scheduled routine${named}: ${routine.spec}, ${localTime(Date.now())}. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}`;
-
-  }
-
-  return `[Watch${named}: ${routine.target} changed. The user is not watching; tell them only what matters, in a sentence, and <notify> only if it is worth interrupting them.]\n\n${routine.task}\n\n${changes}`;
+  return routine.kind === "schedule"
+    ? `[Scheduled routine${named}: ${routine.spec}, ${localTime(Date.now(), zone)}. ${quiet}]\n\n${routine.task}`
+    : `[Watch${named}: ${routine.target} changed. ${quiet}]\n\n${routine.task}\n\n${changes}`;
 
 }
 
@@ -299,10 +273,10 @@ const BLOCK_KEY = /^\s*(schedule|watch|every|title|task|remove)\s*:\s*(.*)$/i;
 // an agent that schedules itself in a loop would quietly multiply its own runs
 const MAX_PER_AGENT = 20;
 
-function describe(routine: Routine): string {
+function describe(routine: Routine, zone: string): string {
 
-  const next = nextAt(routine);
-  const when = routine.kind === "schedule" ? `schedule ${routine.spec}${next ? `, next ${localTime(next)}` : ""}` : `watch ${routine.target} every ${routine.spec} min`;
+  const next = nextAt(routine, zone);
+  const when = routine.kind === "schedule" ? `schedule ${routine.spec}${next ? `, next ${localTime(next, zone)}` : ""}` : `watch ${routine.target} every ${routine.spec} min`;
 
   return `${routine.id}  ${when}${routine.enabled ? "" : "  (paused)"}  — ${routineTitle(routine)}`;
 
@@ -312,7 +286,7 @@ function describe(routine: Routine): string {
  * The agent's own `<routine>` block. A bare one lists its routines; `remove: 3` deletes one;
  * `schedule:` or `watch:` + `every:` with a `title:` and `task:` creates one. Everything after `task:` is the task.
  */
-export function routineBlock(agentId: number, body: string): { ok: boolean; text: string } {
+export function routineBlock(agent: Agent, body: string): { ok: boolean; text: string } {
 
   const fields = new Map<string, string>();
 
@@ -346,7 +320,9 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
 
   }
 
-  const mine = listRoutines(agentId);
+  const zone = userZone(agent.userId);
+  const mine = listRoutines(agent.id);
+  const list = mine.map((routine) => describe(routine, zone)).join("\n");
 
   if (fields.has("remove")) {
 
@@ -354,7 +330,7 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
 
     if (!routine) {
 
-      return { ok: false, text: `You have no routine ${fields.get("remove")}. Yours:\n${mine.map(describe).join("\n") || "none"}` };
+      return { ok: false, text: `You have no routine ${fields.get("remove")}. Yours:\n${list || "none"}` };
 
     }
 
@@ -366,7 +342,7 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
 
   if (!fields.has("schedule") && !fields.has("watch")) {
 
-    return { ok: true, text: mine.length ? mine.map(describe).join("\n") : "You have no routines." };
+    return { ok: true, text: list || "You have no routines." };
 
   }
 
@@ -400,7 +376,7 @@ export function routineBlock(agentId: number, body: string): { ok: boolean; text
 
   }
 
-  return { ok: true, text: `created routine ${describe(createRoutine(agentId, { kind, spec, target, title, task: text }))}` };
+  return { ok: true, text: `created routine ${describe(createRoutine(agent.id, { kind, spec, target, title, task: text }), zone)}` };
 
 }
 
@@ -430,7 +406,7 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
       if (routine.lastOutput !== null && output !== routine.lastOutput) {
 
-        wake(agent, routineTask(routine, lineChanges(routine.lastOutput, output)));
+        wake(agent, routineTask(routine, userZone(agent.userId), lineChanges(routine.lastOutput, output)));
 
       }
 
@@ -450,7 +426,6 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
   const tick = () => {
 
     const now = Date.now();
-    const zone = userZone();
 
     for (const routine of listRoutines()) {
 
@@ -469,6 +444,7 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
         if (routine.kind === "schedule") {
 
+          const zone = userZone(agent.userId);
           const cron = parseCron(routine.spec);
           const key = `${routine.spec} ${zone}`;
 
@@ -486,7 +462,7 @@ export function startScheduler(wake: (agent: Agent, task: string) => void) {
 
             console.log(`routine ${routine.id} fired for ${agent.name}`);
             markRoutine(routine.id, null, now);
-            wake(agent, routineTask(routine));
+            wake(agent, routineTask(routine, zone));
             plan.at = nextRun(cron, zone, now);
 
           }
