@@ -5,7 +5,7 @@ A multi-user always-on-agent server built on-top of the Boodlebox semi-public AP
 ## Setup
 
 ```bash
-bash pts/server/setup.sh
+bash server/setup.sh
 ```
 
 Be sure to set the full, required browser `Cookie` header. Otherwise, nothing will work. Obviously...

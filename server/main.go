@@ -313,7 +313,7 @@ func clientOf(user *store.User) (*sdk.Client, error) {
 
 }
 
-// webDir is the built PWA: PTS_WEB, else pts/web/dist found from the working directory or the binary.
+// webDir is the built PWA: PTS_WEB, else web/dist found from the working directory or the binary.
 func webDir() string {
 
 	if dir := os.Getenv("PTS_WEB"); dir != "" {
@@ -322,10 +322,10 @@ func webDir() string {
 
 	}
 
-	// run from the repository root, or from pts/server
-	candidates := []string{filepath.Join("pts", "web", "dist"), filepath.Join("..", "web", "dist")}
+	// run from the repository root, or from server
+	candidates := []string{filepath.Join("web", "dist"), filepath.Join("..", "web", "dist")}
 
-	// the binary is pts/server/bin/pts, two folders below the pts/web it serves
+	// the binary is server/bin/pts, two folders below the repository that holds web
 	if exe, err := os.Executable(); err == nil {
 
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "..", "..", "web", "dist"))

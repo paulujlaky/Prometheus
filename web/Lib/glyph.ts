@@ -1,4 +1,4 @@
-// An agent's mascot: one shape in one pastel, stored as "shape:color". The server checks the same sets in pts/server/glyph.
+// An agent's mascot: one shape in one pastel, stored as "shape:color". The server checks the same sets in server/glyph.
 
 export const SHAPES = ["flame", "spark", "orbit", "ember", "prism", "comet", "wave", "bloom"] as const;
 export const COLORS = ["peach", "butter", "mint", "sky", "lilac", "rose", "sand", "frost"] as const;

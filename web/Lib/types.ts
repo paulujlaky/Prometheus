@@ -1,4 +1,4 @@
-// What the server sends: these mirror the JSON of pts/server/store, field for field.
+// What the server sends: these mirror the JSON of server/store, field for field.
 
 export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "notify" | "ask" | "question" | "handoff" | "done" | "error";
 

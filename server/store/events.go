@@ -21,7 +21,7 @@ const (
 	KindError EventKind = "error"
 )
 
-// AgentEvent is sent to the PWA as it is, so its JSON names are the ones in pts/web/Lib/types.ts.
+// AgentEvent is sent to the PWA as it is, so its JSON names are the ones in web/Lib/types.ts.
 type AgentEvent struct {
 
 	ID int64 `json:"id"`

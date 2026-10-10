@@ -25,10 +25,10 @@ func init() {
 
 	godotenv.Load(".env")
 
-	// run from pts/server, the settings are still the repository's, two folders up beside the PWA's pts/web
+	// run from server, the settings are still the repository's, one folder up beside web
 	if _, err := os.Stat(filepath.Join("..", "web", "vite.config.ts")); err == nil {
 
-		godotenv.Load(filepath.Join("..", "..", ".env"))
+		godotenv.Load(filepath.Join("..", ".env"))
 
 	}
 

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { parseActions, parseQuestion } from "../../web/Lib/protocol";
 
-// these mirror pts/tests/tools/tools_test.go: the app must split a reply exactly as the server did, or steps and results misalign
+// these mirror tests/tools/tools_test.go: the app must split a reply exactly as the server did, or steps and results misalign
 
 test("an unclosed short block ends where the next block opens", () => {
 

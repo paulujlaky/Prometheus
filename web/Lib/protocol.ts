@@ -1,4 +1,4 @@
-// The agents' block protocol, read the way pts/server/agent/protocol reads it, so each block lines up with its result.
+// The agents' block protocol, read the way server/agent/protocol reads it, so each block lines up with its result.
 
 export const VERBS = ["ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "tab", "submit", "handoff", "ask", "routine", "say", "notify", "done"] as const;
 

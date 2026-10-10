@@ -814,7 +814,7 @@ func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
 
 		if _, err := os.Stat(index); err != nil {
 
-			http.Error(w, "The PWA is not built yet. From pts/web: bun run pts:web", http.StatusNotFound)
+			http.Error(w, "The PWA is not built yet. From web: bun run pts:web", http.StatusNotFound)
 
 			return
 

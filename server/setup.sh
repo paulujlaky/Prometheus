@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Installs or updates pts on a Debian or Ubuntu server: bash pts/server/setup.sh
+# Installs or updates pts on a Debian or Ubuntu server: bash server/setup.sh
 
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/.."
 
 GO_VERSION=1.27.2
 
@@ -59,14 +59,14 @@ fi
 
 (
 
-  cd pts/web
+  cd web
   bun install
   bunx playwright install --with-deps chromium
   bun run pts:web
 
 )
 
-(cd pts/server && go build -o bin/pts .)
+(cd server && go build -o bin/pts .)
 
 # its example values are placeholders, so pts only starts once they are real
 if [ ! -f .env ]; then
@@ -78,4 +78,4 @@ if [ ! -f .env ]; then
 
 fi
 
-echo "pts is installed. Start it: pts/server/bin/pts serve, from the repository root or pts/server. Give someone a key: pts/server/bin/pts key <name>"
+echo "pts is installed. Start it: server/bin/pts serve, from the repository root or server. Give someone a key: server/bin/pts key <name>"
