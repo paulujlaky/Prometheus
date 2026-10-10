@@ -9,7 +9,7 @@ import { withMentions } from "../../Components/Glyph/Mention";
 import { Bar } from "../../Components/Layout";
 import { Memo } from "../../Components/Memo";
 
-import { parseQuestion } from "../../../Agent/Protocol";
+import { parseQuestion } from "../../Lib/protocol";
 import { AgentsContext } from "../../App/context";
 import type { Agent, AgentEvent } from "../../Lib/api";
 import { buildItems, type Item, type Step } from "../../Lib/thread";

@@ -13,7 +13,7 @@ import { Home } from "../Screens/Home/Home";
 import { NewAgent } from "../Screens/Home/NewAgent";
 import { NewGroup } from "../Screens/Home/NewGroup";
 
-import { isWaiting } from "../../Features/Group";
+import { isWaiting } from "../Lib/protocol";
 import { AgentsContext } from "./context";
 import { api, Unauthorized, type Account, type Agent, type AgentEvent, type GroupChat, type GroupMessage, type LiveChannel, type LiveCommand, type LiveEvent, type Model, type SocketMessage } from "../Lib/api";
 

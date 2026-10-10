@@ -18,7 +18,7 @@ export default defineConfig({
 
   },
 
-  // `bun run pts:dev` against a server on the default port; ws covers /api/ws
+  // `bun run pts:dev` from pts/web, against a server on the default port; ws covers /api/ws
   server: {
 
     proxy: {

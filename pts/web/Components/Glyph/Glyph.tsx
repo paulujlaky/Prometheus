@@ -2,10 +2,10 @@ import { Users } from "lucide-react";
 
 import { DRAWINGS } from "./Characters";
 
-import { parseGlyph, type Color } from "../../../Features/Glyph";
+import { parseGlyph, type Color } from "../../Lib/glyph";
 import type { Agent } from "../../Lib/api";
 
-export { COLORS, SHAPES } from "../../../Features/Glyph";
+export { COLORS, SHAPES } from "../../Lib/glyph";
 export { NAMES } from "./Characters";
 
 export const PALETTE: Record<Color, string> = {

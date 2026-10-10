@@ -1,7 +1,7 @@
 // An agent's event log, regrouped into what a person reads: their messages, the agent's words, and the work folded away.
 
-import { parseActions, type Verb } from "../../Agent/Protocol";
-import type { AgentEvent, Routine } from "../../Store";
+import { parseActions, type Verb } from "./protocol";
+import type { AgentEvent, Routine } from "./types";
 
 export interface Step {
 
@@ -58,10 +58,18 @@ function taskItem(event: AgentEvent): Item {
   const group = /^\[Group thread "(.*?)"[\s\S]*?New message from ([^:\n]+):\n\n([\s\S]*?)(?:\n\nYour <done>|$)/.exec(text);
   const routine = /^\[Scheduled routine(?: "(.*?)")?: /.exec(text);
   const watch = /^\[Watch(?: "(.*?)")?: (.*?) changed/.exec(text);
+  const direct = /^\[(Message|Reply) from ([^\]\n]+)\]\n\n([\s\S]*?)(?:\n\n\[[^\n]*\]$|$)/.exec(text);
 
   if (group) {
 
     return { kind: "note", key, text: `${group[2]} in ${group[1]}: ${group[3].trim()}` };
+
+  }
+
+  // another agent writing from its own chat, or answering what this one asked
+  if (direct) {
+
+    return { kind: "note", key, text: `${direct[2]}${direct[1] === "Reply" ? " replied" : ""}: ${direct[3].trim()}` };
 
   }
 

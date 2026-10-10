@@ -1,4 +1,4 @@
-import type { AgentEvent, GroupChat as StoredGroupChat, GroupMessage, Routine } from "../../Store";
+import type { AgentEvent, GroupChat as StoredGroupChat, GroupMessage, Routine } from "./types";
 
 export type { AgentEvent, GroupMessage, Routine };
 
@@ -16,7 +16,7 @@ export interface Agent {
   modelId: string;
   persona: string;
 
-  /** "shape:color" mascot, see Glyph.ts. */
+  /** "shape:color" mascot, see Lib/glyph.ts. */
   glyph: string;
   category: string;
 

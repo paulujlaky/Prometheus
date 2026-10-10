@@ -5,7 +5,7 @@ import { Button, inputClass, Select, Switch } from "../../Components/Controls";
 import { COLORS, Glyph, NAMES, PALETTE, SHAPES } from "../../Components/Glyph/Glyph";
 import { Bar, Confirm, Section } from "../../Components/Layout";
 
-import { parseGlyph } from "../../../Features/Glyph";
+import { parseGlyph } from "../../Lib/glyph";
 import { AgentsContext } from "../../App/context";
 import { api, type Agent, type Model, type Routine } from "../../Lib/api";
 import { Autosave } from "../../Lib/autosave";

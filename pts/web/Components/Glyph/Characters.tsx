@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Shape } from "../../../Features/Glyph";
+import type { Shape } from "../../Lib/glyph";
 
 const INK = "#141414";
 
