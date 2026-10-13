@@ -400,7 +400,7 @@ export class Chat extends Component<ChatProps, ChatState> {
 
           <div ref={this.scroller} onScroll={this.onScroll} className="min-h-0 grow overflow-y-auto">
 
-            <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] py-6 md:px-8">
+            <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] pt-6 pb-12 md:px-8">
 
               {events === undefined && <div className="text-dim">Loading…</div>}
               {events?.length === 0 && <Memo text={`${agent.name} is ready. What should it do?`} className="text-dim" />}

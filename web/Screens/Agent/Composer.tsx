@@ -281,7 +281,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
             <>
 
               <input ref={this.picker} type="file" multiple hidden onChange={(event) => { this.add([...(event.target.files ?? [])]); event.target.value = ""; }} />
-              <button type="button" aria-label="Attach files" title="Attach files" onClick={() => this.picker.current?.click()} className="flex size-10 shrink-0 items-center justify-center rounded-xl text-dim hover:text-fg"><Paperclip size={18} /></button>
+              <button type="button" aria-label="Attach files" title="Attach files" onClick={() => this.picker.current?.click()} className="mb-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl text-dim hover:text-fg"><Paperclip size={18} /></button>
 
             </>
 
@@ -289,7 +289,7 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
           <label className="sr-only" htmlFor="composer">{this.props.placeholder}</label>
           <textarea ref={this.field} id="composer" rows={1} value={text} onChange={(event) => this.setState({ text: event.target.value }, this.track)} onKeyDown={this.onKeyDown} onKeyUp={(event) => (event.key.startsWith("Arrow") && !suggestions.length) && this.track()} onClick={this.track} onPaste={this.onPaste} onBlur={() => this.setState({ query: null })} placeholder={this.props.placeholder} className="max-h-[45dvh] min-w-0 grow resize-none bg-transparent py-2.5 text-[16px] leading-normal text-fg outline-none placeholder:text-dim" />
-          <button type="submit" aria-label="Send" disabled={(!text.trim() && !files.length) || sending} className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-fg text-ink disabled:opacity-30"><ArrowUp size={18} strokeWidth={2} /></button>
+          <button type="submit" aria-label="Send" disabled={(!text.trim() && !files.length) || sending} className="mb-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl bg-fg text-ink disabled:opacity-30"><ArrowUp size={18} strokeWidth={2} /></button>
 
         </div>
 

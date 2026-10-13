@@ -105,7 +105,7 @@ export class Group extends Component<GroupProps, { confirming: boolean }> {
 
         <div className="grow overflow-y-auto">
 
-          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] py-6 md:px-8">
+          <div className="mx-auto flex max-w-4xl flex-col gap-5 px-[23px] pt-6 pb-12 md:px-8">
 
             {!messages.length && <Memo text={group.id ? `Only ${members.map((agent) => agent.name).join(", ")} see what you write here. @mention one to ask just them.` : "Everyone sees what you write here. @mention an agent to ask just them, or write to all of them at once."} className="text-dim" />}
 
