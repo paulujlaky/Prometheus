@@ -185,12 +185,17 @@ type ChatDetail struct {
 
 	Messages []Message `json:"messages"`
 
+	Knowledge []Knowledge `json:"knowledge"`
+
 }
 
 type SendOptions struct {
 
 	// AssistantID falls back to the cookie's preferred assistant.
 	AssistantID string
+
+	// KnowledgeIDs are uploaded files the model sees with this message.
+	KnowledgeIDs []string
 
 }
 
@@ -205,6 +210,18 @@ type sendRequest struct {
 	Message sendContent `json:"message"`
 
 	AssistantID string `json:"assistantId"`
+
+	KnowledgeIDs []string `json:"knowledgeIds,omitempty"`
+
+}
+
+// Knowledge is a file uploaded to Boodle, which a chat can attach so the model sees it.
+type Knowledge struct {
+
+	ID string `json:"id"`
+	Name string `json:"name"`
+
+	State string `json:"state"`
 
 }
 

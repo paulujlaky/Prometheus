@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { cardReply, parseCard, webURL, type Card } from "../../web/Lib/card";
-import { parseActions } from "../../web/Lib/protocol";
 import { buildItems } from "../../web/Lib/thread";
 import type { AgentEvent } from "../../web/Lib/types";
 
@@ -69,28 +68,20 @@ test("icon names use bounded Lucide slugs and leave unknown names available for 
 
 });
 
-test("create_agent result headers preserve later tool results, and cards do not end a run", () => {
+test("cards show in the chat and do not end a run", () => {
 
   const source = JSON.stringify(content);
-  const reply = `<create_agent>{"name":"Analyst","instructions":"Check sources"}</create_agent><card>${source}</card><read notes.md></read>`;
-
-  expect(parseActions(reply).map((action) => action.verb)).toEqual(["create_agent", "card", "read"]);
-
   const event = (id: number, kind: AgentEvent["kind"], text: string): AgentEvent => ({ id, agentId: 1, runId: "r", kind, text, at: id * 1000 });
   const items = buildItems([
 
     event(1, "task", "Investigate"),
-    event(2, "assistant", reply),
+    event(2, "step", "create_agent"),
     event(3, "card", source),
-    event(4, "result", "[create_agent ok]\ncreated agent 2: @Analyst (idle)\n\n[card ok]\nshown to the user\n\n[read failed]\nMissing file"),
+    event(4, "step", "read notes.md"),
 
   ], true);
 
   expect(items.find((item) => item.kind === "card")).toMatchObject({ text: source });
-
-  const work = items.find((item) => item.kind === "work")!;
-
-  expect(work.kind === "work" && work.live).toBe(true);
-  expect(work.kind === "work" && work.steps.map((step) => [step.verb, step.ok, step.detail])).toEqual([["create_agent", true, "created agent 2: @Analyst (idle)"], ["read", false, "Missing file"]]);
+  expect(items.find((item) => item.kind === "work")).toMatchObject({ live: true, steps: 2, current: "read notes.md" });
 
 });

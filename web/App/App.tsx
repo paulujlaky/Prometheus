@@ -474,7 +474,7 @@ export class App extends Component<{}, AppState> {
               key={agent.id}
               agent={agent}
               events={events[agent.id]}
-              onSend={(text) => api<Agent>(`/agents/${agent.id}/messages`, "POST", { text }).then(this.updateAgent)}
+              onSend={(text, files) => api<Agent>(`/agents/${agent.id}/messages`, "POST", { text, files }).then(this.updateAgent)}
               onStop={() => api(`/agents/${agent.id}/stop`, "POST").catch(this.guard)}
               onAnswer={this.answer(agent.id)}
             />

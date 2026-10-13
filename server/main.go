@@ -461,14 +461,6 @@ func send(st *store.Store, args []string) error {
 
 		}
 
-		if event.Event.Kind == store.KindAssistant {
-
-			fmt.Println()
-
-			return
-
-		}
-
 		fmt.Printf("\n── %s ──\n%s\n\n", event.Event.Kind, event.Event.Text)
 
 	}

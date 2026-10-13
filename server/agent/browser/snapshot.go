@@ -23,6 +23,17 @@ type refs struct {
 	byRef map[string]cdp.BackendNodeID
 	next int
 
+	// labels outlive a redraw, so a ref whose element was swapped out can be found again by what it said
+	labels map[string]label
+	shown []string
+
+}
+
+type label struct {
+
+	role string
+	name string
+
 }
 
 func (r *refs) reset() {
@@ -30,6 +41,68 @@ func (r *refs) reset() {
 	r.byNode = nil
 	r.byRef = nil
 	r.next = 0
+	r.labels = nil
+	r.shown = nil
+
+}
+
+func (r *refs) saw(ref, role, name string) {
+
+	if r.labels == nil {
+
+		r.labels = map[string]label{}
+
+	}
+
+	r.labels[ref] = label{role: role, name: name}
+	r.shown = append(r.shown, ref)
+
+}
+
+func plain(text string) string {
+
+	return strings.ToLower(collapse(strings.ReplaceAll(text, `"`, "")))
+
+}
+
+// labelOf is a ref's role and name as last shown, or "" for an unnamed or unknown one.
+func (p *tabPage) labelOf(ref string) string {
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if one := p.snapshot.labels[ref]; one.name != "" {
+
+		return one.role + " " + one.name
+
+	}
+
+	return ""
+
+}
+
+// labelled is every ref in the latest outline whose name, or role and name, is text.
+func (p *tabPage) labelled(text string) []string {
+
+	want := plain(text)
+	matches := []string{}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, ref := range p.snapshot.shown {
+
+		one := p.snapshot.labels[ref]
+
+		if one.name != "" && (plain(one.name) == want || plain(one.role+" "+one.name) == want) {
+
+			matches = append(matches, ref)
+
+		}
+
+	}
+
+	return matches
 
 }
 
@@ -257,6 +330,7 @@ func (r *renderer) build(t *tree, node *accessibility.Node, depth int) []item {
 	if node.BackendDOMNodeID != 0 {
 
 		built.ref = r.refs.of(node.BackendDOMNodeID)
+		r.refs.saw(built.ref, role, built.name)
 
 	}
 
@@ -517,6 +591,8 @@ func (p *tabPage) outline(ctx context.Context) (string, error) {
 
 	main := newTree(full.Nodes)
 	r := &renderer{refs: &p.snapshot, frames: frames}
+
+	p.snapshot.shown = nil
 
 	var out strings.Builder
 

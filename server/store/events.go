@@ -10,8 +10,9 @@ type EventKind string
 const (
 	KindTask EventKind = "task"
 	KindUser EventKind = "user"
-	KindAssistant EventKind = "assistant"
-	KindResult EventKind = "result"
+	KindStep EventKind = "step"
+	KindPage EventKind = "page"
+	KindRoutine EventKind = "routine"
 	KindSay EventKind = "say"
 	KindCard EventKind = "card"
 	KindNotify EventKind = "notify"

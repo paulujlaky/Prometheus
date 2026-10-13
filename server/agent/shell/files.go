@@ -12,6 +12,14 @@ import (
 // bigger than any file worth reading into the prompt, small enough that a planted one cannot exhaust the server
 const maxFile = 20_000_000
 
+// File is a workspace file's name and bytes, for handing to the browser or to Boodle.
+type File struct {
+
+	Name string
+	Data []byte
+
+}
+
 var (
 	lanesMu sync.Mutex
 	lanes = map[string]*sync.Mutex{}

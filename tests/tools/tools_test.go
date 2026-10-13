@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -169,9 +170,9 @@ func TestFileVerbs(t *testing.T) {
 
 	}
 
-	if result := run("run", "", "cat notes/plan.md"); result.OK {
+	if result := run("run", "", "cat notes/plan.md"); runtime.GOOS == "linux" && (!result.OK || !strings.Contains(result.Text, "book the venue")) {
 
-		t.Fatal("reading through the shell is refused")
+		t.Fatalf("the shell reads workspace files too %+v", result)
 
 	}
 
@@ -273,6 +274,62 @@ func TestEditClosedAroundItsPathTakesThePairsAfterIt(t *testing.T) {
 	if data, _ := os.ReadFile(filepath.Join(cwd, "plan.md")); string(data) != "- [x] book the venue\n" {
 
 		t.Fatalf("plan.md %q", data)
+
+	}
+
+}
+
+func TestUploadsLandBesideOthersAndListAndLoad(t *testing.T) {
+
+	cwd := t.TempDir()
+
+	first, err := tools.Save(cwd, `C:\Users\me\My CV.pdf`, []byte("one"))
+
+	if err != nil || first != "uploads/My CV.pdf" {
+
+		t.Fatalf("save %q %v", first, err)
+
+	}
+
+	if second, _ := tools.Save(cwd, "My CV.pdf", []byte("two")); second != "uploads/My CV-2.pdf" {
+
+		t.Fatalf("second %q", second)
+
+	}
+
+	if hidden, _ := tools.Save(cwd, "../.env", []byte("x")); hidden != "uploads/env" {
+
+		t.Fatalf("hidden %q", hidden)
+
+	}
+
+	listed := tools.List(cwd)
+
+	if len(listed) != 3 || listed[2] != (tools.Entry{Path: "uploads/My CV.pdf", Size: 3, Modified: listed[2].Modified}) {
+
+		t.Fatalf("list %+v", listed)
+
+	}
+
+	files, err := tools.Load(cwd, []string{"uploads/My CV-2.pdf"})
+
+	if err != nil || files[0].Name != "My CV-2.pdf" || string(files[0].Data) != "two" {
+
+		t.Fatalf("load %+v %v", files, err)
+
+	}
+
+	if _, err := tools.Load(cwd, []string{"../outside.txt"}); err == nil {
+
+		t.Fatal("a path outside the workspace must be refused")
+
+	}
+
+	message := protocol.Attach("Use these", []string{first, "uploads/env"})
+
+	if got := protocol.Attached(message + "\n\n[user]\nmore"); len(got) != 2 || got[1] != "uploads/env" {
+
+		t.Fatalf("attached %q", got)
 
 	}
 

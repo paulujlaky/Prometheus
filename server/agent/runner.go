@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 
 	"boombox/agent/browser"
 	"boombox/agent/protocol"
+	"boombox/agent/shell"
 	"boombox/agent/tools"
 	"boombox/config"
 	"boombox/features"
@@ -31,13 +33,27 @@ const (
 	maxActionsPerTurn = 8
 
 	recentChars = 300
+
+	// Boodle takes most of a minute to process even a small file before the model can see it
+	processWait = 3 * time.Minute
 )
 
 // StoppedText is how a run the user stopped ends.
 const StoppedText = "Stopped by the user."
 
 // verbs whose output the model has to see before it can honestly report
-var looking = map[protocol.Verb]bool{"run": true, "read": true, "grep": true, "ls": true, "open": true, "look": true, "click": true, "press": true, "tab": true, "submit": true, "handoff": true, "ask": true, "create_agent": true}
+var looking = map[protocol.Verb]bool{"run": true, "read": true, "grep": true, "ls": true, "view": true, "open": true, "look": true, "click": true, "press": true, "tab": true, "upload": true, "submit": true, "handoff": true, "ask": true, "create_agent": true}
+
+// verbs that carry their own event, so they are not steps
+var spoken = map[protocol.Verb]bool{"say": true, "notify": true, "card": true}
+
+// verbs whose result opens with the page's URL and title
+var paging = map[protocol.Verb]bool{"open": true, "look": true, "click": true, "press": true, "tab": true, "submit": true, "handoff": true}
+
+// what Boodle can show the model; anything else stays a workspace file to <read> or <run>
+var viewable = map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".pdf": true, ".doc": true, ".docx": true, ".xlsx": true, ".pptx": true, ".txt": true, ".md": true, ".csv": true, ".json": true, ".html": true}
+
+func canView(path string) bool { return viewable[strings.ToLower(filepath.Ext(path))] }
 
 var errAborted = errors.New("aborted")
 
@@ -189,6 +205,7 @@ func DropChats(st *store.Store, client ChatDeleter, ids []string) {
 type run struct {
 
 	st *store.Store
+	client *sdk.Client
 	agent store.Agent
 	control RunControl
 
@@ -197,6 +214,126 @@ type run struct {
 	zone string
 
 	notified bool
+
+	// knowledge is files uploaded to Boodle that go with the next message; page is the last page the chat was shown
+	chatID string
+	knowledge []string
+	page string
+
+}
+
+// show uploads workspace files to Boodle and waits out its processing, so the model sees them with its next message.
+func (r *run) show(paths []string) error {
+
+	files, err := shell.InLane(r.control.Ctx, r.cwd, func() ([]shell.File, error) { return tools.Load(r.cwd, paths) })
+
+	if err != nil {
+
+		return err
+
+	}
+
+	for _, file := range files {
+
+		if !canView(file.Name) {
+
+			return fmt.Errorf("%s cannot be shown to you; use <read> or <run> on it instead", file.Name)
+
+		}
+
+	}
+
+	ids := []string{}
+
+	for _, file := range files {
+
+		item, err := r.client.UploadKnowledge(r.control.Ctx, file.Name, file.Data)
+
+		if err != nil {
+
+			return err
+
+		}
+
+		ids = append(ids, item.ID)
+
+	}
+
+	if err := r.client.AttachKnowledge(r.control.Ctx, r.chatID, ids); err != nil {
+
+		return err
+
+	}
+
+	if err := r.client.WaitKnowledge(r.control.Ctx, r.chatID, ids, processWait); err != nil {
+
+		return err
+
+	}
+
+	r.knowledge = append(r.knowledge, ids...)
+
+	return nil
+
+}
+
+// attached shows the model what the user's message came with; a file that cannot be shown is still in the workspace.
+func (r *run) attached(text string) string {
+
+	paths := []string{}
+
+	for _, path := range protocol.Attached(text) {
+
+		if canView(path) {
+
+			paths = append(paths, path)
+
+		}
+
+	}
+
+	if len(paths) == 0 {
+
+		return ""
+
+	}
+
+	if err := r.show(paths); err != nil {
+
+		return "\n\n[harness]\nThe attachments are in your workspace, but could not be shown to you: " + err.Error()
+
+	}
+
+	return ""
+
+}
+
+// after records what a block left for the chat to show: the page it ended on, or the routine it made.
+func (r *run) after(action protocol.Action, result protocol.Result) {
+
+	if !result.OK {
+
+		return
+
+	}
+
+	if action.Verb == "routine" && strings.HasPrefix(result.Text, "created routine") {
+
+		r.record(store.KindRoutine, result.Text)
+
+		return
+
+	}
+
+	url, rest, _ := strings.Cut(result.Text, "\n")
+	title, _, _ := strings.Cut(rest, "\n")
+
+	if paging[action.Verb] && strings.HasPrefix(url, "http") && url != r.page {
+
+		r.page = url
+		r.record(store.KindPage, url+"\n"+title)
+
+	}
 
 }
 
@@ -298,6 +435,34 @@ func (r *run) step(action protocol.Action) (protocol.Result, error) {
 		r.record(store.KindSay, body)
 
 		return pass("shown to the user"), nil
+
+	case "view":
+
+		paths := []string{}
+
+		if action.Path != "" {
+
+			paths = append(paths, action.Path)
+
+		}
+
+		for _, line := range strings.Split(body, "\n") {
+
+			if line = strings.TrimSpace(line); line != "" {
+
+				paths = append(paths, line)
+
+			}
+
+		}
+
+		if err := r.show(paths); err != nil {
+
+			return fail(err.Error()), nil
+
+		}
+
+		return pass("attached; you see them with this message"), nil
 
 	case "notify":
 
@@ -446,7 +611,7 @@ func (r *run) step(action protocol.Action) (protocol.Result, error) {
 
 		r.record(store.KindUser, "Done.")
 
-		page, err := browser.Look(r.control.Ctx, r.cwd)
+		page, err := browser.Look(r.control.Ctx, r.cwd, "")
 
 		if err != nil {
 
@@ -475,7 +640,7 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 
 	}
 
-	r := &run{st: st, agent: agent, control: control, runID: newRunID(), cwd: st.Workspace(&agent), zone: st.UserZone(agent.UserID)}
+	r := &run{st: st, client: client, agent: agent, control: control, runID: newRunID(), cwd: st.Workspace(&agent), zone: st.UserZone(agent.UserID)}
 	ctx := control.Ctx
 
 	recentRuns, _ := st.RecentRuns(agent.ID, 6)
@@ -577,6 +742,8 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 	// tracked before connecting, so a chat whose socket never opens is still cleaned up
 	st.TrackChat(chat.ID, agent.ID, agent.UserID)
 
+	r.chatID = chat.ID
+
 	opened, err := sdk.OpenSession(ctx, client, chat.ID, sdk.SessionOptions{AssistantID: assistantID})
 
 	if err != nil {
@@ -633,7 +800,7 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 		Agents: others,
 		Now: features.LocalTime(time.Now(), r.zone) + " (" + r.zone + ")",
 
-	}, task)
+	}, task) + r.attached(task)
 
 	misses := 0
 	mentionHeld := false
@@ -667,11 +834,12 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 
 		if len(notes) > 0 {
 
-			message += "\n\n[user]\nSent while you worked:\n\n" + strings.Join(notes, "\n\n")
+			joined := strings.Join(notes, "\n\n")
+			message += "\n\n[user]\nSent while you worked:\n\n" + joined + r.attached(joined)
 
 		}
 
-		turn, err := opened.Send(ctx, message, sdk.SendOptions{AssistantID: assistantID})
+		turn, err := opened.Send(ctx, message, sdk.SendOptions{AssistantID: assistantID, KnowledgeIDs: r.knowledge})
 
 		if err != nil {
 
@@ -679,7 +847,7 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 
 		}
 
-		r.record(store.KindAssistant, turn.Text)
+		r.knowledge = nil
 
 		actions := protocol.ParseActions(turn.Text)
 
@@ -752,6 +920,12 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 
 			unseen = unseen || looking[action.Verb]
 
+			if !spoken[action.Verb] {
+
+				r.record(store.KindStep, action.Title())
+
+			}
+
 			result, err := r.step(action)
 
 			if err == nil && ctx.Err() != nil {
@@ -768,6 +942,8 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 
 			result.Verb = action.Verb
 			results = append(results, result)
+
+			r.after(action, result)
 
 			// a failed block usually invalidates the ones behind it; let the model look first
 			if !result.OK && action.Verb != "notify" {
@@ -813,8 +989,6 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 			message += fmt.Sprintf("\n\n[harness]\n%d later %s did not run; send %s again if still needed.", held, noun, pronoun)
 
 		}
-
-		r.record(store.KindResult, message)
 
 	}
 

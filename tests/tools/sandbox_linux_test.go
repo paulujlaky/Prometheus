@@ -52,6 +52,20 @@ func TestCommandsRunSandboxedInTheWorkspace(t *testing.T) {
 
 	}
 
+	// pasta's warnings about the host's resolver and IPv6 once opened every command's output
+	if strings.Contains(result.Output, "nameserver") || strings.Contains(result.Output, "IPv6") {
+
+		t.Fatalf("noise:\n%s", result.Output)
+
+	}
+
+	// the sandbox has no IPv6, so a tool that takes the first address must get an IPv4 one
+	if order := shell.Run(context.Background(), "getent ahosts localhost | head -1", cwd, 0, ""); !strings.HasPrefix(order.Output, "127.0.0.1") {
+
+		t.Fatalf("address order:\n%s", order.Output)
+
+	}
+
 	if data, _ := os.ReadFile(filepath.Join(cwd, "made.txt")); string(data) != "hi\n" {
 
 		t.Fatalf("made.txt %q", data)

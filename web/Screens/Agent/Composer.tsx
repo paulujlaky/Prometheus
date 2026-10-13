@@ -1,6 +1,6 @@
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Paperclip, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Component, createRef, type KeyboardEvent } from "react";
+import { Component, createRef, type ClipboardEvent, type KeyboardEvent } from "react";
 
 import { colorOf, Glyph } from "../../Components/Glyph/Glyph";
 
@@ -10,13 +10,17 @@ import type { Agent } from "../../Lib/api";
 interface ComposerProps {
 
   placeholder: string;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, files: File[]) => Promise<void>;
+
+  /** Whether files can go with a message. */
+  attach?: boolean;
 
 }
 
 interface ComposerState {
 
   text: string;
+  files: File[];
   sending: boolean;
 
   /** The @word being typed at the caret, while it could still become a mention. */
@@ -27,14 +31,18 @@ interface ComposerState {
 
 const MENTION_AT_CARET = /(?:^|\s)@([\w-]*)$/;
 
+// the server refuses more, since the agent could not read it whole
+const MAX_FILE = 20_000_000;
+
 export class Composer extends Component<ComposerProps, ComposerState> {
 
   static contextType = AgentsContext;
   declare context: Agent[];
 
-  state: ComposerState = { text: "", sending: false, query: null, active: 0 };
+  state: ComposerState = { text: "", files: [], sending: false, query: null, active: 0 };
 
   private field = createRef<HTMLTextAreaElement>();
+  private picker = createRef<HTMLInputElement>();
   private observer: ResizeObserver | undefined;
 
   componentDidMount() {
@@ -115,11 +123,38 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
   };
 
+  /** Adds files to the next message; the chat calls this for a drop. */
+  add = (files: File[]) => {
+
+    const big = files.filter((file) => file.size > MAX_FILE);
+
+    if (big.length) {
+
+      alert(`${big.map((file) => file.name).join(", ")} ${big.length === 1 ? "is" : "are"} over 20 MB.`);
+
+    }
+
+    this.setState({ files: [...this.state.files, ...files.filter((file) => file.size <= MAX_FILE)] });
+
+  };
+
+  onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+
+    if (this.props.attach && event.clipboardData.files.length) {
+
+      event.preventDefault();
+      this.add([...event.clipboardData.files]);
+
+    }
+
+  };
+
   send = async () => {
 
     const text = this.state.text.trim();
+    const { files } = this.state;
 
-    if (!text || this.state.sending) {
+    if ((!text && !files.length) || this.state.sending) {
 
       return;
 
@@ -129,8 +164,8 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
     try {
 
-      await this.props.onSend(text);
-      this.setState({ text: "" });
+      await this.props.onSend(text, files);
+      this.setState({ text: "", files: [] });
 
     } catch (err) {
 
@@ -191,10 +226,11 @@ export class Composer extends Component<ComposerProps, ComposerState> {
   render() {
 
     const suggestions = this.suggestions();
+    const { files, text, sending } = this.state;
 
     return (
 
-      <form onSubmit={(event) => { event.preventDefault(); this.send(); }} className="relative mx-3 mb-[max(12px,env(safe-area-inset-bottom))] flex md:mx-auto md:w-[calc(100%-64px)] md:max-w-[832px] shrink-0 items-end gap-2 rounded-2xl border border-line bg-panel py-1.5 pr-1.5 pl-4 focus-within:border-dim">
+      <form onSubmit={(event) => { event.preventDefault(); this.send(); }} className="relative mx-3 mb-[max(12px,env(safe-area-inset-bottom))] flex shrink-0 flex-col rounded-2xl border border-line bg-panel p-1.5 focus-within:border-dim md:mx-auto md:w-[calc(100%-64px)] md:max-w-[832px]">
 
         <AnimatePresence>
 
@@ -219,9 +255,43 @@ export class Composer extends Component<ComposerProps, ComposerState> {
 
         </AnimatePresence>
 
-        <label className="sr-only" htmlFor="composer">{this.props.placeholder}</label>
-        <textarea ref={this.field} id="composer" rows={1} value={this.state.text} onChange={(event) => this.setState({ text: event.target.value }, this.track)} onKeyDown={this.onKeyDown} onKeyUp={(event) => (event.key.startsWith("Arrow") && !suggestions.length) && this.track()} onClick={this.track} onBlur={() => this.setState({ query: null })} placeholder={this.props.placeholder} className="max-h-[45dvh] min-w-0 grow resize-none bg-transparent py-2.5 text-[16px] leading-normal text-fg outline-none placeholder:text-dim" />
-        <button type="submit" aria-label="Send" disabled={!this.state.text.trim() || this.state.sending} className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-fg text-ink disabled:opacity-30"><ArrowUp size={18} strokeWidth={2} /></button>
+        {files.length > 0 && (
+
+          <ul aria-label="Attached files" className="m-0 flex list-none flex-wrap gap-1.5 p-1.5 pb-1">
+
+            {files.map((file, index) => (
+
+              <li key={`${file.name}${index}`} className="flex max-w-56 items-center gap-1 rounded-lg bg-raised py-1 pr-1 pl-2.5 text-[13px]">
+
+                <span className="truncate">{file.name}</span>
+                <button type="button" aria-label={`Remove ${file.name}`} onClick={() => this.setState({ files: files.filter((_, other) => other !== index) })} className="flex size-6 shrink-0 items-center justify-center rounded-md text-dim hover:text-fg"><X size={13} /></button>
+
+              </li>
+
+            ))}
+
+          </ul>
+
+        )}
+
+        <div className={`flex items-end gap-2 ${this.props.attach ? "" : "pl-2.5"}`}>
+
+          {this.props.attach && (
+
+            <>
+
+              <input ref={this.picker} type="file" multiple hidden onChange={(event) => { this.add([...(event.target.files ?? [])]); event.target.value = ""; }} />
+              <button type="button" aria-label="Attach files" title="Attach files" onClick={() => this.picker.current?.click()} className="flex size-10 shrink-0 items-center justify-center rounded-xl text-dim hover:text-fg"><Paperclip size={18} /></button>
+
+            </>
+
+          )}
+
+          <label className="sr-only" htmlFor="composer">{this.props.placeholder}</label>
+          <textarea ref={this.field} id="composer" rows={1} value={text} onChange={(event) => this.setState({ text: event.target.value }, this.track)} onKeyDown={this.onKeyDown} onKeyUp={(event) => (event.key.startsWith("Arrow") && !suggestions.length) && this.track()} onClick={this.track} onPaste={this.onPaste} onBlur={() => this.setState({ query: null })} placeholder={this.props.placeholder} className="max-h-[45dvh] min-w-0 grow resize-none bg-transparent py-2.5 text-[16px] leading-normal text-fg outline-none placeholder:text-dim" />
+          <button type="submit" aria-label="Send" disabled={(!text.trim() && !files.length) || sending} className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-fg text-ink disabled:opacity-30"><ArrowUp size={18} strokeWidth={2} /></button>
+
+        </div>
 
       </form>
 

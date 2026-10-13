@@ -3,7 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,6 +14,9 @@ import (
 
 	"boombox/agent"
 	"boombox/agent/browser"
+	"boombox/agent/protocol"
+	"boombox/agent/shell"
+	"boombox/agent/tools"
 	"boombox/features"
 	"boombox/glyph"
 	"boombox/store"
@@ -503,6 +509,88 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) error {
 
 }
 
+// a file the agent could not read whole is no use to it either
+const maxUpload = 20_000_000
+
+// attachments checks that every path a message names is a file in the agent's workspace.
+func (s *Server) attachments(r *http.Request, found *store.Agent, raw any) ([]string, error) {
+
+	list, _ := raw.([]any)
+	paths := []string{}
+	workspace := s.st.Workspace(found)
+
+	for _, one := range list {
+
+		path, ok := one.(string)
+
+		if !ok {
+
+			return nil, failWith(400, "files must be workspace paths")
+
+		}
+
+		rel, err := shell.InLane(r.Context(), workspace, func() (string, error) {
+
+			rel, full, err := tools.Resolve(workspace, path)
+
+			if err == nil {
+
+				_, err = shell.ReadRegular(full, false)
+
+			}
+
+			return rel, err
+
+		})
+
+		if err != nil {
+
+			return nil, failWith(400, path+": "+err.Error())
+
+		}
+
+		paths = append(paths, rel)
+
+	}
+
+	return paths, nil
+
+}
+
+// download always saves rather than shows, so a page the agent wrote never runs on the app's own origin.
+func (s *Server) download(w http.ResponseWriter, r *http.Request, found *store.Agent, path string) error {
+
+	workspace := s.st.Workspace(found)
+
+	data, err := shell.InLane(r.Context(), workspace, func() (string, error) {
+
+		_, full, err := tools.Resolve(workspace, path)
+
+		if err != nil {
+
+			return "", err
+
+		}
+
+		return shell.ReadRegular(full, false)
+
+	})
+
+	if err != nil {
+
+		return failWith(404, err.Error())
+
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)}))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Write([]byte(data))
+
+	return nil
+
+}
+
 func (s *Server) agentRoute(w http.ResponseWriter, r *http.Request, found *store.Agent, action string) error {
 
 	switch r.Method + " " + action {
@@ -620,11 +708,27 @@ func (s *Server) agentRoute(w http.ResponseWriter, r *http.Request, found *store
 
 		}
 
-		message, err := body.filled("text")
+		text, err := body.text("text")
 
 		if err != nil {
 
 			return err
+
+		}
+
+		files, err := s.attachments(r, found, body["files"])
+
+		if err != nil {
+
+			return err
+
+		}
+
+		message := protocol.Attach(strings.TrimSpace(text), files)
+
+		if message == "" {
+
+			return failWith(400, "text is empty")
 
 		}
 
@@ -688,6 +792,41 @@ func (s *Server) agentRoute(w http.ResponseWriter, r *http.Request, found *store
 		s.queue.Stop(found.ID)
 
 		writeJSON(w, 200, s.agentView(found))
+
+		return nil
+
+	case "GET files":
+
+		if path := r.URL.Query().Get("path"); path != "" {
+
+			return s.download(w, r, found, path)
+
+		}
+
+		writeJSON(w, 200, tools.List(s.st.Workspace(found)))
+
+		return nil
+
+	case "POST files":
+
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUpload))
+
+		if err != nil {
+
+			return failWith(413, "Files are at most 20 MB")
+
+		}
+
+		workspace := s.st.Workspace(found)
+		path, err := shell.InLane(r.Context(), workspace, func() (string, error) { return tools.Save(workspace, r.URL.Query().Get("name"), data) })
+
+		if err != nil {
+
+			return err
+
+		}
+
+		writeJSON(w, 200, map[string]any{"path": path})
 
 		return nil
 

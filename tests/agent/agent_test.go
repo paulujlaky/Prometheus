@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -392,12 +393,56 @@ func scriptedBoodle(t *testing.T, replies []string) (*httptest.Server, *[]string
 		writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}})
 
 	})
+	attached := []any{}
+
 	mux.HandleFunc("GET /chat/{id}", func(w http.ResponseWriter, r *http.Request) {
 
-		writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}, "messages": []any{}})
+		mu.Lock()
+		defer mu.Unlock()
+
+		writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}, "messages": []any{}, "knowledge": attached})
 
 	})
 	mux.HandleFunc("DELETE /chat/{id}", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{}) })
+
+	uploads := 0
+
+	mux.HandleFunc("POST /knowledge/upload", func(w http.ResponseWriter, r *http.Request) {
+
+		mu.Lock()
+		uploads++
+		id := fmt.Sprintf("k-%d", uploads)
+		mu.Unlock()
+
+		writeJSON(w, map[string]any{"knowledge": map[string]any{"id": id}, "uploadUrl": "http://" + r.Host + "/s3/" + id})
+
+	})
+	mux.HandleFunc("PUT /s3/{id}", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("POST /knowledge/upload/{id}", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"id": r.PathValue("id"), "state": "Ready"}) })
+	// Boodle processes a file before the model can see it; here it is done at once
+	mux.HandleFunc("POST /chat/{id}/knowledge", func(w http.ResponseWriter, r *http.Request) {
+
+		var body struct {
+
+			KnowledgeIDs []string `json:"knowledgeIds"`
+
+		}
+
+		json.NewDecoder(r.Body).Decode(&body)
+
+		mu.Lock()
+
+		for _, id := range body.KnowledgeIDs {
+
+			attached = append(attached, map[string]any{"id": id, "name": id, "state": "Active"})
+
+		}
+
+		mu.Unlock()
+
+		writeJSON(w, []any{})
+
+	})
 	mux.HandleFunc("GET /user/ws-ticket", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`"t"`)) })
 
 	mux.HandleFunc("GET /v2/parrot/connect/user/{user}/ticket/{ticket}", func(w http.ResponseWriter, r *http.Request) {
@@ -434,13 +479,24 @@ func scriptedBoodle(t *testing.T, replies []string) (*httptest.Server, *[]string
 
 			} `json:"message"`
 
+			KnowledgeIDs []string `json:"knowledgeIds"`
+
 		}
 
 		json.NewDecoder(r.Body).Decode(&body)
 
+		// files sent along are noted on the message, so a test sees which turn carried them
+		content := body.Message.Content
+
+		if len(body.KnowledgeIDs) > 0 {
+
+			content += "\n[knowledge " + strings.Join(body.KnowledgeIDs, " ") + "]"
+
+		}
+
 		mu.Lock()
 		index := len(sent)
-		sent = append(sent, body.Message.Content)
+		sent = append(sent, content)
 		mu.Unlock()
 
 		reply := "<done>\nout of script\n</done>"
@@ -556,16 +612,86 @@ func TestRunWritesMemoryAndEndsWithDone(t *testing.T) {
 	}
 
 	kinds := []store.EventKind{}
+	steps := []string{}
 
 	for _, event := range events {
 
+		if event.Delta {
+
+			continue
+
+		}
+
 		kinds = append(kinds, event.Event.Kind)
+
+		if event.Event.Kind == store.KindStep {
+
+			steps = append(steps, event.Event.Text)
+
+		}
 
 	}
 
-	if !slices.Equal(kinds, []store.EventKind{store.KindTask, store.KindAssistant, store.KindResult, store.KindAssistant, store.KindDone}) {
+	// only a title per block is kept, never the reply or its output
+	if !slices.Equal(kinds, []store.EventKind{store.KindTask, store.KindStep, store.KindStep, store.KindDone}) || !slices.Equal(steps, []string{"note it", "check"}) {
 
-		t.Fatalf("kinds %v", kinds)
+		t.Fatalf("kinds %v steps %v", kinds, steps)
+
+	}
+
+}
+
+func TestAttachmentsAndViewReachTheModel(t *testing.T) {
+
+	st, userID := openStore(t)
+	agentRow, _ := st.CreateAgent(userID, "Clerk", "model-1", "")
+	workspace := st.Workspace(agentRow)
+
+	os.MkdirAll(filepath.Join(workspace, "uploads"), 0o755)
+	os.WriteFile(filepath.Join(workspace, "uploads", "cv.pdf"), []byte("%PDF"), 0o644)
+	os.WriteFile(filepath.Join(workspace, "uploads", "data.zip"), []byte("PK"), 0o644)
+	os.WriteFile(filepath.Join(workspace, "shot.png"), []byte("png"), 0o644)
+
+	server, sent := scriptedBoodle(t, []string{
+
+		"look at it\n<view shot.png>\n</view>",
+		"<view uploads/data.zip>\n</view>",
+		"<done>\nSeen.\n</done>",
+
+	})
+
+	defer server.Close()
+
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"userId":"u-1"}`))
+	client, _ := sdk.NewClient(sdk.ClientOptions{Cookie: "d=x." + payload + ".y", BaseURL: server.URL})
+	control := agent.RunControl{Ctx: context.Background(), TakeNotes: func() []string { return nil }, Ask: func(string, agent.WaitKind) agent.Reply { return agent.Allow(false) }, Listen: func(agent.RunEvent) {}}
+
+	end := agent.RunAgent(st, client, *agentRow, protocol.Attach("Apply with these", []string{"uploads/cv.pdf", "uploads/data.zip"}), control)
+
+	if end.Kind != store.KindDone || len(*sent) != 3 {
+
+		t.Fatalf("ended %+v sent %q", end, *sent)
+
+	}
+
+	// the PDF is shown with the task, the zip only named; a viewed file rides with the next message
+	first, second, third := (*sent)[0], (*sent)[1], (*sent)[2]
+
+	if !strings.Contains(first, "[attached]\nuploads/cv.pdf\nuploads/data.zip") || !strings.HasSuffix(first, "[knowledge k-1]") {
+
+		t.Fatalf("first %q", first)
+
+	}
+
+	if !strings.Contains(second, "[view ok]") || !strings.HasSuffix(second, "[knowledge k-2]") {
+
+		t.Fatalf("second %q", second)
+
+	}
+
+	if !strings.Contains(third, "[view failed]") || strings.Contains(third, "[knowledge") {
+
+		t.Fatalf("third %q", third)
 
 	}
 

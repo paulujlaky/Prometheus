@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -32,6 +33,46 @@ var etc = []string{"alternatives", "fonts", "group", "hosts", "ld.so.cache", "lo
 // pasta answers DNS sent here from the host's own resolver, which often listens only on the host's loopback
 const dns = "192.0.2.53"
 
+// the stub systemd-resolved lists in /etc/resolv.conf is loopback, which pasta cannot forward to; the real upstreams are here
+var resolvers = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"}
+
+// upstream is the host's first IPv4 resolver off loopback, or "" when it has none.
+func upstream() string {
+
+	for _, file := range resolvers {
+
+		data, err := os.ReadFile(file)
+
+		if err != nil {
+
+			continue
+
+		}
+
+		for _, line := range strings.Split(string(data), "\n") {
+
+			fields := strings.Fields(line)
+
+			if len(fields) < 2 || fields[0] != "nameserver" {
+
+				continue
+
+			}
+
+			if ip := net.ParseIP(fields[1]); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+
+				return fields[1]
+
+			}
+
+		}
+
+	}
+
+	return ""
+
+}
+
 // cloud metadata, private networks and carrier NAT; the namespace's own subnet stays routed, or the gateway would be too
 var fenced = []string{"10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"}
 
@@ -56,8 +97,19 @@ func sandboxArgv(command, workspace, zone string) []string {
 
 	}
 
-	// pasta closes every descriptor it did not open, so the resolver config is handed over on fd 3 after it
-	fence := "set -e; PATH=/usr/sbin:/usr/bin:/sbin:/bin; " + strings.Join(routes, "; ") + "; ip -6 route add blackhole fc00::/7 2>/dev/null || true; exec \"$@\" 3<<EOF\nnameserver " + dns + "\nEOF"
+	// no port forwarding either way, no address that maps to the host's loopback, and IPv4 only, which every host has
+	pasta := []string{"pasta", "--config-net", "--quiet", "--no-map-gw", "--ipv4-only", "-t", "none", "-u", "none", "-T", "none", "-U", "none"}
+	nameservers := "nameserver 1.1.1.1\nnameserver 8.8.8.8"
+
+	if host := upstream(); host != "" {
+
+		pasta = append(pasta, "--dns-forward", dns, "--dns", host)
+		nameservers = "nameserver " + dns
+
+	}
+
+	// pasta closes every descriptor it did not open, so the resolver config and address order are handed over on fds 3 and 4 after it
+	fence := "set -e; PATH=/usr/sbin:/usr/bin:/sbin:/bin; " + strings.Join(routes, "; ") + "; exec \"$@\" 3<<DNS 4<<GAI\n" + nameservers + "\noptions timeout:2 attempts:2\nDNS\nprecedence ::ffff:0:0/96 100\nGAI"
 
 	argv := []string{
 
@@ -65,16 +117,10 @@ func sandboxArgv(command, workspace, zone string) []string {
 		"-p", "MemoryMax=" + memoryMax, "-p", "MemorySwapMax=0", "-p", "CPUQuota=" + cpuQuota, "-p", "TasksMax=" + tasksMax,
 		"--",
 
-		// no port forwarding either way, and no address that maps to the host's loopback
-		"pasta", "--config-net", "--quiet", "--no-map-gw", "--dns-forward", dns, "-t", "none", "-u", "none", "-T", "none", "-U", "none",
-		"--",
-
-		"sh", "-c", fence, "sh",
-
-		"bwrap",
-		"--ro-bind", "/usr", "/usr",
-
 	}
+
+	argv = append(argv, pasta...)
+	argv = append(argv, "--", "sh", "-c", fence, "sh", "bwrap", "--ro-bind", "/usr", "/usr")
 
 	for _, name := range etc {
 
@@ -85,6 +131,7 @@ func sandboxArgv(command, workspace, zone string) []string {
 	argv = append(argv,
 
 		"--ro-bind-data", "3", "/etc/resolv.conf",
+		"--ro-bind-data", "4", "/etc/gai.conf",
 		"--symlink", "usr/bin", "/bin",
 		"--symlink", "usr/sbin", "/sbin",
 		"--symlink", "usr/lib", "/lib",

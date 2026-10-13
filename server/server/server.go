@@ -396,26 +396,19 @@ var (
 
 func (s *Server) onRunEvent(event agent.RunEvent) {
 
-	agentID := event.Event.AgentID
-
+	// the reply as it streams is for the CLI; the app shows only events
 	if event.Delta {
-
-		agentID = event.AgentID
-
-	}
-
-	// an agent deleted mid-run has nobody left to tell
-	owner, err := s.st.AgentByID(agentID)
-
-	if err != nil {
 
 		return
 
 	}
 
-	if event.Delta {
+	agentID := event.Event.AgentID
 
-		s.hub.publish(owner.UserID, map[string]any{"type": "delta", "agentId": agentID, "text": event.Text})
+	// an agent deleted mid-run has nobody left to tell
+	owner, err := s.st.AgentByID(agentID)
+
+	if err != nil {
 
 		return
 

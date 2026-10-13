@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"boombox/agent/browser/proc"
+	"boombox/agent/shell"
 	"boombox/config"
 
 	"github.com/chromedp/cdproto/cdp"
@@ -37,6 +38,9 @@ const (
 
 	// an element from the outline is clickable within a moment or covered; waiting longer only stalls the agent
 	elementWait = 5 * time.Second
+
+	// a control that opens a file chooser does so at once; one that has not by then is a drop zone
+	chooserWait = 2 * time.Second
 
 	// most pages finish their own fetches within a few seconds; waiting longer only stalls the agent
 	quietWait = 3 * time.Second
@@ -208,9 +212,6 @@ type Browser struct {
 
 	// phone is the holder's screen, when they took over from one
 	phone *Size
-
-	// touched is the user changing the page since the agent last saw it, so the agent's refs are stale
-	touched bool
 
 	// pins are handoffs waiting on the user; the page they need must still be there when they arrive
 	pins int
@@ -2224,7 +2225,7 @@ func HandBack(workspace string) error {
 
 }
 
-// held is the browser the user holds; looking changes nothing, only what the user does makes the agent's refs stale.
+// held is the browser the user holds.
 func held(workspace string) (*Browser, error) {
 
 	b := existing(workspace)
@@ -2243,8 +2244,6 @@ func held(workspace string) (*Browser, error) {
 		return nil, errors.New("Take over the browser first")
 
 	}
-
-	b.touched = true
 
 	return b, nil
 
@@ -2385,8 +2384,8 @@ func (b *Browser) perform(ctx context.Context, running *chrome, event Input) err
 
 }
 
-// agentBrowser is the agent's way in: it waits out a take-over, then refuses ref-based actions the user may have made stale.
-func agentBrowser(ctx context.Context, workspace string, refs bool) (*Browser, error) {
+// agentBrowser is the agent's way in, once any take-over ends; refs the user's changes dropped are found again by label.
+func agentBrowser(ctx context.Context, workspace string) (*Browser, error) {
 
 	b := browserOf(workspace)
 
@@ -2414,30 +2413,63 @@ func agentBrowser(ctx context.Context, workspace string, refs bool) (*Browser, e
 
 	}
 
-	b.mu.Lock()
-	touched := b.touched
-	b.touched = false
-	b.mu.Unlock()
-
-	if touched && refs {
-
-		page, err := act(b, actionWait*2, func(ctx context.Context, running *chrome) (string, error) { return b.read(ctx, running.page) })
-
-		if err != nil {
-
-			page = err.Error()
-
-		}
-
-		return nil, errors.New("The user used the browser while you worked, so that did not run. The page now:\n\n" + page)
-
-	}
-
 	return b, nil
 
 }
 
 func (b *Browser) read(ctx context.Context, shown *tabPage) (string, error) {
+
+	return b.readPart(ctx, shown, 1)
+
+}
+
+// partOf cuts a long outline at line ends into parts the agent reads one at a time, so nothing past the cut is out of reach.
+func partOf(tree string, part int) (string, error) {
+
+	parts := []string{}
+
+	for len(tree) > maxSnapshot {
+
+		cut := strings.LastIndex(tree[:maxSnapshot], "\n")
+
+		if cut <= 0 {
+
+			cut = maxSnapshot
+
+		}
+
+		parts = append(parts, strings.ToValidUTF8(tree[:cut], ""))
+		tree = strings.TrimPrefix(strings.ToValidUTF8(tree[cut:], ""), "\n")
+
+	}
+
+	parts = append(parts, tree)
+
+	if part < 1 || part > len(parts) {
+
+		return "", fmt.Errorf("The page has %d part(s); <look 1> to <look %d>.", len(parts), len(parts))
+
+	}
+
+	if len(parts) == 1 {
+
+		return tree, nil
+
+	}
+
+	next := "the last"
+
+	if part < len(parts) {
+
+		next = fmt.Sprintf("<look %d> for the next", part+1)
+
+	}
+
+	return parts[part-1] + fmt.Sprintf("\n\n(part %d of %d; %s)", part, len(parts), next), nil
+
+}
+
+func (b *Browser) readPart(ctx context.Context, shown *tabPage, part int) (string, error) {
 
 	short, cancel := context.WithTimeout(ctx, actionWait)
 	defer cancel()
@@ -2452,9 +2484,9 @@ func (b *Browser) read(ctx context.Context, shown *tabPage) (string, error) {
 
 	title := shown.title(short)
 
-	if len(tree) > maxSnapshot {
+	if tree, err = partOf(tree, part); err != nil {
 
-		tree = strings.ToValidUTF8(tree[:maxSnapshot], "") + fmt.Sprintf("\n... page cut at %d characters", maxSnapshot)
+		return "", err
 
 	}
 
@@ -2585,7 +2617,7 @@ func Tab(ctx context.Context, workspace, targetText string) (string, error) {
 
 	}
 
-	b, err := agentBrowser(ctx, workspace, false)
+	b, err := agentBrowser(ctx, workspace)
 
 	if err != nil {
 
@@ -2737,17 +2769,57 @@ func Tab(ctx context.Context, workspace, targetText string) (string, error) {
 
 var refPattern = regexp.MustCompile(`^\[?(?:ref=)?(e\d+)\]?$`)
 
-func refOf(raw string) (string, error) {
+// target is a live ref for what the agent named: its ref while still on the page, else the one element carrying its label.
+func (b *Browser) target(ctx context.Context, shown *tabPage, raw string) (string, error) {
 
-	match := refPattern.FindStringSubmatch(strings.TrimSpace(raw))
+	label := strings.TrimSpace(raw)
 
-	if match == nil {
+	if label == "" {
 
-		return "", fmt.Errorf("%q is not an element ref. Use the ref from the page, like e12.", raw)
+		return "", errors.New(`Name the element by its ref, like e12, or by its label, like "Apply now".`)
 
 	}
 
-	return match[1], nil
+	if match := refPattern.FindStringSubmatch(label); match != nil {
+
+		if shown.present(ctx, match[1]) {
+
+			return match[1], nil
+
+		}
+
+		if label = shown.labelOf(match[1]); label == "" {
+
+			return "", b.dropped(ctx, shown, match[1])
+
+		}
+
+	}
+
+	// read afresh, so the label is matched against the page as it is now
+	page, err := b.read(ctx, shown)
+
+	if err != nil {
+
+		return "", err
+
+	}
+
+	matches := shown.labelled(label)
+
+	switch len(matches) {
+
+	case 1:
+
+		return matches[0], nil
+
+	case 0:
+
+		return "", fmt.Errorf("Nothing on the page is labelled %q. Use a ref from the page below.\n\n%s", label, page)
+
+	}
+
+	return "", fmt.Errorf("%d elements are labelled %q: %s. Use one of those refs.\n\n%s", len(matches), label, strings.Join(matches, ", "), page)
 
 }
 
@@ -2774,7 +2846,7 @@ func Open(ctx context.Context, workspace, url string) (string, error) {
 
 	}
 
-	b, err := agentBrowser(ctx, workspace, false)
+	b, err := agentBrowser(ctx, workspace)
 
 	if err != nil {
 
@@ -2802,9 +2874,24 @@ func Open(ctx context.Context, workspace, url string) (string, error) {
 
 var errBlank = errors.New("No page is open yet. Use <open https://...> first.")
 
-func Look(ctx context.Context, workspace string) (string, error) {
+// Look reads the page, or with a number one part of a long one.
+func Look(ctx context.Context, workspace, partText string) (string, error) {
 
-	b, err := agentBrowser(ctx, workspace, false)
+	part := 1
+
+	if partText = strings.TrimSpace(partText); partText != "" {
+
+		if !digits.MatchString(partText) {
+
+			return "", errors.New("look takes nothing, or the number of a part of a long page: <look 2>")
+
+		}
+
+		part, _ = strconv.Atoi(partText)
+
+	}
+
+	b, err := agentBrowser(ctx, workspace)
 
 	if err != nil {
 
@@ -2834,51 +2921,53 @@ func Look(ctx context.Context, workspace string) (string, error) {
 
 		}
 
-		return b.read(ctx, shown)
+		return b.readPart(ctx, shown, part)
 
 	})
 
 }
 
-// byRef says so, with the page now, when a redrawing page (Gmail's inbox, a feed) swaps the element out under a ref.
-func (b *Browser) byRef(ctx context.Context, shown *tabPage, ref string, work func() error) error {
+func (b *Browser) dropped(ctx context.Context, shown *tabPage, ref string) error {
 
-	gone := func() error {
+	page, err := b.read(ctx, shown)
 
-		page, err := b.read(ctx, shown)
+	if err != nil {
 
-		if err != nil {
-
-			page = err.Error()
-
-		}
-
-		return fmt.Errorf("%s is no longer on the page — it redrew since you looked, so nothing ran. Use a ref from the page below. If it keeps redrawing, don't retry the click: open the item by its URL, or search for it.\n\n%s", ref, page)
+		page = err.Error()
 
 	}
 
-	if !shown.present(ctx, ref) {
+	return fmt.Errorf("%s is no longer on the page — it redrew since you looked, so nothing ran. Use a ref from the page below. If it keeps redrawing, don't retry the click: open the item by its URL, or search for it.\n\n%s", ref, page)
 
-		return gone()
+}
+
+// byRef resolves what the agent named and runs work on it, saying so with the page now when a redrawing page (Gmail's inbox, a feed) swaps the element out mid-way.
+func (b *Browser) byRef(ctx context.Context, shown *tabPage, raw string, work func(ref string) error) (string, error) {
+
+	ref, err := b.target(ctx, shown, raw)
+
+	if err != nil {
+
+		return "", err
 
 	}
 
-	err := work()
+	err = work(ref)
 
 	if errors.Is(err, errGone) || (isTimeout(err) && !shown.present(ctx, ref)) {
 
-		return gone()
+		return "", b.dropped(ctx, shown, ref)
 
 	}
 
-	return err
+	return ref, err
 
 }
 
 // interact waits out what a click or key starts: a new page, a menu, a navigation.
 func interact(ctx context.Context, workspace string, limit time.Duration, work func(ctx context.Context, shown *tabPage, b *Browser) error) (string, error) {
 
-	b, err := agentBrowser(ctx, workspace, true)
+	b, err := agentBrowser(ctx, workspace)
 
 	if err != nil {
 
@@ -2923,19 +3012,13 @@ func interact(ctx context.Context, workspace string, limit time.Duration, work f
 
 }
 
-func Click(ctx context.Context, workspace, ref string) (string, error) {
-
-	target, err := refOf(ref)
-
-	if err != nil {
-
-		return "", err
-
-	}
+func Click(ctx context.Context, workspace, raw string) (string, error) {
 
 	return interact(ctx, workspace, loadWait+actionWait*3, func(ctx context.Context, shown *tabPage, b *Browser) error {
 
-		return b.byRef(ctx, shown, target, func() error { return shown.clickRef(ctx, target, elementWait) })
+		_, err := b.byRef(ctx, shown, raw, func(ref string) error { return shown.clickRef(ctx, ref, elementWait) })
+
+		return err
 
 	})
 
@@ -2957,17 +3040,9 @@ func Press(ctx context.Context, workspace, key string) (string, error) {
 
 }
 
-func Type(ctx context.Context, workspace, ref, text string) (string, error) {
+func Type(ctx context.Context, workspace, raw, text string) (string, error) {
 
-	target, err := refOf(ref)
-
-	if err != nil {
-
-		return "", err
-
-	}
-
-	b, err := agentBrowser(ctx, workspace, true)
+	b, err := agentBrowser(ctx, workspace)
 
 	if err != nil {
 
@@ -2975,13 +3050,13 @@ func Type(ctx context.Context, workspace, ref, text string) (string, error) {
 
 	}
 
-	_, err = act(b, actionWait*3, func(ctx context.Context, running *chrome) (struct{}, error) {
+	target, err := act(b, actionWait*4, func(ctx context.Context, running *chrome) (string, error) {
 
 		b.mu.Lock()
 		shown := running.page
 		b.mu.Unlock()
 
-		return struct{}{}, b.byRef(ctx, shown, target, func() error { return shown.fillRef(ctx, target, text, elementWait) })
+		return b.byRef(ctx, shown, raw, func(ref string) error { return shown.fillRef(ctx, ref, text, elementWait) })
 
 	})
 
@@ -2992,6 +3067,64 @@ func Type(ctx context.Context, workspace, ref, text string) (string, error) {
 	}
 
 	return fmt.Sprintf("typed %d characters into %s", len(utf16Units(text)), target), nil
+
+}
+
+// Upload stages copies outside the workspace, since Chromium reads them unsandboxed and a planted link could point anywhere.
+func Upload(ctx context.Context, workspace, raw string, files []shell.File) (string, error) {
+
+	staging := filepath.Join(profileOf(workspace), "Uploads")
+	paths := make([]string, len(files))
+	names := make([]string, len(files))
+
+	for i, file := range files {
+
+		dir := filepath.Join(staging, strconv.Itoa(i))
+
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+
+			return "", err
+
+		}
+
+		paths[i] = filepath.Join(dir, file.Name)
+		names[i] = file.Name
+
+		if err := os.WriteFile(paths[i], file.Data, 0o600); err != nil {
+
+			return "", err
+
+		}
+
+	}
+
+	how := ""
+
+	page, err := interact(ctx, workspace, loadWait+actionWait*3+chooserWait, func(ctx context.Context, shown *tabPage, b *Browser) error {
+
+		ref, err := b.byRef(ctx, shown, raw, func(ref string) error {
+
+			var err error
+
+			how, err = shown.uploadRef(ctx, ref, paths, elementWait)
+
+			return err
+
+		})
+
+		raw = ref
+
+		return err
+
+	})
+
+	if err != nil {
+
+		return "", err
+
+	}
+
+	return fmt.Sprintf("%s %s into %s\n\n%s", how, strings.Join(names, ", "), raw, page), nil
 
 }
 

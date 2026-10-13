@@ -1,6 +1,6 @@
 // What the server sends: these mirror the JSON of server/store, field for field.
 
-export type EventKind = "task" | "user" | "assistant" | "result" | "say" | "card" | "notify" | "ask" | "question" | "handoff" | "done" | "error";
+export type EventKind = "task" | "user" | "step" | "page" | "routine" | "say" | "card" | "notify" | "ask" | "question" | "handoff" | "done" | "error";
 
 export interface AgentEvent {
 

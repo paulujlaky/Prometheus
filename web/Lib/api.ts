@@ -55,7 +55,6 @@ export type SocketMessage =
 
   | { type: "event"; event: AgentEvent }
   | { type: "agent"; agent: Agent }
-  | { type: "delta"; agentId: number; text: string }
   | { type: "state"; agentId: number; state: AgentState }
   | { type: "group"; message: GroupMessage }
   | LiveEvent;
@@ -97,15 +96,17 @@ export interface LiveChannel {
 
 export class Unauthorized extends Error {}
 
+/** A Blob body goes up as it is; anything else as JSON. */
 export async function api<T>(path: string, method = "GET", body?: unknown): Promise<T> {
 
+  const raw = body instanceof Blob;
   const res = await fetch(`/api${path}`, {
 
     method,
     credentials: "same-origin",
 
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: body === undefined || raw ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
 
   });
 
@@ -126,6 +127,20 @@ export async function api<T>(path: string, method = "GET", body?: unknown): Prom
   return data as T;
 
 }
+
+/** A file in an agent's workspace. */
+export interface WorkspaceFile {
+
+  path: string;
+  size: number;
+  modified: number;
+
+}
+
+/** Saves a file into the agent's uploads/ and resolves to its workspace path. */
+export const uploadFile = (agentId: number, file: File) => api<{ path: string }>(`/agents/${agentId}/files?name=${encodeURIComponent(file.name)}`, "POST", file).then((saved) => saved.path);
+
+export const fileURL = (agentId: number, path: string) => `/api/agents/${agentId}/files?path=${encodeURIComponent(path)}`;
 
 /** Web push wants the VAPID key as raw bytes, not the base64url the server hands out. */
 function keyBytes(base64url: string): Uint8Array<ArrayBuffer> {

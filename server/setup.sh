@@ -11,6 +11,9 @@ GO_VERSION=1.27.2
 sudo apt-get update -q
 sudo apt-get install -yq curl bubblewrap passt iproute2 unzip dbus-user-session
 
+# what agents reach for in their sandbox: PDFs to read and to make, data tools, fonts for rendering
+sudo apt-get install -yq python3 jq git poppler-utils weasyprint pandoc fonts-liberation
+
 # commands run in systemd-run --user scopes: this user's manager must run at boot and may hand out CPU and memory limits
 sudo loginctl enable-linger "$USER"
 

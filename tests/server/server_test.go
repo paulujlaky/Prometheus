@@ -555,3 +555,70 @@ func TestPushKeyIsStableAndSocketNeedsAuth(t *testing.T) {
 	}
 
 }
+
+func TestFilesUploadListDownloadAndAttach(t *testing.T) {
+
+	h := newHarness(t)
+
+	_, created := h.call("POST", "/api/agents", map[string]any{"name": "Filer", "modelId": "model-1"})
+	base := fmt.Sprintf("/api/agents/%d", id(created))
+
+	req, _ := http.NewRequest("POST", h.base+base+"/files?name=page.html", strings.NewReader("<script>alert(1)</script>"))
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	res, err := http.DefaultClient.Do(req)
+
+	if err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	var saved map[string]any
+
+	json.NewDecoder(res.Body).Decode(&saved)
+	res.Body.Close()
+
+	if saved["path"] != "uploads/page.html" {
+
+		t.Fatalf("saved %v", saved)
+
+	}
+
+	if _, listed := h.call("GET", base+"/files", nil); !slices.ContainsFunc(listed.([]any), func(one any) bool { return field(one, "path") == "uploads/page.html" && field(one, "size") == 25.0 }) {
+
+		t.Fatalf("listed %v", listed)
+
+	}
+
+	// a page the agent or user wrote is saved, never shown on the app's own origin
+	req, _ = http.NewRequest("GET", h.base+base+"/files?path=uploads/page.html", nil)
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	res, _ = http.DefaultClient.Do(req)
+	res.Body.Close()
+
+	if !strings.HasPrefix(res.Header.Get("Content-Disposition"), "attachment") || res.Header.Get("Content-Type") != "application/octet-stream" {
+
+		t.Fatalf("download headers %v", res.Header)
+
+	}
+
+	if status, _ := h.call("GET", base+"/files?path=../../secret", nil); status != 404 {
+
+		t.Fatalf("outside status %d", status)
+
+	}
+
+	if status, _ := h.call("POST", base+"/messages", map[string]any{"text": "", "files": []string{"uploads/missing.pdf"}}); status != 400 {
+
+		t.Fatalf("missing file status %d", status)
+
+	}
+
+	// a real file passes, then the run is refused for want of a Boodle cookie
+	if status, _ := h.call("POST", base+"/messages", map[string]any{"text": "", "files": []string{"uploads/page.html"}}); status != 503 {
+
+		t.Fatalf("attach status %d", status)
+
+	}
+
+}

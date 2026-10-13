@@ -9,7 +9,7 @@ import (
 
 type Verb string
 
-var Verbs = []Verb{"ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "tab", "submit", "handoff", "ask", "routine", "create_agent", "card", "say", "notify", "done"}
+var Verbs = []Verb{"ls", "read", "grep", "edit", "write", "delete", "run", "view", "open", "look", "click", "type", "press", "tab", "upload", "submit", "handoff", "ask", "routine", "create_agent", "card", "say", "notify", "done"}
 
 // models reach for whatever verb their training favours; accepting the synonym costs nothing
 var aliases = map[string]Verb{
@@ -33,6 +33,13 @@ var aliases = map[string]Verb{
 
 	"rm": "delete",
 	"remove": "delete",
+
+	"see": "view",
+	"inspect": "view",
+	"image": "view",
+
+	"attach": "upload",
+	"file_upload": "upload",
 
 	"bash": "run",
 	"sh": "run",
@@ -116,11 +123,72 @@ type Action struct {
 
 }
 
+// Title is what the user sees for the block: its label, else the verb and its target.
+func (a Action) Title() string {
+
+	if a.Label != "" {
+
+		return a.Label
+
+	}
+
+	return strings.TrimSpace(string(a.Verb) + " " + a.Path)
+
+}
+
 type Result struct {
 
 	Verb Verb
 	OK bool
 	Text string
+
+}
+
+// attachedHead opens the list of workspace files a user's message came with, one path per line.
+const attachedHead = "[attached]"
+
+// Attach lists paths under the message, the way the agent and the app both read it back.
+func Attach(text string, paths []string) string {
+
+	if len(paths) == 0 {
+
+		return text
+
+	}
+
+	return strings.TrimSpace(text + "\n\n" + attachedHead + "\n" + strings.Join(paths, "\n"))
+
+}
+
+// Attached is every path listed in the message's [attached] sections; a run's notes can carry several.
+func Attached(text string) []string {
+
+	paths := []string{}
+	listing := false
+
+	for _, line := range strings.Split(text, "\n") {
+
+		line = strings.TrimSpace(line)
+
+		switch {
+
+		case line == attachedHead:
+
+			listing = true
+
+		case line == "":
+
+			listing = false
+
+		case listing:
+
+			paths = append(paths, line)
+
+		}
+
+	}
+
+	return paths
 
 }
 
@@ -230,7 +298,7 @@ func indexFold(text, needle string, from int) int {
 var FilePath = regexp.MustCompile(`^[\w.-]+(?:/[\w.-]+)*\.[A-Za-z0-9]{1,8}$`)
 
 // verbs whose body is a line or two, never file content that could itself hold a tag
-var shortBody = map[Verb]bool{"ls": true, "read": true, "grep": true, "delete": true, "open": true, "look": true, "click": true, "press": true, "tab": true}
+var shortBody = map[Verb]bool{"ls": true, "read": true, "grep": true, "delete": true, "view": true, "open": true, "look": true, "click": true, "press": true, "tab": true, "upload": true}
 
 // nextBlock is where the next block opens at the start of a line after from, or -1.
 func nextBlock(text string, from int) int {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"boombox/agent/browser"
+	"boombox/agent/shell"
 )
 
 func TestOpensReadsTypesAndClicksByRef(t *testing.T) {
@@ -187,7 +188,7 @@ controlled.then(() => fetch("/from-sw")).then(show);
 	for i := 0; i < 40 && err == nil && !strings.Contains(text, "both-sent"); i++ {
 
 		time.Sleep(250 * time.Millisecond)
-		text, err = browser.Look(context.Background(), cwd)
+		text, err = browser.Look(context.Background(), cwd, "")
 
 	}
 
@@ -425,7 +426,7 @@ func TestDeadChromiumIsReplacedOnNextUse(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// the tab it had comes back with the new one
-	if text, err := browser.Look(ctx, cwd); err != nil || !strings.Contains(text, "Alive") {
+	if text, err := browser.Look(ctx, cwd, ""); err != nil || !strings.Contains(text, "Alive") {
 
 		t.Fatalf("%v %s", err, text)
 
@@ -460,12 +461,12 @@ func TestFrozenChromiumIsKilledAndAnotherCarriesOn(t *testing.T) {
 
 	go func() {
 
-		_, err := browser.Look(ctx, frozen)
+		_, err := browser.Look(ctx, frozen, "")
 		stuck <- err
 
 	}()
 
-	if text, err := browser.Look(ctx, other); err != nil || !strings.Contains(text, "Fine") {
+	if text, err := browser.Look(ctx, other, ""); err != nil || !strings.Contains(text, "Fine") {
 
 		t.Fatalf("%v %s", err, text)
 
@@ -525,7 +526,7 @@ func TestPopupBecomesThePageAndClosingGoesBack(t *testing.T) {
 	browser.Click(ctx, cwd, refFor(t, popup, "button"))
 	time.Sleep(500 * time.Millisecond)
 
-	if text, err := browser.Look(ctx, cwd); err != nil || !strings.Contains(text, "Opener") {
+	if text, err := browser.Look(ctx, cwd, ""); err != nil || !strings.Contains(text, "Opener") {
 
 		t.Fatalf("%v %s", err, text)
 
@@ -547,7 +548,7 @@ func TestDeletingAnAgentMidTakeOverLetsItsActionGo(t *testing.T) {
 
 	go func() {
 
-		browser.Look(context.Background(), cwd)
+		browser.Look(context.Background(), cwd, "")
 		close(waiting)
 
 	}()
@@ -562,6 +563,130 @@ func TestDeletingAnAgentMidTakeOverLetsItsActionGo(t *testing.T) {
 	case <-time.After(20 * time.Second):
 
 		t.Fatal("the waiting action never went")
+
+	}
+
+}
+
+func TestUploadsByFieldChooserAndDrop(t *testing.T) {
+
+	linuxOnly(t)
+
+	url := site(t, func(w http.ResponseWriter, r *http.Request) {
+
+		servePage(w, "Apply", `<h2 id="out">Waiting</h2>
+<div role="region" aria-label="Resume area"><input type="file" id="cv" hidden></div>
+<button id="pick">Choose photo</button><input type="file" id="photo" hidden>
+<div role="region" aria-label="Drop zone" id="drop" style="width:300px;height:120px;border:1px solid">Drop here</div>
+<script>
+const out = document.getElementById("out");
+const names = (files) => [...files].map((file) => file.name + ":" + file.size).join(",");
+document.getElementById("cv").onchange = (event) => out.textContent = "Resume " + names(event.target.files);
+document.getElementById("pick").onclick = () => document.getElementById("photo").click();
+document.getElementById("photo").onchange = (event) => out.textContent = "Photo " + names(event.target.files);
+const drop = document.getElementById("drop");
+drop.addEventListener("dragover", (event) => event.preventDefault());
+drop.addEventListener("drop", (event) => { event.preventDefault(); out.textContent = "Dropped " + names(event.dataTransfer.files); });
+</script>`)
+
+	})
+
+	cwd := t.TempDir()
+	ctx := context.Background()
+
+	if _, err := browser.Open(ctx, cwd, url+"/"); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	cases := []struct {
+
+		target string
+		want string
+
+	}{
+
+		{`"Resume area"`, "put cv.pdf into"},
+		{"Choose photo", "put cv.pdf into"},
+		{"Drop zone", "dropped cv.pdf into"},
+
+	}
+
+	shown := []string{"Resume cv.pdf:4", "Photo cv.pdf:4", "Dropped cv.pdf:4"}
+
+	for i, one := range cases {
+
+		text, err := browser.Upload(ctx, cwd, one.target, []shell.File{{Name: "cv.pdf", Data: []byte("%PDF")}})
+
+		if err != nil || !strings.HasPrefix(text, one.want) || !strings.Contains(text, shown[i]) {
+
+			t.Fatalf("upload %s: %v\n%s", one.target, err, text)
+
+		}
+
+	}
+
+}
+
+func TestClicksByLabelFindsRedrawnRefsAndReadsLongPagesInParts(t *testing.T) {
+
+	linuxOnly(t)
+
+	url := site(t, func(w http.ResponseWriter, r *http.Request) {
+
+		servePage(w, "Form", `<h2 id="out">Idle</h2><span id="slot"><button>Save</button></span><button id="redraw">Redraw</button><button>Twin</button><button>Twin</button>
+`+strings.Repeat("<p>A line of filler text, so the outline runs long.</p>", 600)+`
+<script>
+const save = () => document.getElementById("out").textContent = "Saved";
+document.querySelector("#slot button").onclick = save;
+document.getElementById("redraw").onclick = () => { const fresh = document.createElement("button"); fresh.textContent = "Save"; fresh.onclick = save; document.getElementById("slot").replaceChildren(fresh); };
+</script>`)
+
+	})
+
+	cwd := t.TempDir()
+	ctx := context.Background()
+	opened, err := browser.Open(ctx, cwd, url+"/")
+
+	if err != nil || !strings.Contains(opened, "(part 1 of ") {
+
+		t.Fatalf("open %v:\n%s", err, opened)
+
+	}
+
+	stale := refFor(t, opened, `button "Save"`)
+
+	if _, err := browser.Click(ctx, cwd, `"Redraw"`); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	// the old Save was swapped out; its label finds the new one
+	saved, err := browser.Click(ctx, cwd, stale)
+
+	if err != nil || !strings.Contains(saved, "Saved") {
+
+		t.Fatalf("stale click %v:\n%s", err, saved)
+
+	}
+
+	if _, err := browser.Click(ctx, cwd, "Twin"); err == nil || !strings.Contains(err.Error(), "2 elements are labelled") {
+
+		t.Fatalf("ambiguous label %v", err)
+
+	}
+
+	if second, err := browser.Look(ctx, cwd, "2"); err != nil || !strings.Contains(second, "(part 2 of ") {
+
+		t.Fatalf("part 2 %v:\n%s", err, second)
+
+	}
+
+	if _, err := browser.Look(ctx, cwd, "99"); err == nil {
+
+		t.Fatal("a part past the end must fail")
 
 	}
 

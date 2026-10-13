@@ -285,3 +285,53 @@ func TestSessionSendWaitsForFinal(t *testing.T) {
 	}
 
 }
+
+func TestWaitKnowledgeWaitsForBoodleToProcess(t *testing.T) {
+
+	polls := 0
+	failed := false
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		polls++
+		state := "Pending"
+
+		if failed {
+
+			state = "Failed"
+
+		} else if polls >= 2 {
+
+			state = "Active"
+
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{"chat": map[string]any{"id": "c"}, "knowledge": []any{map[string]any{"id": "k-1", "name": "cv.pdf", "state": state}}})
+
+	}))
+
+	defer server.Close()
+
+	client, _ := sdk.NewClient(sdk.ClientOptions{Cookie: fakeCookie("u-1"), BaseURL: server.URL})
+
+	if err := client.WaitKnowledge(context.Background(), "c", []string{"k-1"}, 10*time.Second); err != nil || polls != 2 {
+
+		t.Fatalf("wait %v after %d polls", err, polls)
+
+	}
+
+	failed = true
+
+	if err := client.WaitKnowledge(context.Background(), "c", []string{"k-1"}, 10*time.Second); err == nil || !strings.Contains(err.Error(), "cv.pdf") {
+
+		t.Fatalf("failed file %v", err)
+
+	}
+
+	if err := client.WaitKnowledge(context.Background(), "c", []string{"k-2"}, time.Millisecond); err == nil || !strings.Contains(err.Error(), "still processing k-2") {
+
+		t.Fatalf("missing file %v", err)
+
+	}
+
+}

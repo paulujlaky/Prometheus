@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -11,9 +10,6 @@ import (
 	"boombox/agent/protocol"
 	"boombox/agent/shell"
 )
-
-// reading through the shell loses the line numbers the next <edit> leans on
-var readers = regexp.MustCompile(`^\s*(grep|rg|cat|head|tail|less|more|ls|tree|find)\b`)
 
 // fileTarget is a write's or an edit's file and content; a model that put the file on the body's first line instead of the tag still means it.
 func fileTarget(action protocol.Action) (string, string) {
@@ -177,12 +173,6 @@ func Execute(ctx context.Context, action protocol.Action, cwd, zone string) prot
 
 		}
 
-		if readers.MatchString(command) {
-
-			return outcome("", errors.New("Use <ls>, <read> or <grep> to look at files — they give line numbers. <run> is for everything else."))
-
-		}
-
 		ran := shell.Run(ctx, command, cwd, 0, zone)
 		output := ran.Output
 
@@ -200,7 +190,7 @@ func Execute(ctx context.Context, action protocol.Action, cwd, zone string) prot
 
 	case "look":
 
-		return outcome(browser.Look(ctx, cwd))
+		return outcome(browser.Look(ctx, cwd, target))
 
 	case "click":
 
@@ -217,6 +207,26 @@ func Execute(ctx context.Context, action protocol.Action, cwd, zone string) prot
 	case "tab":
 
 		return outcome(browser.Tab(ctx, cwd, target))
+
+	case "upload":
+
+		ref, paths := action.Path, bodyLines(action.Body)
+
+		if ref == "" && len(paths) > 0 {
+
+			ref, paths = paths[0], paths[1:]
+
+		}
+
+		files, err := shell.InLane(ctx, cwd, func() ([]shell.File, error) { return Load(cwd, paths) })
+
+		if err != nil {
+
+			return outcome("", err)
+
+		}
+
+		return outcome(browser.Upload(ctx, cwd, ref, files))
 
 	}
 

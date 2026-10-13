@@ -1,26 +1,16 @@
-// An agent's event log, regrouped into what a person reads: their messages, the agent's words, and the work folded away.
+// An agent's event log, regrouped into what a person reads: their messages, the agent's words, and the work summed up.
 
-import { parseActions, type Verb } from "./protocol";
+import { splitAttached } from "./protocol";
 import type { AgentEvent, Routine } from "./types";
-
-export interface Step {
-
-  verb: Verb;
-  label: string;
-
-  ok: boolean | null;
-  detail: string;
-
-}
 
 export type Item =
 
-  | { kind: "user"; key: string; text: string }
+  | { kind: "user"; key: string; text: string; files: string[] }
   | { kind: "note"; key: string; text: string }
   | { kind: "say"; key: string; text: string }
   | { kind: "card"; key: string; text: string }
   | { kind: "notify"; key: string; text: string }
-  | { kind: "work"; key: string; steps: Step[]; seconds: number; live: boolean }
+  | { kind: "work"; key: string; steps: number; current: string; seconds: number; live: boolean }
   | { kind: "page"; key: string; url: string; title: string }
   | { kind: "routine"; key: string; when: string; title: string }
   | { kind: "ask"; key: string; text: string; answer: "allowed" | "refused" | null }
@@ -29,27 +19,12 @@ export type Item =
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
 
-const RESULT_HEAD = /^\[([a-z_]+) (ok|failed)\]$/gm;
-const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "tab", "submit", "handoff"]);
-
 /** The title, or for a routine the agent left untitled, the task's first line. */
 export const routineTitle = (routine: Routine) => routine.title || routine.task.split("\n")[0];
 
 export const describeWatch = (target: string, minutes: string) => `${minutes === "60" ? "Hourly" : `Every ${minutes} min`}, watching ${/^https?:\/\//i.test(target) ? target.replace(/^https?:\/\//i, "").replace(/\/$/, "") : "a command"}`;
 
-/** `[verb ok]` sections of one result event, in the order the blocks ran. */
-function splitResults(text: string): { ok: boolean; text: string }[] {
-
-  const heads = [...text.matchAll(RESULT_HEAD)];
-
-  return heads.map((head, i) => ({
-
-    ok: head[2] === "ok",
-    text: text.slice(head.index! + head[0].length, heads[i + 1]?.index ?? text.length).replace(/\n\n\[harness\][\s\S]*$/, "").trim(),
-
-  }));
-
-}
+const userItem = (key: string, message: string): Item => ({ kind: "user", key, ...splitAttached(message) });
 
 /** The harness wraps routine and group tasks; a person only needs to know where the task came from. */
 function taskItem(event: AgentEvent): Item {
@@ -80,7 +55,18 @@ function taskItem(event: AgentEvent): Item {
 
   }
 
-  return watch ? { kind: "note", key, text: watch[1] ? `Watch: ${watch[1]}` : `Watch: ${watch[2]} changed` } : { kind: "user", key, text };
+  return watch ? { kind: "note", key, text: watch[1] ? `Watch: ${watch[1]}` : `Watch: ${watch[2]} changed` } : userItem(key, text);
+
+}
+
+/** "created routine 3 schedule 0 9 * * 1-5, next Mon, Oct 5, 9:00 AM EDT — Morning digest" */
+function routineItem(key: string, text: string): Item {
+
+  const [when, title = ""] = text.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
+  const watch = /^watch (.+) every (\d+) min/.exec(when);
+  const next = /, next (.+)$/.exec(when)?.[1];
+
+  return { kind: "routine", key, when: watch ? describeWatch(watch[1], watch[2]) : next ? `Next ${next}` : "Never runs", title };
 
 }
 
@@ -105,10 +91,12 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
   for (const [runId, run] of runs) {
 
-    const steps: Step[] = [];
     const after: Item[] = [];
+    const routines: Item[] = [];
 
-    let pending: Step[] = [];
+    let steps = 0;
+    let current = "";
+    let page: Item | null = null;
     let ended = false;
 
     for (const [index, event] of run.entries()) {
@@ -128,7 +116,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
           // an approval's answer belongs to its card, not the chat
           if (!/^(ask|handoff|question)$/.test(run[index - 1]?.kind ?? "")) {
 
-            items.push({ kind: "user", key, text: event.text });
+            items.push(userItem(key, event.text));
 
           }
 
@@ -141,28 +129,25 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
           items.push({ kind: event.kind, key, text: event.text });
           break;
 
-        case "assistant":
+        case "step":
 
-          // says get results too, so they stay in `pending` to keep results lined up with their blocks
-          pending = parseActions(event.text).filter((action) => action.verb !== "done").map((action) => ({ verb: action.verb, label: action.label || `${action.verb} ${action.path}`.trim(), ok: null, detail: "" }));
-          steps.push(...pending.filter((step) => step.verb !== "say" && step.verb !== "notify" && step.verb !== "card"));
+          steps++;
+          current = event.text;
           break;
 
-        case "result": {
+        case "page": {
 
-          const results = splitResults(event.text);
+          const [url, title = ""] = event.text.split("\n");
 
-          pending.forEach((step, i) => {
-
-            step.ok = results[i]?.ok ?? null;
-            step.detail = results[i]?.text ?? "";
-
-          });
-
-          pending = [];
+          page = { kind: "page", key: `p${runId}`, url, title };
           break;
 
         }
+
+        case "routine":
+
+          routines.push(routineItem(key, event.text));
+          break;
 
         case "ask":
 
@@ -179,57 +164,30 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
           after.push({ kind: "question", key, text: event.text, answer });
           break;
 
-        default:
+        case "done":
+        case "error":
 
           ended = true;
 
           if (event.kind === "error" || event.text.trim().toLowerCase() !== "wait") {
 
-            after.push({ kind: event.kind as "done" | "error", key, text: event.text });
+            after.push({ kind: event.kind, key, text: event.text });
 
           }
 
-      }
-
-    }
-
-    const ran = steps.filter((step) => step.ok !== null || !ended);
-
-    if (ran.length) {
-
-      items.push({ kind: "work", key: `w${runId}`, steps: ran, seconds: Math.max(1, Math.round((run.at(-1)!.at - run[0].at) / 1000)), live: !ended && busy && runId === lastRun });
-
-    }
-
-    // a tab list is not a page
-    const page = [...ran].reverse().find((step) => PAGE_VERBS.has(step.verb) && step.ok && /^https?:\/\//.test(step.detail));
-
-    if (page) {
-
-      const [url, title = ""] = page.detail.split("\n");
-
-      items.push({ kind: "page", key: `p${runId}`, url, title });
-
-    }
-
-    ran.forEach((step, i) => {
-
-      if (step.verb !== "routine" || !step.ok || !step.detail.startsWith("created routine")) {
-
-        return;
+          break;
 
       }
 
-      // "schedule 0 9 * * 1-5, next Mon, Oct 5, 9:00 AM EDT — Morning digest"
-      const [when, title = ""] = step.detail.replace(/^created routine \d+\s+/, "").split(/\s+—\s+/);
-      const watch = /^watch (.+) every (\d+) min/.exec(when);
-      const next = /, next (.+)$/.exec(when)?.[1];
+    }
 
-      items.push({ kind: "routine", key: `r${runId}${i}`, when: watch ? describeWatch(watch[1], watch[2]) : next ? `Next ${next}` : "Never runs", title });
+    if (steps) {
 
-    });
+      items.push({ kind: "work", key: `w${runId}`, steps, current, seconds: Math.max(1, Math.round((run.at(-1)!.at - run[0].at) / 1000)), live: !ended && busy && runId === lastRun });
 
-    items.push(...after);
+    }
+
+    items.push(...(page ? [page] : []), ...routines, ...after);
 
   }
 

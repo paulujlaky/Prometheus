@@ -2,12 +2,16 @@ package sdk
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -215,6 +219,8 @@ func (c *Client) SendMessage(ctx context.Context, chatID, content string, option
 
 		AssistantID: assistantID,
 
+		KnowledgeIDs: options.KnowledgeIDs,
+
 	}
 
 	var message Message
@@ -222,6 +228,169 @@ func (c *Client) SendMessage(ctx context.Context, chatID, content string, option
 	err := c.requestJSON(ctx, http.MethodPost, "/chat/"+chatID+"/message", payload, &message)
 
 	return message, err
+
+}
+
+// UploadKnowledge is Boodle's three steps: allocate a row and a presigned URL, PUT the bytes there, then confirm so Boodle processes them.
+func (c *Client) UploadKnowledge(ctx context.Context, name string, data []byte) (Knowledge, error) {
+
+	var started struct {
+
+		Knowledge Knowledge `json:"knowledge"`
+		UploadURL string `json:"uploadUrl"`
+
+	}
+
+	err := c.requestJSON(ctx, http.MethodPost, "/knowledge/upload", map[string]any{"context": "Chat", "fileName": strings.ReplaceAll(url.QueryEscape(name), "+", "%20"), "fileSize": len(data), "name": name}, &started)
+
+	if err != nil {
+
+		return Knowledge{}, err
+
+	}
+
+	confirm := func(result, reason string) (Knowledge, error) {
+
+		payload := map[string]any{"knowledgeId": started.Knowledge.ID, "uploadResult": result}
+
+		if reason != "" {
+
+			payload["errorReason"] = reason
+
+		}
+
+		var item Knowledge
+
+		err := c.requestJSON(ctx, http.MethodPost, "/knowledge/upload/"+started.Knowledge.ID, payload, &item)
+
+		return item, err
+
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, started.UploadURL, bytes.NewReader(data))
+
+	if err != nil {
+
+		return Knowledge{}, err
+
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+
+	// a browser's PUT of a File carries its type, which Boodle's processing reads
+	if kind := mime.TypeByExtension(filepath.Ext(name)); kind != "" {
+
+		req.Header.Set("Content-Type", kind)
+
+	}
+
+	res, err := c.http.Do(req)
+
+	if err == nil {
+
+		res.Body.Close()
+
+		if res.StatusCode > 299 {
+
+			err = fmt.Errorf("upload of %s failed: %s", name, res.Status)
+
+		}
+
+	}
+
+	if err != nil {
+
+		confirm("Error", err.Error())
+
+		return Knowledge{}, err
+
+	}
+
+	return confirm("Success", "")
+
+}
+
+// AttachKnowledge adds uploaded files to a chat.
+func (c *Client) AttachKnowledge(ctx context.Context, chatID string, ids []string) error {
+
+	if len(ids) == 0 {
+
+		return nil
+
+	}
+
+	_, err := c.request(ctx, http.MethodPost, "/chat/"+chatID+"/knowledge", map[string]any{"knowledgeIds": ids})
+
+	return err
+
+}
+
+// WaitKnowledge returns once Boodle has processed every file attached to the chat; until then the model cannot see them.
+func (c *Client) WaitKnowledge(ctx context.Context, chatID string, ids []string, limit time.Duration) error {
+
+	deadline := time.Now().Add(limit)
+
+	for {
+
+		detail, err := c.GetChat(ctx, chatID)
+
+		if err != nil {
+
+			return err
+
+		}
+
+		states := map[string]Knowledge{}
+
+		for _, item := range detail.Knowledge {
+
+			states[item.ID] = item
+
+		}
+
+		waiting := []string{}
+
+		for _, id := range ids {
+
+			item, attached := states[id]
+
+			switch {
+
+			case item.State == "Failed" || item.State == "Error":
+
+				return fmt.Errorf("Boodle could not process %s", item.Name)
+
+			case !attached || item.State != "Active":
+
+				waiting = append(waiting, cmp.Or(item.Name, id))
+
+			}
+
+		}
+
+		if len(waiting) == 0 {
+
+			return nil
+
+		}
+
+		if time.Now().After(deadline) {
+
+			return fmt.Errorf("Boodle was still processing %s after %s", strings.Join(waiting, ", "), limit)
+
+		}
+
+		select {
+
+		case <-time.After(2 * time.Second):
+
+		case <-ctx.Done():
+
+			return ctx.Err()
+
+		}
+
+	}
 
 }
 

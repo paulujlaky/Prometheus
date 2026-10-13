@@ -532,7 +532,7 @@ func (s *ChatSession) Send(ctx context.Context, content string, options SendOpti
 
 	}
 
-	sent, err := s.client.SendMessage(ctx, s.ChatID, text, SendOptions{AssistantID: assistantID})
+	sent, err := s.client.SendMessage(ctx, s.ChatID, text, SendOptions{AssistantID: assistantID, KnowledgeIDs: options.KnowledgeIDs})
 
 	if err != nil {
 

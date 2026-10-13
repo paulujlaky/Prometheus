@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"boombox/agent/protocol"
 	"boombox/store"
 )
 
@@ -619,8 +618,7 @@ type outcome struct {
 
 	err error
 
-	turns int
-	misses int
+	steps int
 	errors int
 	seconds float64
 
@@ -770,15 +768,9 @@ func run(e *env, s scenario) (result outcome) {
 
 			switch one.Kind {
 
-			case "assistant":
+			case "step":
 
-				result.turns++
-
-				if len(protocol.ParseActions(one.Text)) == 0 {
-
-					result.misses++
-
-				}
+				result.steps++
 
 			case "error":
 
@@ -941,13 +933,13 @@ func main() {
 
 			}
 
-			fmt.Printf("%-15s trial %d  %5.0fs  turns %2d  misses %d  errors %d  %s\n", s.name, trial, result.seconds, result.turns, result.misses, result.errors, status)
+			fmt.Printf("%-15s trial %d  %5.0fs  steps %2d  errors %d  %s\n", s.name, trial, result.seconds, result.steps, result.errors, status)
 
 		}
 
 	}
 
-	passed, turns, seconds := 0, 0, 0.0
+	passed, steps, seconds := 0, 0, 0.0
 
 	for _, result := range results {
 
@@ -957,11 +949,11 @@ func main() {
 
 		}
 
-		turns += result.turns
+		steps += result.steps
 		seconds += result.seconds
 
 	}
 
-	fmt.Printf("\n%d of %d passed, %d turns, %.0fs\n", passed, len(results), turns, seconds)
+	fmt.Printf("\n%d of %d passed, %d steps, %.0fs\n", passed, len(results), steps, seconds)
 
 }
