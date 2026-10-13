@@ -8,6 +8,7 @@ import { colorOf, EveryoneGlyph, Glyph, GroupGlyph } from "../../Components/Glyp
 import { withMentions } from "../../Components/Glyph/Mention";
 import { Bar, Confirm } from "../../Components/Layout";
 import { Memo } from "../../Components/Memo";
+import { RichCard } from "../../Components/RichCard";
 
 import type { Agent, GroupChat, GroupMessage } from "../../Lib/api";
 
@@ -78,7 +79,7 @@ export class Group extends Component<GroupProps, { confirming: boolean }> {
           {message.author}
 
         </span>
-        <Memo text={message.text} />
+        {message.kind === "card" ? <RichCard text={message.text} onSend={author ? (text) => this.props.onSend(`@${author.name} ${text}`) : undefined} /> : <Memo text={message.text} />}
 
       </div>
 

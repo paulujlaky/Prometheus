@@ -8,6 +8,7 @@ import { Glyph } from "../../Components/Glyph/Glyph";
 import { withMentions } from "../../Components/Glyph/Mention";
 import { Bar } from "../../Components/Layout";
 import { Memo } from "../../Components/Memo";
+import { RichCard } from "../../Components/RichCard";
 
 import { parseQuestion } from "../../Lib/protocol";
 import { AgentsContext } from "../../App/context";
@@ -186,6 +187,10 @@ export class Chat extends Component<ChatProps> {
       case "say":
 
         return <Memo key={item.key} text={item.text} className="text-[17px] text-fg/80" />;
+
+      case "card":
+
+        return <RichCard key={item.key} text={item.text} onSend={this.props.onSend} />;
 
       case "notify":
 

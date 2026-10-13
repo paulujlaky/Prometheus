@@ -321,6 +321,8 @@ export class Details extends Component<DetailsProps, DetailsState> {
 
             {this.renderLook()}
 
+            {agent.automatic && <span className="-mt-6 text-[11px] text-dim">Automatically created</span>}
+
             <Section title="Description">
 
               <textarea rows={3} value={this.state.persona} aria-label="Who it is" onChange={(event) => { const persona = event.target.value; this.setState({ persona }); this.saver.queue("persona", () => this.patch({ persona })); }} className={inputClass} />

@@ -17,8 +17,8 @@ import (
 	"boombox/agent/tools"
 	"boombox/config"
 	"boombox/features"
-	"boombox/store"
 	"boombox/sdk"
+	"boombox/store"
 )
 
 var maxSteps = config.Int("PTS_MAX_STEPS", 60)
@@ -37,7 +37,7 @@ const (
 const StoppedText = "Stopped by the user."
 
 // verbs whose output the model has to see before it can honestly report
-var looking = map[protocol.Verb]bool{"run": true, "read": true, "grep": true, "ls": true, "open": true, "look": true, "click": true, "press": true, "tab": true, "submit": true, "handoff": true, "ask": true}
+var looking = map[protocol.Verb]bool{"run": true, "read": true, "grep": true, "ls": true, "open": true, "look": true, "click": true, "press": true, "tab": true, "submit": true, "handoff": true, "ask": true, "create_agent": true}
 
 var errAborted = errors.New("aborted")
 
@@ -68,16 +68,15 @@ func newRunID() string {
 
 }
 
-// botHash differs in form from the TypeScript server's, so an agent moved from it mints its bot once more.
 func botHash(modelID, instructions string) string {
 
 	sum := sha256.Sum256([]byte(modelID + "\n" + instructions))
 
-	return "s" + hex.EncodeToString(sum[:12])
+	return fmt.Sprintf("s%d:%s", protocol.GuideVersion, hex.EncodeToString(sum[:12]))
 
 }
 
-// ensureBot re-mints the agent's bot when its persona or model changes, or when the bot is gone; memory rides in each task instead.
+// Memory rides in each task, so re-minting for a new guide, model or persona preserves it.
 func ensureBot(ctx context.Context, st *store.Store, client *sdk.Client, agent store.Agent) (string, error) {
 
 	instructions := protocol.BotInstructions(agent.Name, agent.Persona)
@@ -128,16 +127,16 @@ func ensureBot(ctx context.Context, st *store.Store, client *sdk.Client, agent s
 
 	}
 
-	// the old bot is dead weight in the account, but losing it is not worth failing the run
-	if agent.BotDraftID != "" {
-
-		client.DeleteCustomBot(ctx, agent.BotDraftID)
-
-	}
-
 	if err := st.SaveBot(agent.ID, created.Draft.ID, published.Published.ID, hash); err != nil {
 
 		return "", err
+
+	}
+
+	// Keep the previous bot until its replacement is safely stored.
+	if agent.BotDraftID != "" {
+
+		client.DeleteCustomBot(ctx, agent.BotDraftID)
 
 	}
 
@@ -245,6 +244,54 @@ func (r *run) step(action protocol.Action) (protocol.Result, error) {
 	fail := func(text string) protocol.Result { return protocol.Result{Verb: action.Verb, OK: false, Text: text} }
 
 	switch action.Verb {
+
+	case "create_agent":
+
+		spec, err := protocol.ParseAgentSpec(body)
+
+		if err != nil {
+
+			return fail(err.Error()), nil
+
+		}
+
+		if r.control.CreateAgent == nil {
+
+			return fail("Agent creation is unavailable in this runner"), nil
+
+		}
+
+		created, err := r.control.CreateAgent(spec)
+
+		if err != nil {
+
+			return fail(err.Error()), nil
+
+		}
+
+		state := "idle"
+
+		if spec.Task != "" {
+
+			state = "initial task queued"
+
+		}
+
+		return pass(fmt.Sprintf("created agent %d: @%s (%s)", created.ID, created.Name, state)), nil
+
+	case "card":
+
+		_, err := protocol.ParseCard(body)
+
+		if err != nil {
+
+			return fail(err.Error()), nil
+
+		}
+
+		r.record(store.KindCard, body)
+
+		return pass("shown to the user"), nil
 
 	case "say":
 
@@ -592,6 +639,23 @@ func RunAgent(st *store.Store, client *sdk.Client, queued store.Agent, task stri
 	mentionHeld := false
 
 	for turnNo := 1; turnNo <= maxSteps; turnNo++ {
+
+		// newly created agents must be available to the same run's hand-off checks
+		if all, err := st.ListAgents(agent.UserID); err == nil {
+
+			peers = peers[:0]
+
+			for _, other := range all {
+
+				if other.ID != agent.ID {
+
+					peers = append(peers, other)
+
+				}
+
+			}
+
+		}
 
 		notes := control.TakeNotes()
 

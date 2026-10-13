@@ -19,6 +19,7 @@ export interface Agent {
   /** "shape:color" mascot, see Lib/glyph.ts. */
   glyph: string;
   category: string;
+  automatic: boolean;
 
   createdAt: number;
 
@@ -53,6 +54,7 @@ export interface Model {
 export type SocketMessage =
 
   | { type: "event"; event: AgentEvent }
+  | { type: "agent"; agent: Agent }
   | { type: "delta"; agentId: number; text: string }
   | { type: "state"; agentId: number; state: AgentState }
   | { type: "group"; message: GroupMessage }

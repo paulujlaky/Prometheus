@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"boombox/agent"
+	"boombox/agent/protocol"
 	"boombox/features"
 	"boombox/sdk"
 	"boombox/store"
@@ -371,11 +372,31 @@ func scriptedBoodle(t *testing.T, replies []string) (*httptest.Server, *[]string
 
 	writeJSON := func(w http.ResponseWriter, value any) { json.NewEncoder(w).Encode(value) }
 
-	mux.HandleFunc("GET /assistant/custom/drafts", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"total": 0, "entries": []any{}}) })
-	mux.HandleFunc("POST /assistant/custom/draft", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"draft": map[string]any{"id": "draft-1"}}) })
-	mux.HandleFunc("POST /assistant/custom/draft/{id}/publish", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"draft": map[string]any{"id": "draft-1"}, "published": map[string]any{"id": "bot-1"}}) })
-	mux.HandleFunc("POST /chat", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}}) })
-	mux.HandleFunc("GET /chat/{id}", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}, "messages": []any{}}) })
+	mux.HandleFunc("GET /assistant/custom/drafts", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(w, map[string]any{"total": 0, "entries": []any{}})
+
+	})
+	mux.HandleFunc("POST /assistant/custom/draft", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(w, map[string]any{"draft": map[string]any{"id": "draft-1"}})
+
+	})
+	mux.HandleFunc("POST /assistant/custom/draft/{id}/publish", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(w, map[string]any{"draft": map[string]any{"id": "draft-1"}, "published": map[string]any{"id": "bot-1"}})
+
+	})
+	mux.HandleFunc("POST /chat", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}})
+
+	})
+	mux.HandleFunc("GET /chat/{id}", func(w http.ResponseWriter, r *http.Request) {
+
+		writeJSON(w, map[string]any{"chat": map[string]any{"id": "chat-1"}, "messages": []any{}})
+
+	})
 	mux.HandleFunc("DELETE /chat/{id}", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]any{}) })
 	mux.HandleFunc("GET /user/ws-ticket", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`"t"`)) })
 
@@ -623,6 +644,121 @@ func TestMentionOutsideDoneIsHeldOnce(t *testing.T) {
 	if len(*sent) != 2 || !strings.Contains((*sent)[1], "you mentioned @Pen outside it") || !strings.Contains((*sent)[0], "## Other agents\n\nPen") {
 
 		t.Fatalf("sent %q", *sent)
+
+	}
+
+}
+
+func TestRunCreatesAgentAndValidatesCards(t *testing.T) {
+
+	for _, task := range []string{"", "Investigate sources."} {
+
+		label := "idle"
+
+		if task != "" {
+
+			label = "task"
+
+		}
+
+		t.Run(label, func(t *testing.T) {
+
+			st, userID := openStore(t)
+			parent, err := st.CreateAgent(userID, "Scout", "model-1", "Parent instructions")
+
+			if err != nil {
+
+				t.Fatal(err)
+
+			}
+
+			st.WriteMemory(parent, "Parent memory")
+			spec := protocol.AgentSpec{Name: "Analyst", Instructions: "Check sources.", Glyph: "orbit:sky", Task: task}
+			encoded, _ := json.Marshal(spec)
+			card := `{"title":"Sources","blocks":[{"type":"table","columns":["Name"],"rows":[]}],"actions":[{"label":"Continue","reply":"Continue checking sources"}]}`
+			server, sent := scriptedBoodle(t, []string{
+
+				"<create_agent>\n" + string(encoded) + "\n</create_agent>\n<done>Too early.</done>",
+				`<card>{"blocks":[{"type":"link","url":"javascript:alert(1)","label":"Bad"}]}</card><say>Should not run</say>`,
+				"<card>" + card + "</card><done>@Analyst Check the sources.</done>",
+
+			})
+
+			defer server.Close()
+
+			payload := base64.RawURLEncoding.EncodeToString([]byte(`{"userId":"u-1"}`))
+			client, _ := sdk.NewClient(sdk.ClientOptions{Cookie: "d=x." + payload + ".y", BaseURL: server.URL})
+			calls := 0
+			control := agent.RunControl{
+
+				Ctx: context.Background(),
+				TakeNotes: func() []string { return nil },
+				Ask: func(string, agent.WaitKind) agent.Reply { return agent.Allow(false) },
+				Listen: func(agent.RunEvent) {},
+				CreateAgent: func(input protocol.AgentSpec) (*store.Agent, error) {
+
+					calls++
+
+					if input != spec {
+
+						t.Fatalf("spec %+v", input)
+
+					}
+
+					return st.CreateAgentWithOptions(userID, input.Name, "default-model", input.Instructions, store.AgentOptions{Glyph: input.Glyph, Automatic: true})
+
+				},
+
+			}
+
+			end := agent.RunAgent(st, client, *parent, "Create a specialist", control)
+
+			if end.Kind != store.KindDone || calls != 1 || len(*sent) != 3 || !strings.Contains((*sent)[1], "[create_agent ok]") || !strings.Contains((*sent)[1], "Your <done> was held") || !strings.Contains((*sent)[2], "[card failed]") {
+
+				t.Fatalf("end %+v, calls %d, sent %q", end, calls, *sent)
+
+			}
+
+			child, err := st.GetAgent(userID, "Analyst")
+
+			if err != nil || !child.Automatic || child.ModelID != "default-model" || st.ReadMemory(child) != "" {
+
+				t.Fatalf("child %+v: %v", child, err)
+
+			}
+
+			events, _ := st.ListEvents(parent.ID, 100, store.Newest)
+			cards := 0
+
+			for _, event := range events {
+
+				if event.Kind == store.KindSay {
+
+					t.Fatal("block after invalid card ran")
+
+				}
+
+				if event.Kind == store.KindCard {
+
+					cards++
+
+					if event.Text != card {
+
+						t.Fatalf("stored card %s", event.Text)
+
+					}
+
+				}
+
+			}
+
+			if cards != 1 || st.UnreadEvents(parent) != 2 {
+
+				t.Fatalf("cards %d, unread %d", cards, st.UnreadEvents(parent))
+
+			}
+
+		})
 
 	}
 

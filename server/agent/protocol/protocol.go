@@ -9,7 +9,7 @@ import (
 
 type Verb string
 
-var Verbs = []Verb{"ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "tab", "submit", "handoff", "ask", "routine", "say", "notify", "done"}
+var Verbs = []Verb{"ls", "read", "grep", "edit", "write", "delete", "run", "open", "look", "click", "type", "press", "tab", "submit", "handoff", "ask", "routine", "create_agent", "card", "say", "notify", "done"}
 
 // models reach for whatever verb their training favours; accepting the synonym costs nothing
 var aliases = map[string]Verb{

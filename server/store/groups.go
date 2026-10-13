@@ -17,6 +17,7 @@ type GroupMessage struct {
 	AgentID *int64 `json:"agentId"`
 
 	Text string `json:"text"`
+	Kind string `json:"kind"`
 
 	At int64 `json:"at"`
 
@@ -33,7 +34,7 @@ type GroupChat struct {
 
 }
 
-const groupMessageColumns = "id, group_id, author, agent_id, text, at"
+const groupMessageColumns = "id, group_id, author, agent_id, text, at, kind"
 
 const groupChats = "select g.id, g.name, g.created_at, group_concat(m.agent_id) from group_chats g left join group_members m on m.group_id = g.id where g.user_id = ?"
 
@@ -76,7 +77,13 @@ func scanGroupChat(row interface{ Scan(...any) error }) (*GroupChat, error) {
 // AddGroupMessage records a thread message; agentID 0 means it is not from an agent.
 func (s *Store) AddGroupMessage(userID, groupID int64, author string, agentID int64, text string) (GroupMessage, error) {
 
-	message := GroupMessage{GroupID: groupID, Author: author, Text: text, At: now()}
+	return s.AddGroupContent(userID, groupID, author, agentID, "text", text)
+
+}
+
+func (s *Store) AddGroupContent(userID, groupID int64, author string, agentID int64, kind, text string) (GroupMessage, error) {
+
+	message := GroupMessage{GroupID: groupID, Author: author, Text: text, Kind: kind, At: now()}
 
 	var agent any
 
@@ -87,7 +94,7 @@ func (s *Store) AddGroupMessage(userID, groupID int64, author string, agentID in
 
 	}
 
-	err := s.db.QueryRow("insert into group_messages (user_id, group_id, author, agent_id, text, at) values (?, ?, ?, ?, ?, ?) returning id", userID, groupID, author, agent, text, message.At).Scan(&message.ID)
+	err := s.db.QueryRow("insert into group_messages (user_id, group_id, author, agent_id, kind, text, at) values (?, ?, ?, ?, ?, ?, ?) returning id", userID, groupID, author, agent, kind, text, message.At).Scan(&message.ID)
 
 	return message, err
 
@@ -113,7 +120,7 @@ func (s *Store) ListGroupMessages(userID, groupID int64, limit int, before int64
 		var message GroupMessage
 		var agentID sql.NullInt64
 
-		if err := rows.Scan(&message.ID, &message.GroupID, &message.Author, &agentID, &message.Text, &message.At); err != nil {
+		if err := rows.Scan(&message.ID, &message.GroupID, &message.Author, &agentID, &message.Text, &message.At, &message.Kind); err != nil {
 
 			return nil, err
 

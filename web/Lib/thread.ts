@@ -18,6 +18,7 @@ export type Item =
   | { kind: "user"; key: string; text: string }
   | { kind: "note"; key: string; text: string }
   | { kind: "say"; key: string; text: string }
+  | { kind: "card"; key: string; text: string }
   | { kind: "notify"; key: string; text: string }
   | { kind: "work"; key: string; steps: Step[]; seconds: number; live: boolean }
   | { kind: "page"; key: string; url: string; title: string }
@@ -28,7 +29,7 @@ export type Item =
   | { kind: "done"; key: string; text: string }
   | { kind: "error"; key: string; text: string };
 
-const RESULT_HEAD = /^\[([a-z]+) (ok|failed)\]$/gm;
+const RESULT_HEAD = /^\[([a-z_]+) (ok|failed)\]$/gm;
 const PAGE_VERBS = new Set<Verb>(["open", "look", "click", "press", "tab", "submit", "handoff"]);
 
 /** The title, or for a routine the agent left untitled, the task's first line. */
@@ -134,6 +135,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
           break;
 
         case "say":
+        case "card":
         case "notify":
 
           items.push({ kind: event.kind, key, text: event.text });
@@ -143,7 +145,7 @@ export function buildItems(events: AgentEvent[], busy: boolean): Item[] {
 
           // says get results too, so they stay in `pending` to keep results lined up with their blocks
           pending = parseActions(event.text).filter((action) => action.verb !== "done").map((action) => ({ verb: action.verb, label: action.label || `${action.verb} ${action.path}`.trim(), ok: null, detail: "" }));
-          steps.push(...pending.filter((step) => step.verb !== "say" && step.verb !== "notify"));
+          steps.push(...pending.filter((step) => step.verb !== "say" && step.verb !== "notify" && step.verb !== "card"));
           break;
 
         case "result": {

@@ -16,10 +16,11 @@ import (
 
 	"boombox/agent"
 	"boombox/agent/browser"
+	"boombox/agent/protocol"
 	"boombox/config"
 	"boombox/features"
-	"boombox/store"
 	"boombox/sdk"
+	"boombox/store"
 
 	"github.com/coder/websocket"
 )
@@ -603,6 +604,73 @@ func containsID(ids []int64, id int64) bool {
 
 func (s *Server) startRun(queued store.Agent, task string, control agent.RunControl, origin *features.Origin) {
 
+	control.CreateAgent = func(spec protocol.AgentSpec) (*store.Agent, error) {
+
+		model, err := s.defaultModel(control.Ctx, queued.UserID)
+
+		if err != nil {
+
+			return nil, err
+
+		}
+
+		created, err := s.st.CreateAgentWithOptions(queued.UserID, spec.Name, model, spec.Instructions, store.AgentOptions{
+
+			Glyph: spec.Glyph,
+			Category: spec.Category,
+			Automatic: true,
+
+		})
+
+		if err != nil {
+
+			return nil, err
+
+		}
+
+		s.hub.publish(created.UserID, map[string]any{"type": "agent", "agent": s.agentView(created)})
+
+		if spec.Task != "" {
+
+			s.queue.Enqueue(*created, spec.Task, nil)
+
+		}
+
+		return created, nil
+
+	}
+
+	listen := control.Listen
+	control.Listen = func(event agent.RunEvent) {
+
+		listen(event)
+
+		if event.Event.Kind != store.KindCard || origin == nil || origin.Direct {
+
+			return
+
+		}
+
+		if origin.Group != 0 {
+
+			if _, err := s.st.GetGroupChat(queued.UserID, origin.Group); err != nil {
+
+				return
+
+			}
+
+		}
+
+		message, err := s.st.AddGroupContent(queued.UserID, origin.Group, queued.Name, queued.ID, "card", event.Event.Text)
+
+		if err == nil {
+
+			s.hub.publish(queued.UserID, map[string]any{"type": "group", "message": message})
+
+		}
+
+	}
+
 	client, err := s.Boodle(queued.UserID)
 
 	if err != nil {
@@ -671,6 +739,7 @@ func (s *Server) agentView(found *store.Agent) map[string]any {
 		"persona": found.Persona,
 		"glyph": found.Glyph,
 		"category": found.Category,
+		"automatic": found.Automatic,
 		"createdAt": found.CreatedAt,
 
 		"state": s.queue.State(found.ID),

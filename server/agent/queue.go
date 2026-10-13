@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"boombox/agent/protocol"
 	"boombox/config"
 	"boombox/features"
 	"boombox/store"
@@ -77,6 +78,8 @@ type RunControl struct {
 	Ask func(question string, kind WaitKind) Reply
 
 	Listen RunListener
+
+	CreateAgent func(protocol.AgentSpec) (*store.Agent, error)
 
 }
 

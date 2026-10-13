@@ -13,6 +13,7 @@ const (
 	KindAssistant EventKind = "assistant"
 	KindResult EventKind = "result"
 	KindSay EventKind = "say"
+	KindCard EventKind = "card"
 	KindNotify EventKind = "notify"
 	KindAsk EventKind = "ask"
 	KindQuestion EventKind = "question"
@@ -175,7 +176,7 @@ func (s *Store) readMark(userID int64, key string) int64 {
 // UnreadEvents counts what the agent said since its chat was last open: says, and every done but a "wait".
 func (s *Store) UnreadEvents(agent *Agent) int64 {
 
-	return s.count("select count(*) from events where agent_id = ? and id > ? and (kind = 'say' or (kind = 'done' and lower(trim(text, ' .!' || char(9, 10, 13))) != 'wait'))", agent.ID, s.readMark(agent.UserID, "read:agent:"+itoa(agent.ID)))
+	return s.count("select count(*) from events where agent_id = ? and id > ? and (kind in ('say', 'card') or (kind = 'done' and lower(trim(text, ' .!' || char(9, 10, 13))) != 'wait'))", agent.ID, s.readMark(agent.UserID, "read:agent:"+itoa(agent.ID)))
 
 }
 

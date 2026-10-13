@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Conversation card",
+  "description": "At most 64 KiB JSON, 100 total blocks, and three nested section levels. Table rows match their columns; field names are unique. Actions and forms send ordinary user messages without pausing the run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["blocks"],
+  "properties": {
+    "title": { "type": "string" },
+    "icon": { "$ref": "#/$defs/icon" },
+    "blocks": { "$ref": "#/$defs/blocks" },
+    "actions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "reply"],
+        "properties": {
+          "label": { "$ref": "#/$defs/text" },
+          "reply": { "$ref": "#/$defs/text" },
+          "icon": { "$ref": "#/$defs/icon" }
+        }
+      }
+    },
+    "fields": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "label"],
+        "properties": {
+          "name": { "$ref": "#/$defs/text" },
+          "label": { "$ref": "#/$defs/text" },
+          "placeholder": { "type": "string" },
+          "required": { "type": "boolean" },
+          "multiline": { "type": "boolean" }
+        }
+      }
+    },
+    "submit": { "type": "string" }
+  },
+  "$defs": {
+    "icon": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(?:[a-z][a-z0-9]*(?:-[a-z0-9]+)*)?$",
+      "description": "Optional Lucide icon slug on a card, block or action. Name the object/action in lowercase kebab-case (e.g. calendar-days); discover names on demand at https://lucide.dev/icons/?search=YOUR_TERM. Unknown names fall back to circle. Icons inherit app size, stroke and color; retain text labels and use sparingly."
+    },
+    "text": { "type": "string", "pattern": "\\S" },
+    "url": { "type": "string", "format": "uri", "pattern": "^https?://[^/@?#\\s]+(?:[/?#]|$)" },
+    "strings": { "type": "array", "items": { "type": "string" }, "maxItems": 100 },
+    "blocks": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/block" } },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["text", "list", "table", "metric", "image", "link", "section"] },
+        "icon": { "$ref": "#/$defs/icon" },
+        "text": { "type": "string" },
+        "items": { "$ref": "#/$defs/strings" },
+        "columns": { "type": "array", "minItems": 1, "maxItems": 12, "items": { "type": "string" } },
+        "rows": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/strings" } },
+        "label": { "type": "string" },
+        "value": { "type": "string" },
+        "detail": { "type": "string" },
+        "url": { "$ref": "#/$defs/url" },
+        "alt": { "type": "string" },
+        "title": { "type": "string" },
+        "blocks": { "$ref": "#/$defs/blocks" }
+      },
+      "oneOf": [
+        { "properties": { "type": { "const": "text" }, "text": { "$ref": "#/$defs/text" } }, "required": ["text"] },
+        { "properties": { "type": { "const": "list" }, "items": { "minItems": 1 } }, "required": ["items"] },
+        { "properties": { "type": { "const": "table" } }, "required": ["columns", "rows"] },
+        { "properties": { "type": { "const": "metric" }, "label": { "$ref": "#/$defs/text" }, "value": { "$ref": "#/$defs/text" } }, "required": ["label", "value"] },
+        { "properties": { "type": { "const": "image" }, "alt": { "$ref": "#/$defs/text" } }, "required": ["url", "alt"] },
+        { "properties": { "type": { "const": "link" }, "label": { "$ref": "#/$defs/text" } }, "required": ["url", "label"] },
+        { "properties": { "type": { "const": "section" } }, "required": ["blocks"] }
+      ],
+      "if": { "properties": { "type": { "const": "section" } } },
+      "else": { "not": { "required": ["blocks"] } }
+    }
+  }
+}

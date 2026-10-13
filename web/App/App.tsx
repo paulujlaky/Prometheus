@@ -363,12 +363,17 @@ export class App extends Component<{}, AppState> {
 
         this.append("events", message.event.agentId, message.event);
 
-        if (message.event.kind === "say" || (message.event.kind === "done" && !isWaiting(message.event.text))) {
+        if (message.event.kind === "say" || message.event.kind === "card" || (message.event.kind === "done" && !isWaiting(message.event.text))) {
 
           this.onMessage({ agent: message.event.agentId });
 
         }
 
+        return;
+
+      case "agent":
+
+        this.setState((state) => ({ agents: [...state.agents.filter((agent) => agent.id !== message.agent.id), message.agent].sort((a, b) => a.name.localeCompare(b.name)) }));
         return;
 
       case "state":
@@ -558,8 +563,7 @@ export class App extends Component<{}, AppState> {
 
           <div className="flex flex-col gap-3 text-center text-[13px] leading-relaxed text-dim">
 
-            <p className="m-0">Paste the Cookie header from any box.boodle.ai request in your browser's dev tools. Your agents think on your own Boodle account.</p>
-            <p className="m-0">Your cookie is stored on this server so agents can work while you are away. Only connect if you trust whoever runs it.</p>
+            <p className="m-0">Paste the Cookie header from any box.boodle.ai request in dev tools. Your agents use this Boodle account.</p>
             <button type="button" onClick={this.signOut} className="mt-2 text-[14px] text-fg">Sign out</button>
 
           </div>

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode/utf8"
 
 	"boombox/glyph"
 )
@@ -25,18 +27,19 @@ type Agent struct {
 	// Glyph is "shape:color"; Category is the sidebar heading it sits under, empty for none.
 	Glyph string
 	Category string
+	Automatic bool
 
 	CreatedAt int64
 
 }
 
-const agentColumns = "select id, user_id, name, model_id, persona, coalesce(bot_draft_id, ''), coalesce(bot_assistant_id, ''), coalesce(bot_hash, ''), glyph, category, created_at from agents"
+const agentColumns = "select id, user_id, name, model_id, persona, coalesce(bot_draft_id, ''), coalesce(bot_assistant_id, ''), coalesce(bot_hash, ''), glyph, category, automatic, created_at from agents"
 
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 
 	var agent Agent
 
-	err := row.Scan(&agent.ID, &agent.UserID, &agent.Name, &agent.ModelID, &agent.Persona, &agent.BotDraftID, &agent.BotAssistantID, &agent.BotHash, &agent.Glyph, &agent.Category, &agent.CreatedAt)
+	err := row.Scan(&agent.ID, &agent.UserID, &agent.Name, &agent.ModelID, &agent.Persona, &agent.BotDraftID, &agent.BotAssistantID, &agent.BotHash, &agent.Glyph, &agent.Category, &agent.Automatic, &agent.CreatedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
 
@@ -56,9 +59,44 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 
 func (s *Store) CreateAgent(userID int64, agentName, modelID, persona string) (*Agent, error) {
 
+	return s.CreateAgentWithOptions(userID, agentName, modelID, persona, AgentOptions{})
+
+}
+
+type AgentOptions struct {
+
+	Glyph string
+	Category string
+	Automatic bool
+
+}
+
+func (s *Store) CreateAgentWithOptions(userID int64, agentName, modelID, persona string, options AgentOptions) (*Agent, error) {
+
+	agentName = strings.TrimSpace(agentName)
+	options.Category = strings.TrimSpace(options.Category)
+
 	if !name.MatchString(agentName) {
 
 		return nil, errors.New("Agent names start with a letter and use up to 32 letters, digits, spaces, - or _")
+
+	}
+
+	if strings.TrimSpace(modelID) == "" || utf8.RuneCountInString(options.Category) > 32 {
+
+		return nil, errors.New("A model is required; categories are at most 32 characters")
+
+	}
+
+	if options.Glyph == "" {
+
+		options.Glyph = glyph.Random()
+
+	}
+
+	if !glyph.Valid(options.Glyph) {
+
+		return nil, errors.New("glyph must be shape:color from the known sets")
 
 	}
 
@@ -77,7 +115,7 @@ func (s *Store) CreateAgent(userID int64, agentName, modelID, persona string) (*
 
 	}
 
-	row := s.db.QueryRow("insert into agents (user_id, name, model_id, persona, glyph, created_at) values (?, ?, ?, ?, ?, ?) returning id", userID, agentName, modelID, persona, glyph.Random(), now())
+	row := s.db.QueryRow("insert into agents (user_id, name, model_id, persona, glyph, category, automatic, created_at) values (?, ?, ?, ?, ?, ?, ?, ?) returning id", userID, agentName, modelID, persona, options.Glyph, options.Category, options.Automatic, now())
 
 	var id int64
 

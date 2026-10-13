@@ -51,6 +51,7 @@ const schema = `
     bot_hash text,
     glyph text not null default '',
     category text not null default '',
+    automatic integer not null default 0,
     created_at integer not null,
     unique (user_id, name)
   );
@@ -118,6 +119,7 @@ const schema = `
     text text not null,
     at integer not null,
     group_id integer not null default 0,
+    kind text not null default 'text',
     user_id integer not null references users(id) on delete cascade
   );
 
@@ -167,7 +169,75 @@ func Open(home string) (*Store, error) {
 
 	}
 
-	return &Store{Home: home, db: db}, nil
+	st := &Store{Home: home, db: db}
+
+	for _, migration := range []struct {
+
+		table string
+		column string
+		definition string
+
+	}{
+
+		{"agents", "automatic", "integer not null default 0"},
+		{"group_messages", "kind", "text not null default 'text'"},
+
+	} {
+
+		if err := st.addColumn(migration.table, migration.column, migration.definition); err != nil {
+
+			db.Close()
+
+			return nil, err
+
+		}
+
+	}
+
+	return st, nil
+
+}
+
+func (s *Store) addColumn(table, column, definition string) error {
+
+	rows, err := s.db.Query("pragma table_info(" + table + ")")
+
+	if err != nil {
+
+		return err
+
+	}
+
+	found := false
+
+	for rows.Next() {
+
+		var id, required, primary int
+		var field, kind string
+		var value any
+
+		if err := rows.Scan(&id, &field, &kind, &required, &value, &primary); err != nil {
+
+			rows.Close()
+
+			return err
+
+		}
+
+		found = found || field == column
+
+	}
+
+	err = rows.Err()
+	rows.Close()
+
+	if err != nil || found {
+
+		return err
+
+	}
+
+	return s.exec("alter table " + table + " add column " + column + " " + definition)
 
 }
 

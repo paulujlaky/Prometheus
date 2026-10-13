@@ -61,6 +61,14 @@ body {
 
 }
 
+.overflow-y-auto,
+.overflow-auto,
+textarea {
+
+  scrollbar-gutter: stable;
+
+}
+
 /* Safari ignores scrollbar-color, so it gets the same look the long way */
 ::-webkit-scrollbar {
 
