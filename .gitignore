@@ -1,9 +1,15 @@
 node_modules/
+
 .env
+
 *.log
 dist/
 bin/
+
 .DS_Store
 _docs
+
+bun.lock
+go.sum
 
 CLAUDE.md
