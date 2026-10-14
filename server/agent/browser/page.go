@@ -459,11 +459,26 @@ func (p *tabPage) wheel(ctx context.Context, x, y, dx, dy float64) error {
 
 	}
 
-	_, err := call(ctx, p.s, input.DispatchMouseEvent, input.DispatchMouseEventParams{Type: input.DispatchMouseEventTypeMouseWheel, X: x, Y: y, DeltaX: dx, DeltaY: dy})
+	_, err := call(ctx, p.s, wheelEvent, wheelParams{Type: input.DispatchMouseEventTypeMouseWheel, X: x, Y: y, DeltaX: dx, DeltaY: dy})
 
 	return err
 
 }
+
+// wheelParams always sends both deltas: cdproto's omitempty drops a zero one, and Chromium rejects a wheel without either.
+type wheelParams struct {
+
+	Type input.DispatchMouseEventType `json:"type"`
+
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+
+	DeltaX float64 `json:"deltaX"`
+	DeltaY float64 `json:"deltaY"`
+
+}
+
+var wheelEvent = cdp.Command[wheelParams, cdp.Empty]{Method: input.CommandDispatchMouseEvent}
 
 // drag is something like a hand, for slider captchas: a press, a few steps across, a release.
 func (p *tabPage) drag(ctx context.Context, x, y, toX, toY float64) error {

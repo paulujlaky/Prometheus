@@ -16,6 +16,7 @@ var MaxHops = config.Int("PTS_MAX_HOPS", 6)
 const (
 	recentMessages = 20
 	recentChars = 600
+	historyChars = 4000
 )
 
 // Origin is the chain one user message starts; every hand-off it causes carries the count forward.
@@ -194,11 +195,22 @@ func GroupTask(agent store.Agent, agents []store.Agent, recent []store.GroupMess
 
 	}
 
-	history := make([]string, len(recent))
+	history := []string{}
+	size := 0
 
-	for i, line := range recent {
+	// newest first, so a long thread loses its oldest messages
+	for i := len(recent) - 1; i >= 0; i-- {
 
-		history[i] = line.Author + ": " + clip(line.Text, recentChars)
+		line := recent[i].Author + ": " + clip(recent[i].Text, recentChars)
+		size += utf8.RuneCountInString(line)
+
+		if size > historyChars && len(history) > 0 {
+
+			break
+
+		}
+
+		history = append([]string{line}, history...)
 
 	}
 

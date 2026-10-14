@@ -297,6 +297,22 @@ func TestGroupRoutesByMentionAndCapsHandoffs(t *testing.T) {
 
 	}
 
+	long := []store.GroupMessage{message("oldest", 0)}
+
+	for i := 0; i < 19; i++ {
+
+		long = append(long, message(fmt.Sprintf("line %d %s", i, strings.Repeat("x", 600)), 0))
+
+	}
+
+	task = features.GroupTask(agents[2], agents, long, message("@Ops check the disk", 0), "Infra")
+
+	if len(task) > 6000 || strings.Contains(task, "oldest") || !strings.Contains(task, "line 18 ") {
+
+		t.Fatalf("long thread keeps only its newest messages: %d characters", len(task))
+
+	}
+
 	if !features.IsWaiting(" Wait. ") || features.IsWaiting("Waited for Probe, then wrote the haiku.") {
 
 		t.Fatal("wait is recognised exactly")

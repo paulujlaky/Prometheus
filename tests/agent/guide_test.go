@@ -162,3 +162,69 @@ func TestGuideVersionRemintsExistingBotsOnceAndRetriesFailure(t *testing.T) {
 	}
 
 }
+
+func TestTaskMessageLimitsWhatAnAgentCarriesOver(t *testing.T) {
+
+	recent := []string{"- oldest task"}
+
+	for i := 0; i < 10; i++ {
+
+		recent = append(recent, fmt.Sprintf("- task %d %s", i, strings.Repeat("r", 590)))
+
+	}
+
+	agents := []string{}
+
+	for i := 0; i < 40; i++ {
+
+		agents = append(agents, fmt.Sprintf("Agent%d", i))
+
+	}
+
+	memory := strings.Repeat("a remembered line\n", 2000) + "the newest line"
+
+	message := protocol.TaskMessage(protocol.TaskContext{
+
+		User: strings.Repeat("u", 20000),
+		Memory: memory,
+		Recent: recent,
+		Agents: agents,
+		Now: "now",
+
+	}, "do the thing")
+
+	if len(message) > 20000 {
+
+		t.Fatalf("task message is %d characters", len(message))
+
+	}
+
+	for _, want := range []string{"<read MEMORY.md> for the rest", "- task 9 ", ", and 16 more", "## Task\n\ndo the thing"} {
+
+		if !strings.Contains(message, want) {
+
+			t.Fatalf("task message is missing %q", want)
+
+		}
+
+	}
+
+	for _, gone := range []string{"oldest task", "the newest line", "Agent30"} {
+
+		if strings.Contains(message, gone) {
+
+			t.Fatalf("task message still carries %q", gone)
+
+		}
+
+	}
+
+	short := protocol.TaskMessage(protocol.TaskContext{Memory: "one line", Recent: recent[:1], Now: "now"}, "hi")
+
+	if strings.Contains(short, "[harness]") || !strings.Contains(short, "oldest task") {
+
+		t.Fatalf("short context is passed through: %q", short)
+
+	}
+
+}

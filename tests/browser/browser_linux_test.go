@@ -349,6 +349,13 @@ func TestWatchedBrowserStreamsAndTakeOverHoldsTheAgent(t *testing.T) {
 
 	}
 
+	// a plain mouse wheel has no horizontal delta, which Chromium still requires on the wire
+	if err := browser.SendInput(cwd, browser.Input{Kind: "scroll", X: 0.5, Y: 0.5, DY: 0.5}); err != nil {
+
+		t.Fatal(err)
+
+	}
+
 	time.Sleep(500 * time.Millisecond)
 
 	select {

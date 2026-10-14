@@ -2,6 +2,7 @@
 package protocol
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -619,6 +620,59 @@ type TaskContext struct {
 
 }
 
+// what a task message carries of the agent's past, so a long-lived agent's first message stays short
+const (
+	userChars = 4000
+	memoryChars = 8000
+	recentChars = 2400
+	maxAgents = 24
+)
+
+// clipDoc keeps a document's head, up to a line break, and says what was left out.
+func clipDoc(text string, limit int, note string) string {
+
+	text = strings.TrimSpace(text)
+	total := utf8.RuneCountInString(text)
+
+	if total <= limit {
+
+		return text
+
+	}
+
+	head := string([]rune(text)[:limit])
+
+	if cut := strings.LastIndexByte(head, '\n'); cut > len(head)/2 {
+
+		head = head[:cut]
+
+	}
+
+	return strings.TrimSpace(head) + fmt.Sprintf("\n\n[harness] Cut at %d of %d characters. %s", utf8.RuneCountInString(head), total, note)
+
+}
+
+// keepRecent drops the oldest lines until the rest fit, always keeping the newest.
+func keepRecent(lines []string, limit int) []string {
+
+	size := 0
+
+	for i := len(lines) - 1; i >= 0; i-- {
+
+		size += utf8.RuneCountInString(lines[i]) + 1
+
+		if size > limit && i < len(lines)-1 {
+
+			return lines[i+1:]
+
+		}
+
+	}
+
+	return lines
+
+}
+
 func section(title, body string) string {
 
 	return "## " + title + "\n\n" + strings.TrimSpace(body)
@@ -632,11 +686,11 @@ func TaskMessage(context TaskContext, task string) string {
 
 	if strings.TrimSpace(context.User) != "" {
 
-		parts = append(parts, section("About the user (USER.md)", context.User))
+		parts = append(parts, section("About the user (USER.md)", clipDoc(context.User, userChars, "The rest is not shown.")))
 
 	}
 
-	memory := context.Memory
+	memory := clipDoc(context.Memory, memoryChars, "<read MEMORY.md> for the rest, then fold it down: merge duplicates and delete what has gone stale.")
 
 	// the edit example assumes a line to FIND, which an empty file does not have
 	if strings.TrimSpace(memory) == "" {
@@ -649,13 +703,22 @@ func TaskMessage(context TaskContext, task string) string {
 
 	if len(context.Recent) > 0 {
 
-		parts = append(parts, section("Recent tasks", strings.Join(context.Recent, "\n")))
+		parts = append(parts, section("Recent tasks", strings.Join(keepRecent(context.Recent, recentChars), "\n")))
 
 	}
 
-	if len(context.Agents) > 0 {
+	if agents := context.Agents; len(agents) > 0 {
 
-		parts = append(parts, section("Other agents", strings.Join(context.Agents, ", ")))
+		more := ""
+
+		if len(agents) > maxAgents {
+
+			more = fmt.Sprintf(", and %d more", len(agents)-maxAgents)
+			agents = agents[:maxAgents]
+
+		}
+
+		parts = append(parts, section("Other agents", strings.Join(agents, ", ")+more))
 
 	}
 
