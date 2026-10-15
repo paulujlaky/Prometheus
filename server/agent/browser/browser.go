@@ -727,6 +727,41 @@ func (b *Browser) start() (*chrome, error) {
 
 	}
 
+	// Chromium runs unsandboxed, so it saves under the profile by guid and only a finished file is copied into the workspace
+	downloads := filepath.Join(profileOf(b.workspace), "Downloads")
+	var named sync.Map
+
+	onEvent(rootSession, browserdomain.DownloadWillBegin, func(event browserdomain.EventDownloadWillBegin) {
+
+		named.Store(event.GUID, event.SuggestedFilename)
+
+	})
+
+	onEvent(rootSession, browserdomain.DownloadProgress, func(event browserdomain.EventDownloadProgress) {
+
+		if event.State == browserdomain.DownloadProgressStateInProgress {
+
+			return
+
+		}
+
+		name, _ := named.LoadAndDelete(event.GUID)
+		suggested, _ := name.(string)
+
+		if event.State == browserdomain.DownloadProgressStateCompleted {
+
+			go b.saveDownload(filepath.Join(downloads, event.GUID), suggested)
+
+		}
+
+	})
+
+	if _, err := call(ctx, rootSession, browserdomain.SetDownloadBehavior, browserdomain.SetDownloadBehaviorParams{Behavior: browserdomain.SetDownloadBehaviorBehaviorAllowAndName, DownloadPath: downloads, EventsEnabled: yes()}); err != nil {
+
+		log.Printf("browser downloads: %v", err)
+
+	}
+
 	// the first page Chromium opens is adopted through the auto-attach above
 	for {
 
@@ -2878,12 +2913,17 @@ var errBlank = errors.New("No page is open yet. Use <open https://...> first.")
 func Look(ctx context.Context, workspace, partText string) (string, error) {
 
 	part := 1
+	shot := false
 
-	if partText = strings.TrimSpace(partText); partText != "" {
+	if partText = strings.TrimSpace(partText); partText == "shot" {
+
+		shot = true
+
+	} else if partText != "" {
 
 		if !digits.MatchString(partText) {
 
-			return "", errors.New("look takes nothing, or the number of a part of a long page: <look 2>")
+			return "", errors.New("look takes nothing, the number of a part of a long page like <look 2>, or shot for a screenshot: <look shot>")
 
 		}
 
@@ -2918,6 +2958,26 @@ func Look(ctx context.Context, workspace, partText string) (string, error) {
 		if isBlank(shown.URL()) {
 
 			return "", errBlank
+
+		}
+
+		if shot {
+
+			image, err := call(ctx, shown.s, page.CaptureScreenshot, page.CaptureScreenshotParams{Format: page.CaptureScreenshotFormatPng})
+
+			if err != nil {
+
+				return "", err
+
+			}
+
+			if err := shell.WriteRegular(filepath.Join(workspace, "screen.png"), string(image.Data)); err != nil {
+
+				return "", err
+
+			}
+
+			return "saved the visible page to screen.png; <view> it to see it", nil
 
 		}
 
@@ -3050,23 +3110,79 @@ func Type(ctx context.Context, workspace, raw, text string) (string, error) {
 
 	}
 
-	target, err := act(b, actionWait*4, func(ctx context.Context, running *chrome) (string, error) {
+	return act(b, actionWait*4, func(ctx context.Context, running *chrome) (string, error) {
 
 		b.mu.Lock()
 		shown := running.page
 		b.mu.Unlock()
 
-		return b.byRef(ctx, shown, raw, func(ref string) error { return shown.fillRef(ctx, ref, text, elementWait) })
+		ref, err := b.byRef(ctx, shown, raw, func(ref string) error { return shown.fillRef(ctx, ref, text, elementWait) })
+
+		if err != nil {
+
+			return "", err
+
+		}
+
+		state := shown.readBack(ctx, ref)
+		message := fmt.Sprintf("typed %d characters into %s; it now holds %q", len(utf16Units(text)), ref, clipText(state.Value, 200))
+
+		if state.Open {
+
+			message += ". Its list of options is open and nothing is chosen yet: <look>, then click the option"
+
+		}
+
+		return message, nil
+
+	})
+
+}
+
+// saveDownload holds the workspace's lane, so the agent's shell cannot swap downloads/ for a link while the file goes in.
+func (b *Browser) saveDownload(from, name string) {
+
+	defer os.Remove(from)
+
+	if name = filepath.Base(name); name == "." || name == ".." || name == string(filepath.Separator) {
+
+		name = "download"
+
+	}
+
+	_, err := shell.InLane(context.Background(), b.workspace, func() (struct{}, error) {
+
+		data, err := os.ReadFile(from)
+
+		if err != nil {
+
+			return struct{}{}, err
+
+		}
+
+		dir := filepath.Join(b.workspace, "downloads")
+
+		if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+
+			return struct{}{}, err
+
+		}
+
+		if stat, err := os.Lstat(dir); err != nil || !stat.IsDir() {
+
+			return struct{}{}, errors.New("downloads is not a folder")
+
+		}
+
+		return struct{}{}, shell.WriteRegular(filepath.Join(dir, name), string(data))
 
 	})
 
 	if err != nil {
 
-		return "", err
+		log.Printf("browser download %s: %v", name, err)
 
 	}
-
-	return fmt.Sprintf("typed %d characters into %s", len(utf16Units(text)), target), nil
 
 }
 

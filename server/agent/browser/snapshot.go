@@ -884,8 +884,51 @@ const fillPrepare = `function (value) {
     selection.addRange(range);
     return "type";
   }
-  return "error:Element is not an <input>, <textarea> or [contenteditable] element";
+  if (element instanceof HTMLSelectElement) {
+    if (element.disabled) return "error:Element is not editable";
+    const want = value.trim().toLowerCase();
+    const option = [...element.options].find(o => o.text.trim().toLowerCase() === want || o.value.toLowerCase() === want);
+    if (!option) return "error:No option \"" + value + "\"; the options are: " + [...element.options].map(o => o.text.trim()).join(" | ");
+    element.focus();
+    option.selected = true;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return "done";
+  }
+  return "error:Element is not an <input>, <textarea>, <select> or [contenteditable] element";
 }`
+
+const fillReadback = `function () {
+  let element = this.nodeType === 1 ? this : this.parentElement;
+  if (element instanceof HTMLLabelElement && element.control) element = element.control;
+  if (!element || !element.isConnected) return { value: "", open: false };
+  const value = element instanceof HTMLSelectElement ? (element.selectedOptions[0]?.text ?? "") : "value" in element ? String(element.value) : element.innerText;
+  return { value, open: element.getAttribute("aria-expanded") === "true" };
+}`
+
+type filled struct {
+
+	Value string `json:"value"`
+	Open bool `json:"open"`
+
+}
+
+// readBack says what a field holds after a fill, since a combobox shows typed text it has not chosen.
+func (p *tabPage) readBack(ctx context.Context, ref string) filled {
+
+	object, ok := p.element(ctx, ref)
+
+	if !ok {
+
+		return filled{}
+
+	}
+
+	state, _ := callOn[filled](ctx, p, object, fillReadback)
+
+	return state
+
+}
 
 // fillRef replaces a field's text the way Playwright's fill did: select it all, then insert, or delete for empty text.
 func (p *tabPage) fillRef(ctx context.Context, ref, text string, limit time.Duration) error {
